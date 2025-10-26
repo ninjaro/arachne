@@ -22,8 +22,7 @@
  * SOFTWARE.
  */
 
-#include "arachne.hpp"
+#ifndef ARACHNE_ARACHNE_HPP
+#define ARACHNE_ARACHNE_HPP
 
-int main() {
-    return 0;
-}
+#endif //ARACHNE_ARACHNE_HPP
