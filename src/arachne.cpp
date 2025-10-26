@@ -23,7 +23,3 @@
  */
 
 #include "arachne.hpp"
-
-int main() {
-    return 0;
-}

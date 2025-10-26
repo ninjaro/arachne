@@ -43,6 +43,7 @@ cmake-build-debug*/
 build/
 doc/
 cov/
+assets/skip/
 
 CMakeLists.txt.user
 CMakeLists.txt.user.*

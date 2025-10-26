@@ -1,0 +1,46 @@
+name: CodeQL
+
+on:
+  pull_request:
+    branches:
+      - todomaster
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'cpp' ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: manual
+
+      - uses: MarkusJx/googletest-installer@v1.1
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcxxopts-dev
+
+      - name: Build (Debug)
+        run: |
+          cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-debug --parallel $(nproc)
+
+      - name: Build (Release)
+        run: |
+          cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-release --parallel $(nproc)
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3

@@ -9,6 +9,7 @@ find_package(cpr REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
 add_library(arachne_lib STATIC
+    src/arachne.cpp
 )
 target_include_directories(arachne_lib PUBLIC include)
 target_link_libraries(arachne_lib PUBLIC cpr::cpr nlohmann_json::nlohmann_json sqlite3)
