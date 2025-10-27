@@ -3,7 +3,7 @@ name: Checks
 on:
   pull_request:
     branches:
-      - master
+      - todomaster
     paths:
       - 'src/**/*.cpp'
       - 'include/**/*.hpp'

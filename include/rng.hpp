@@ -22,6 +22,19 @@
  * SOFTWARE.
  */
 
-#include "arachne.hpp"
+#ifndef ARACHNE_RNG_HPP
+#define ARACHNE_RNG_HPP
 
-int main() { return 0; }
+#include <random>
+#include <string>
+
+// Shared RNG (single instance for the whole program).
+std::mt19937_64& rng();
+
+/**
+ * @brief Return exactly @p n hex characters (lowercase), zero-padded by
+ * construction. Example: random_hex(8) -> "deadbeef".
+ */
+std::string random_hex(std::size_t n);
+
+#endif // ARACHNE_RNG_HPP

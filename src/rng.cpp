@@ -22,6 +22,22 @@
  * SOFTWARE.
  */
 
-#include "arachne.hpp"
+#include "rng.hpp"
 
-int main() { return 0; }
+std::mt19937_64& rng() {
+    static std::mt19937_64 gen { std::random_device {}() };
+    return gen;
+}
+
+std::string random_hex(const std::size_t n) {
+    static constexpr char digits[] = "0123456789abcdef";
+    static thread_local std::uniform_int_distribution<int> nibble(0, 15);
+
+    std::string out;
+    out.resize(n);
+    auto& g = rng();
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i] = digits[nibble(g)];
+    }
+    return out;
+}
