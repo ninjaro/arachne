@@ -40,85 +40,60 @@ bool arachne::new_group(std::string name) {
     return inserted;
 }
 
-int arachne::add_ids(
-    std::span<const int> ids, entity_kind kind, std::string name
-) {
-    return 0;
-}
-
-int arachne::add_entity(
-    std::string id_with_prefix, bool force, std::string name
-) {
-    return 0;
-}
-
 bool arachne::flush(entity_kind kind) { return false; }
 
 int arachne::queue_size(const entity_kind kind) const noexcept {
     if (kind == entity_kind::any) {
         std::size_t sum = 0;
-        for (const auto& batch : batches) {
+        for (const auto& batch : main_batches) {
             sum += batch.size();
         }
         return static_cast<int>(sum);
     }
     const auto idx = static_cast<std::size_t>(kind);
-    if (idx >= batches.size()) {
+    if (idx >= main_batches.size()) {
         return 0;
     }
-    return static_cast<int>(batches[idx].size());
+    return static_cast<int>(main_batches[idx].size());
+}
+
+bool arachne::parse_id(const std::string& entity, size_t& pos, int& id) {
+    id = 0;
+    size_t len = 0;
+    try {
+        id = std::stoi(entity.substr(pos), &len);
+    } catch (...) {
+        return false;
+    }
+    if (id < 0 || len == 0 || std::to_string(id).size() != len) {
+        return false;
+    }
+    pos += len;
+    return true;
 }
 
 entity_kind arachne::identify(const std::string& entity) noexcept {
-    if (entity.size() < 2)
-        return entity_kind::unknown;
-
-    size_t i = 0;
-    size_t k = prefixes.find(entity[i++]);
-    if (k == std::string::npos)
-        return entity_kind::unknown;
-
-    int id = 0;
-    size_t n = 0;
-    try {
-        id = std::stoi(entity.substr(i), &n);
-    } catch (...) {
+    if (entity.size() < 2) {
         return entity_kind::unknown;
     }
-    if (id < 0 || n == 0)
-        return entity_kind::unknown;
-    if (std::to_string(id).size() != n)
-        return entity_kind::unknown;
-    i += n;
-
-    if (i == entity.size())
-        return static_cast<entity_kind>(k);
-
-    if (k != 2 || i >= entity.size() || entity[i++] != '-')
-        return entity_kind::unknown;
-    if (i >= entity.size())
-        return entity_kind::unknown;
-
-    char tag = entity[i++];
-    if (tag != 'F' && tag != 'S')
-        return entity_kind::unknown;
-
-    int id2 = 0;
-    size_t n2 = 0;
-    try {
-        id2 = std::stoi(entity.substr(i), &n2);
-    } catch (...) {
+    size_t pos = 0;
+    size_t kind = prefixes.find(entity[pos++]);
+    int id {};
+    if (kind == std::string::npos || !parse_id(entity, pos, id)) {
         return entity_kind::unknown;
     }
-    if (id2 < 0 || n2 == 0)
+    if (pos == entity.size()) {
+        return static_cast<entity_kind>(kind);
+    }
+    if (kind != 2 || pos >= entity.size() || entity[pos++] != '-'
+        || pos >= entity.size()) {
         return entity_kind::unknown;
-    if (std::to_string(id2).size() != n2)
+    }
+    const char tag = entity[pos++];
+    if (tag != 'F' && tag != 'S' || !parse_id(entity, pos, id)
+        || pos != entity.size()) {
         return entity_kind::unknown;
-    i += n2;
-
-    if (i != entity.size())
-        return entity_kind::unknown;
-
+    }
     return tag == 'F' ? entity_kind::form : entity_kind::sense;
 }
 
@@ -138,6 +113,18 @@ std::string arachne::normalize(const int id, const entity_kind kind) {
         idx = 2;
     }
     return prefixes[idx] + std::to_string(id);
+}
+
+int arachne::add_ids(
+    std::span<const int> ids, entity_kind kind, std::string name
+) {
+    return 0;
+}
+
+int arachne::add_entity(
+    std::string id_with_prefix, bool force, std::string name
+) {
+    return 0;
 }
 
 bool arachne::touch_entity(std::string_view id_with_prefix) noexcept {

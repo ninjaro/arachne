@@ -210,9 +210,14 @@ public:
     /// @}
 
 private:
+    static bool parse_id(const std::string& entity, size_t& pos, int& id);
+
     // Queues (batches) per batchable kind; elements are normalized IDs
     // ("Q123", "P45", "L7", "M9", "E2", "L7-F1", "L7-S2").
-    std::array<std::unordered_set<std::string>, batched_kind_count> batches;
+    std::array<std::unordered_set<std::string>, batched_kind_count>
+        main_batches;
+    std::array<std::unordered_set<std::string>, batched_kind_count>
+        extra_batches;
 
     // Groups: group name -> set of entity IDs as added (verbatim; includes
     // "L…-F…"/"L…-S…").

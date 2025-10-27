@@ -14,6 +14,9 @@ find_package(nlohmann_json REQUIRED)
 
 add_library(arachne_lib STATIC
         src/arachne.cpp
+        src/ariadne.cpp
+        src/penelope.cpp
+        src/pheidippides.cpp
         src/rng.cpp
 )
 target_include_directories(arachne_lib PUBLIC include)

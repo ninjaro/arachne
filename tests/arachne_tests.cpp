@@ -40,6 +40,12 @@ TEST(Identify, ValidFormAndSense) {
     EXPECT_EQ(arachne::identify("L77-S2"), K::sense);
 }
 
+TEST(Identify, StrictSyntax) {
+    EXPECT_EQ(arachne::identify("L1-"), entity_kind::unknown);
+    EXPECT_EQ(arachne::identify("L1-X2"), entity_kind::unknown);
+    EXPECT_EQ(arachne::identify("Q1-2"), entity_kind::unknown);
+}
+
 TEST(Identify, InvalidInputs) {
     using K = entity_kind;
     EXPECT_EQ(arachne::identify(""), K::unknown);
@@ -50,6 +56,17 @@ TEST(Identify, InvalidInputs) {
     EXPECT_EQ(arachne::identify("L1-"), K::unknown);
     EXPECT_EQ(arachne::identify("L7-T1"), K::unknown);
     EXPECT_EQ(arachne::identify("L-F1"), K::unknown);
+}
+
+TEST(Identify, RejectsLeadingZeros) {
+    EXPECT_EQ(arachne::identify("Q01"), entity_kind::unknown);
+    EXPECT_EQ(arachne::identify("L01-F1"), entity_kind::unknown);
+    EXPECT_EQ(arachne::identify("L1-F01"), entity_kind::unknown);
+}
+
+TEST(Identify, Bounds) {
+    EXPECT_EQ(arachne::identify("Q2147483647"), entity_kind::item);
+    EXPECT_EQ(arachne::identify("Q2147483648"), entity_kind::unknown);
 }
 
 TEST(Normalize, BasicPrefixes) {
