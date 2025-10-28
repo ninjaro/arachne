@@ -10,6 +10,7 @@ on:
       - 'tests/**/*.cpp'
       - 'readme.md'
       - 'CMakeLists.txt'
+      - '.github/workflows/html.yml'
 
   workflow_dispatch:
 
@@ -30,19 +31,37 @@ jobs:
       - uses: actions/configure-pages@v3
       - uses: MarkusJx/googletest-installer@v1.1
 
-      - name: Install Dependencies
+      - name: Install apt dependencies
         run: |
-          sudo apt-get update 
-          sudo apt-get install -y doxygen graphviz lcov llvm libcxxopts-dev
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libsqlite3-dev \
+            libcxxopts-dev \
+            libcurl4-openssl-dev \
+            cmake g++ git ninja-build
+
+      - name:  Build & install CPR
+        run: |
+          git clone --depth 1 https://github.com/libcpr/cpr.git
+          cmake -S cpr -B cpr/build \
+            -G Ninja \
+            -DCPR_USE_SYSTEM_CURL=ON \
+            -DCPR_BUILD_TESTS=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/deps"
+          cmake --build cpr/build --parallel
+          cmake --install cpr/build
 
       - name: Generate Doxygen
         run: doxygen Doxyfile
 
-#      - name: Build with coverage
-#        run: |
-#          cmake -B build -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DCOVERAGE=ON
-#          cmake --build build --target coverage --parallel $(nproc)
-#
+      - name: Build with coverage
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DCOVERAGE=ON
+          cmake --build build --target coverage --parallel $(nproc)
+
 #      - name: Upload results to Codecov
 #        uses: codecov/codecov-action@v5
 #        with:
@@ -53,15 +72,15 @@ jobs:
 #          name: codecov-umbrella
 #          token: ${{ secrets.CODECOV_TOKEN }}
 #          verbose: true
-#
+
 #      - name: Upload coverage to Codacy
 #        uses: codacy/codacy-coverage-reporter-action@a38818475bb21847788496e9f0fddaa4e84955ba
 #        with:
 #          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
 #          coverage-reports: build/coverage.info
-#
-#      - name: Clean build
-#        run: rm -rf build/
+
+      - name: Clean build
+        run: rm -rf build/
 
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@v1

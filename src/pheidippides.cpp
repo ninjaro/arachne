@@ -32,7 +32,7 @@ network_metrics::network_metrics() {
 }
 
 pheidippides::pheidippides() {
-    session.SetUrl(cpr::Url { opt.url });
+    session.SetUrl(cpr::Url { opt.url() });
     session.SetHeader(
         { { "User-Agent", opt.user_agent }, { "Accept", opt.accept } }
     );
@@ -41,28 +41,53 @@ pheidippides::pheidippides() {
 }
 
 nlohmann::json pheidippides::fetch_json(
-    std::unordered_set<std::string>& batch, const entity_kind kind
+    const std::unordered_set<std::string>& batch, const entity_kind kind
 ) {
     if (batch.empty()) {
         return nlohmann::json::object();
     }
 
-    if (kind != entity_kind::item && kind != entity_kind::property
-        && kind != entity_kind::any) {
+    opt = options {};
+    switch (kind) {
+    case entity_kind::item:
+    case entity_kind::property: {
+        break;
+    };
+    case entity_kind::lexeme: {
+        opt.props_idx = 1;
+        opt.languages.clear();
+        opt.languagefallback = false;
+        opt.normalize = false;
+        break;
+    };
+    case entity_kind::mediainfo: {
+        opt.endpoint_idx = 1;
+        opt.props_idx = 2;
+        break;
+    };
+    case entity_kind::entity_schema: {
+        opt.action_idx = 1;
+        opt.props_idx = 3;
+        opt.normalize = false;
+        break;
+    };
+    default:
         throw std::invalid_argument("fetch_json: unsupported entity kind");
     }
 
     std::vector<std::string> ids;
     ids.reserve(batch.size());
     for (const auto& id : batch) {
-        const auto detected = arachne::identify(id);
-        if (detected == entity_kind::unknown) {
-            throw std::invalid_argument(
-                "fetch_json: invalid entity identifier: " + id
-            );
-        }
-        if (kind != entity_kind::any && detected != kind) {
-            continue;
+        if (kind != entity_kind::entity_schema) {
+            const auto detected = arachne::identify(id);
+            if (detected == entity_kind::unknown) {
+                throw std::invalid_argument(
+                    "fetch_json: invalid entity identifier: " + id
+                );
+            }
+            if (detected != kind) {
+                continue;
+            }
         }
         ids.push_back(id);
     }
@@ -72,22 +97,23 @@ nlohmann::json pheidippides::fetch_json(
     }
 
     nlohmann::json combined = nlohmann::json::object();
-    combined["entities"] = nlohmann::json::object();
 
     for (auto&& chunk : ids | std::views::chunk(opt.batch_threshold)) {
-        auto chunk_vec = std::ranges::to<std::vector<std::string>>(chunk);
+        std::vector<std::string> chunk_vec;
+        for (const auto& value : chunk) {
+            chunk_vec.emplace_back(value);
+        }
         const auto size = chunk_vec.size();
         if (size == 0) {
             continue;
         }
         const std::span<const std::string> batch_info { chunk_vec.data(),
                                                         size };
-        nlohmann::json data = wbgetentities_batch(batch_info);
-        if (data.contains("entities") && data["entities"].is_object()) {
-            for (auto& [key, value] : data["entities"].items()) {
-                combined["entities"][key] = std::move(value);
-            }
+        nlohmann::json data = wbget_batch(batch_info);
+        if (!data.is_object()) {
+            continue;
         }
+        combined.merge_patch(data);
     }
 
     return combined;
@@ -99,7 +125,7 @@ cpr::Parameters
 pheidippides::build_params(const std::string& ids_joined) const {
     return cpr::Parameters { {
         { "action", opt.action },
-        { "props", opt.props },
+        { "props", opt.properties() },
         { "languages", opt.languages },
         { "languagefallback", opt.languagefallback ? "1" : "0" },
         { "normalize", opt.normalize ? "1" : "0" },
@@ -110,11 +136,12 @@ pheidippides::build_params(const std::string& ids_joined) const {
 }
 
 nlohmann::json
-pheidippides::wbgetentities_batch(const std::span<const std::string> ids) {
+pheidippides::wbget_batch(const std::span<const std::string> ids) {
     if (ids.empty()) {
         return nlohmann::json::object();
     }
-    const std::string ids_joined = join_ids(ids);
+    const std::string ids_joined = join_str(ids);
+    session.SetUrl(cpr::Url { opt.url() });
     const auto params = build_params(ids_joined);
     auto r = get_with_retries(params);
     return nlohmann::json::parse(r.text, nullptr, true);
@@ -247,10 +274,33 @@ cpr::Response pheidippides::get_with_retries(const cpr::Parameters& params) {
     }
 }
 
-std::string pheidippides::join_ids(std::span<const std::string> ids) {
+std::string options::url() const {
+    if (endpoint_idx >= endpoints.size()) {
+        return {};
+    }
+    const auto& [fst, snd] = endpoints[endpoint_idx];
+    return protocol + fst + snd;
+}
+
+std::string options::properties() const {
+    if (props_idx >= props.size()) {
+        return {};
+    }
+    return pheidippides::join_str(props[props_idx]);
+}
+
+std::string pheidippides::join_str(
+    std::span<const std::string> ids, const std::string_view separator
+) {
     if (ids.empty()) {
         return {};
     }
-    const auto joined = ids | std::views::join_with(std::string_view { "|" });
-    return joined | std::ranges::to<std::string>();
+    auto it = ids.begin();
+    std::string result = *it;
+    ++it;
+    for (; it != ids.end(); ++it) {
+        result.append(separator);
+        result.append(*it);
+    }
+    return result;
 }
