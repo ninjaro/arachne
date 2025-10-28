@@ -9,6 +9,7 @@ on:
       - 'include/**/*.hpp'
       - 'tests/**/*.cpp'
       - 'readme.md'
+      - 'CMakeLists.txt'
 
   workflow_dispatch:
 

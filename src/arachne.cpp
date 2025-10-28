@@ -40,8 +40,6 @@ bool arachne::new_group(std::string name) {
     return inserted;
 }
 
-bool arachne::flush(entity_kind kind) { return false; }
-
 int arachne::queue_size(const entity_kind kind) const noexcept {
     if (kind == entity_kind::any) {
         std::size_t sum = 0;
@@ -85,8 +83,8 @@ entity_kind arachne::identify(const std::string& entity) noexcept {
     if (pos == entity.size()) {
         return static_cast<entity_kind>(kind);
     }
-    if (kind != 2 || pos >= entity.size() || entity[pos++] != '-'
-        || pos >= entity.size()) {
+    if (kind != static_cast<size_t>(entity_kind::lexeme) || pos >= entity.size()
+        || entity[pos++] != '-' || pos >= entity.size()) {
         return entity_kind::unknown;
     }
     const char tag = entity[pos++];
@@ -107,10 +105,10 @@ std::string arachne::normalize(const int id, const entity_kind kind) {
         );
     }
     auto idx = static_cast<std::size_t>(kind);
-    if (idx > 4) {
+    if (idx >= static_cast<size_t>(entity_kind::form)) {
         // Numeric Form/Sense are not representable; map to lexeme.
         // TODO: emit warning via logging sink.
-        idx = 2;
+        idx = static_cast<size_t>(entity_kind::lexeme);
     }
     return prefixes[idx] + std::to_string(id);
 }
@@ -134,3 +132,5 @@ bool arachne::touch_entity(std::string_view id_with_prefix) noexcept {
 int arachne::touch_ids(std::span<const int> ids, entity_kind kind) noexcept {
     return 0;
 }
+
+bool arachne::flush(entity_kind kind) { return false; }

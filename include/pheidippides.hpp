@@ -24,7 +24,67 @@
 
 #ifndef ARACHNE_PHEIDIPPIDES_HPP
 #define ARACHNE_PHEIDIPPIDES_HPP
+#include "arachne.hpp"
 
-class pheidippides { };
+#include <array>
+#include <atomic>
+
+#include <cpr/cpr.h>
+#include <nlohmann/json.hpp>
+
+struct network_metrics final {
+    std::atomic<unsigned> requests { 0 };
+    std::atomic<unsigned> retries { 0 };
+    std::atomic<size_t> sleep_ns { 0 };
+    std::atomic<size_t> network_ns { 0 };
+    std::atomic<size_t> bytes_received { 0 };
+    std::array<std::atomic<unsigned>, 600> statuses { 0 };
+
+    network_metrics();
+};
+
+struct options {
+    int timeout_ms = 10000;
+    int connect_timeout_ms = 3000;
+    int max_retries = 3;
+    int retry_base_ms = 200;
+    int retry_max_ms = 3000;
+
+    std::size_t batch_threshold = 50;
+
+    std::string url = "https://www.wikidata.org/w/api.php";
+    std::string user_agent = "arachne/pheidippides";
+    std::string accept = "application/json";
+
+    std::string action = "wbgetentities";
+    std::string format = "json";
+    int formatversion = 2;
+    std::string languages = "en";
+    bool languagefallback = true;
+    bool normalize = true;
+    std::string props = "labels|descriptions|aliases|claims|sitelinks";
+};
+
+class pheidippides {
+public:
+    pheidippides();
+    nlohmann::json fetch_json(
+        std::unordered_set<std::string>& batch,
+        entity_kind kind = entity_kind::any
+    );
+    const network_metrics& metrics_info();
+
+private:
+    cpr::Parameters build_params(const std::string& ids_joined) const;
+
+    nlohmann::json wbgetentities_batch(std::span<const std::string> ids);
+    cpr::Response get_with_retries(const cpr::Parameters& params);
+
+    static std::string join_ids(std::span<const std::string> ids);
+
+    network_metrics metrics;
+    cpr::Session session;
+    options opt {};
+};
 
 #endif // ARACHNE_PHEIDIPPIDES_HPP

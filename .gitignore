@@ -30,7 +30,7 @@
 *.lib
 
 # Debug files
-cmake-build-debug*/
+cmake-build*/
 
 # Executables
 *.exe

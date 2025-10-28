@@ -25,11 +25,8 @@
 #ifndef ARACHNE_ARACHNE_HPP
 #define ARACHNE_ARACHNE_HPP
 
-// #include <array>
-// #include <cstddef>
 #include <span>
 #include <string>
-// #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -210,6 +207,17 @@ public:
     /// @}
 
 private:
+    /**
+     * @brief Parse a full ID string and extract the numeric part
+     * position/value.
+     * @param entity Full ID (e.g., "Q123", "L7-F1", "L7-S2").
+     * @param pos    Out: index of the first digit within @p entity
+     * (implementation-defined if absent).
+     * @param id     Out: parsed integer portion when present.
+     * @return true on successful parse; false otherwise. Never throws.
+     * @internal Helper used by ID validation/normalization routines.
+     */
+
     static bool parse_id(const std::string& entity, size_t& pos, int& id);
 
     // Queues (batches) per batchable kind; elements are normalized IDs

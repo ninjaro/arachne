@@ -8,29 +8,28 @@ on:
       - 'src/**/*.cpp'
       - 'include/**/*.hpp'
       - 'tests/**/*.cpp'
+      - 'CMakeLists.txt'
 
 jobs:
-#  build-and-test:
-#    runs-on: ubuntu-latest
-#
-#    steps:
-#      - uses: actions/checkout@v4
-#      - uses: MarkusJx/googletest-installer@v1.1
-#
-#      - name: Install Dependencies
-#        run: |
-#          sudo apt-get update
-#          sudo apt-get install -y libcxxopts-dev
-#
-#      - name: Build project
-#        run: |
-#          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-#          cmake --build build --parallel $(nproc)
-#
-#      - name: Run unit tests
-#        run: |
-#          cd build
-#          ctest -V --parallel $(nproc)
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MarkusJx/googletest-installer@v1.1
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcpr-dev nlohmann-json3-dev libsqlite3-dev libcxxopts-dev
+
+      - name: Build project
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
+          cmake --build build --parallel $(nproc)
+
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure --parallel $(nproc)
 
   code-style:
     runs-on: ubuntu-latest
