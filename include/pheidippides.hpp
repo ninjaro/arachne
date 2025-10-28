@@ -52,9 +52,16 @@ struct options {
 
     std::size_t batch_threshold = 50;
 
-    std::string url = "https://www.wikidata.org/w/api.php";
+    std::string protocol = "https://";
+    std::string prefix = "www";
+    std::string host = ".wikidata.org/w/api.php";
     std::string user_agent = "arachne/pheidippides";
     std::string accept = "application/json";
+
+    std::vector<std::pair<std::string, std::string>> endpoints = {
+        { "www.", "wikidata.org/w/api.php" },
+        { "commons.", "wikimedia.org/w/api.php" },
+    };
 
     std::string action = "wbgetentities";
     std::string format = "json";
@@ -62,28 +69,53 @@ struct options {
     std::string languages = "en";
     bool languagefallback = true;
     bool normalize = true;
-    std::string props = "labels|descriptions|aliases|claims|sitelinks";
+    std::vector<std::vector<std::string>> props = {
+        { "labels", "descriptions", "aliases", "claims", "sitelinks" },
+        {
+            "lemmas",
+            "language",
+            "lexicalCategory",
+            "forms",
+            "senses",
+            "claims",
+        },
+        { "labels", "descriptions", "statements" },
+        { "labels", "descriptions", "aliases" },
+    };
+    std::size_t endpoint_idx = 0;
+    std::size_t action_idx = 0;
+    std::size_t props_idx = 0;
+
+    [[nodiscard]] std::string url() const;
+
+    [[nodiscard]] std::string properties() const;
 };
 
 class pheidippides {
 public:
     pheidippides();
+
     nlohmann::json fetch_json(
-        std::unordered_set<std::string>& batch,
+        const std::unordered_set<std::string>& batch,
         entity_kind kind = entity_kind::any
     );
+
     const network_metrics& metrics_info();
+
+    static std::string join_str(
+        std::span<const std::string> ids, std::string_view separator = "|"
+    );
 
 private:
     cpr::Parameters build_params(const std::string& ids_joined) const;
 
-    nlohmann::json wbgetentities_batch(std::span<const std::string> ids);
-    cpr::Response get_with_retries(const cpr::Parameters& params);
+    nlohmann::json wbget_batch(std::span<const std::string> ids);
 
-    static std::string join_ids(std::span<const std::string> ids);
+    cpr::Response get_with_retries(const cpr::Parameters& params);
 
     network_metrics metrics;
     cpr::Session session;
+
     options opt {};
 };
 

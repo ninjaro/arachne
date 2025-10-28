@@ -85,3 +85,86 @@ TEST(Pheidippides, FetchJsonProperty) {
         EXPECT_EQ(entity["labels"]["en"]["value"], expected_label);
     }
 }
+
+TEST(Pheidippides, FetchJsonLexeme) {
+    pheidippides client;
+    std::unordered_set<std::string> ids = { "L17828", "L327555" };
+    const std::unordered_map<std::string, std::string> expected_lemmas {
+        { "L17828", "loom" },
+        { "L327555", "sewing" },
+    };
+    const auto json = client.fetch_json(ids, entity_kind::lexeme);
+    ASSERT_TRUE(json.contains("entities"));
+    const auto& entities = json.at("entities");
+    EXPECT_EQ(entities.size(), expected_lemmas.size());
+    for (const auto& [id, expected_lemma] : expected_lemmas) {
+        ASSERT_TRUE(entities.contains(id));
+        const auto& entity = entities.at(id);
+        ASSERT_TRUE(entity.contains("lemmas"));
+        ASSERT_TRUE(entity["lemmas"].contains("en"));
+        ASSERT_TRUE(entity["lemmas"]["en"].contains("value"));
+        EXPECT_EQ(entity["lemmas"]["en"]["value"], expected_lemma);
+        ASSERT_TRUE(entity.contains("lexicalCategory"));
+        ASSERT_TRUE(entity.contains("forms"));
+        ASSERT_TRUE(entity.contains("senses"));
+        ASSERT_TRUE(entity.contains("claims"));
+    }
+}
+
+TEST(Pheidippides, FetchJsonMediainfo) {
+    pheidippides client;
+    // "Velázquez, Diego - The Fable of Arachne (Las Hilanderas) - c. 1657.jpg"
+    // "Statue of Pheidippides along the Marathon Road.jpg"
+    std::unordered_set<std::string> ids = { "M6940375", "M10678815" };
+    const std::unordered_map<std::string, std::string> expected_depicts {
+        { "M6940375", "Q984058" }, // Las Hilanderas
+        { "M10678815", "Q313728" }, // Pheidippides
+    };
+    const auto json = client.fetch_json(ids, entity_kind::mediainfo);
+    ASSERT_TRUE(json.contains("entities"));
+    const auto& entities = json.at("entities");
+    EXPECT_EQ(entities.size(), ids.size());
+
+    for (const auto& [id, expected_qid] : expected_depicts) {
+        ASSERT_TRUE(entities.contains(id));
+        const auto& entity = entities.at(id);
+
+        ASSERT_TRUE(entity.contains("type"));
+        EXPECT_EQ(entity.at("type"), "mediainfo");
+        ASSERT_TRUE(entity.contains("id"));
+        EXPECT_EQ(entity.at("id"), id);
+        ASSERT_TRUE(entity.contains("statements"));
+        const auto& st = entity.at("statements");
+        ASSERT_TRUE(st.contains("P180")) << "no P180 (depicts) for " << id;
+
+        bool found = false;
+        for (const auto& stmt : st.at("P180")) {
+            if (!stmt.contains("mainsnak"))
+                continue;
+            const auto& snak = stmt.at("mainsnak");
+            if (!snak.contains("datavalue"))
+                continue;
+            const auto& dv = snak.at("datavalue");
+            if (dv.contains("type") && dv.at("type") == "wikibase-entityid"
+                && dv.contains("value") && dv.at("value").contains("id")) {
+                if (dv.at("value").at("id") == expected_qid) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        EXPECT_TRUE(found) << "P180 does not include " << expected_qid
+                           << " for " << id;
+        ;
+    }
+}
+
+TEST(Pheidippides, FetchJsonEntitySchema) {
+    pheidippides client;
+    std::unordered_set<std::string> ids = { "EntitySchema:E10" };
+    const std::unordered_map<std::string, std::string> expected_labels {
+        { "E10", "human" },
+    };
+    const auto json = client.fetch_json(ids, entity_kind::entity_schema);
+    ASSERT_FALSE(json.contains("error")) << json.dump(1);
+}
