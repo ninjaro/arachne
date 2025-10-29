@@ -52,43 +52,15 @@ struct options {
 
     std::size_t batch_threshold = 50;
 
-    std::string protocol = "https://";
-    std::string prefix = "www";
-    std::string host = ".wikidata.org/w/api.php";
     std::string user_agent = "arachne/pheidippides";
     std::string accept = "application/json";
 
-    std::vector<std::pair<std::string, std::string>> endpoints = {
-        { "www.", "wikidata.org/w/api.php" },
-        { "commons.", "wikimedia.org/w/api.php" },
+    cpr::Parameters params {
+        { "languages", "en" },    { "languagefallback", "1" },
+        { "normalize", "1" },     { "format", "json" },
+        { "formatversion", "2" }, { "rvslots", "main" },
+        { "rvprop", "content" }
     };
-
-    std::string action = "wbgetentities";
-    std::string format = "json";
-    int formatversion = 2;
-    std::string languages = "en";
-    bool languagefallback = true;
-    bool normalize = true;
-    std::vector<std::vector<std::string>> props = {
-        { "labels", "descriptions", "aliases", "claims", "sitelinks" },
-        {
-            "lemmas",
-            "language",
-            "lexicalCategory",
-            "forms",
-            "senses",
-            "claims",
-        },
-        { "labels", "descriptions", "statements" },
-        { "labels", "descriptions", "aliases" },
-    };
-    std::size_t endpoint_idx = 0;
-    std::size_t action_idx = 0;
-    std::size_t props_idx = 0;
-
-    [[nodiscard]] std::string url() const;
-
-    [[nodiscard]] std::string properties() const;
 };
 
 class pheidippides {
@@ -107,10 +79,6 @@ public:
     );
 
 private:
-    cpr::Parameters build_params(const std::string& ids_joined) const;
-
-    nlohmann::json wbget_batch(std::span<const std::string> ids);
-
     cpr::Response get_with_retries(const cpr::Parameters& params);
 
     network_metrics metrics;

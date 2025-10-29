@@ -19,7 +19,7 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(
             -Og -g -fno-omit-frame-pointer
             -Werror -Wextra -Wpedantic
-#            -Wall
+            #            -Wall
             -Wcast-align -Wcast-qual -Wconversion
             -Wctor-dtor-privacy -Wenum-compare -Wfloat-equal
             -Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual
@@ -31,6 +31,13 @@ elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
 endif ()
 
 find_package(cpr REQUIRED)
+#include(FetchContent)
+#FetchContent_Declare(
+#        cpr
+#        GIT_REPOSITORY https://github.com/libcpr/cpr.git
+#        GIT_TAG 1.12.0
+#)
+#FetchContent_MakeAvailable(cpr)
 find_package(nlohmann_json REQUIRED)
 find_package(SQLite3 REQUIRED)
 

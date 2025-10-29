@@ -32,7 +32,6 @@ network_metrics::network_metrics() {
 }
 
 pheidippides::pheidippides() {
-    session.SetUrl(cpr::Url { opt.url() });
     session.SetHeader(
         { { "User-Agent", opt.user_agent }, { "Accept", opt.accept } }
     );
@@ -47,53 +46,39 @@ nlohmann::json pheidippides::fetch_json(
         return nlohmann::json::object();
     }
 
-    opt = options {};
-    switch (kind) {
-    case entity_kind::item:
-    case entity_kind::property: {
-        break;
-    };
-    case entity_kind::lexeme: {
-        opt.props_idx = 1;
-        opt.languages.clear();
-        opt.languagefallback = false;
-        opt.normalize = false;
-        break;
-    };
-    case entity_kind::mediainfo: {
-        opt.endpoint_idx = 1;
-        opt.props_idx = 2;
-        break;
-    };
-    case entity_kind::entity_schema: {
-        opt.action_idx = 1;
-        opt.props_idx = 3;
-        opt.normalize = false;
-        break;
-    };
-    default:
-        throw std::invalid_argument("fetch_json: unsupported entity kind");
-    }
-
     std::vector<std::string> ids;
     ids.reserve(batch.size());
-    for (const auto& id : batch) {
-        if (kind != entity_kind::entity_schema) {
-            const auto detected = arachne::identify(id);
-            if (detected == entity_kind::unknown) {
-                throw std::invalid_argument(
-                    "fetch_json: invalid entity identifier: " + id
-                );
-            }
-            if (detected != kind) {
-                continue;
-            }
-        }
-        ids.push_back(id);
+    std::string prefix {};
+    if (kind == entity_kind::entity_schema) {
+        prefix = "EntitySchema:";
     }
-
+    for (const auto& id : batch) {
+        const auto detected = arachne::identify(id);
+        if (detected == entity_kind::unknown) {
+            throw std::invalid_argument(
+                "fetch_json: invalid entity identifier: " + id
+            );
+        }
+        if (detected != kind) {
+            continue;
+        }
+        ids.push_back(prefix + id);
+    }
     if (ids.empty()) {
         return nlohmann::json::object();
+    }
+
+    if (kind != entity_kind::mediainfo) {
+        session.SetUrl("https://www.wikidata.org/w/api.php");
+    } else {
+        session.SetUrl("https://commons.wikimedia.org/w/api.php");
+    }
+
+    auto base_params { opt.params };
+    if (kind == entity_kind::entity_schema) {
+        base_params.Add({ "action", "query" });
+    } else {
+        base_params.Add({ "action", "wbgetentities" });
     }
 
     nlohmann::json combined = nlohmann::json::object();
@@ -109,7 +94,24 @@ nlohmann::json pheidippides::fetch_json(
         }
         const std::span<const std::string> batch_info { chunk_vec.data(),
                                                         size };
-        nlohmann::json data = wbget_batch(batch_info);
+        auto params { base_params };
+        auto entities = join_str(batch_info);
+
+        if (kind == entity_kind::entity_schema) {
+            std::vector<std::string> props = { "info", "revisions" };
+
+            params.Add({ "titles", entities });
+            params.Add({ "prop", join_str(props) });
+        } else {
+            std::vector<std::string> props
+                = { "aliases", "claims", "datatype",      "descriptions",
+                    "info",    "labels", "sitelinks/urls" };
+
+            params.Add({ "ids", entities });
+            params.Add({ "props", join_str(props) });
+        }
+        auto r = get_with_retries(params);
+        auto data = nlohmann::json::parse(r.text, nullptr, true);
         if (!data.is_object()) {
             continue;
         }
@@ -120,32 +122,6 @@ nlohmann::json pheidippides::fetch_json(
 }
 
 const network_metrics& pheidippides::metrics_info() { return metrics; }
-
-cpr::Parameters
-pheidippides::build_params(const std::string& ids_joined) const {
-    return cpr::Parameters { {
-        { "action", opt.action },
-        { "props", opt.properties() },
-        { "languages", opt.languages },
-        { "languagefallback", opt.languagefallback ? "1" : "0" },
-        { "normalize", opt.normalize ? "1" : "0" },
-        { "format", opt.format },
-        { "formatversion", std::to_string(opt.formatversion) },
-        { "ids", ids_joined },
-    } };
-}
-
-nlohmann::json
-pheidippides::wbget_batch(const std::span<const std::string> ids) {
-    if (ids.empty()) {
-        return nlohmann::json::object();
-    }
-    const std::string ids_joined = join_str(ids);
-    session.SetUrl(cpr::Url { opt.url() });
-    const auto params = build_params(ids_joined);
-    auto r = get_with_retries(params);
-    return nlohmann::json::parse(r.text, nullptr, true);
-}
 
 using sys_seconds = std::chrono::sys_time<std::chrono::seconds>;
 
@@ -200,8 +176,9 @@ long long parse_retry(const cpr::Response& r) {
     const std::string& v = it->second;
     try {
         long long s = std::stoll(v);
-        if (s >= 0)
+        if (s >= 0) {
             return s * 1000LL;
+        }
     } catch (...) { }
     sys_seconds target {};
     if (!parse_http_date_gmt(v, target)) {
@@ -272,21 +249,6 @@ cpr::Response pheidippides::get_with_retries(const cpr::Parameters& params) {
             "http error: " + std::to_string(r.status_code)
         );
     }
-}
-
-std::string options::url() const {
-    if (endpoint_idx >= endpoints.size()) {
-        return {};
-    }
-    const auto& [fst, snd] = endpoints[endpoint_idx];
-    return protocol + fst + snd;
-}
-
-std::string options::properties() const {
-    if (props_idx >= props.size()) {
-        return {};
-    }
-    return pheidippides::join_str(props[props_idx]);
 }
 
 std::string pheidippides::join_str(
