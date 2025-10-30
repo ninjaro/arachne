@@ -19,7 +19,7 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(
             -Og -g -fno-omit-frame-pointer
             -Werror -Wextra -Wpedantic
-#            -Wall
+            #            -Wall
             -Wcast-align -Wcast-qual -Wconversion
             -Wctor-dtor-privacy -Wenum-compare -Wfloat-equal
             -Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual
@@ -30,7 +30,7 @@ elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -s")
 endif ()
 
-find_package(cpr REQUIRED)
+find_package(CURL REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(SQLite3 REQUIRED)
 
@@ -39,13 +39,15 @@ add_library(arachne_lib STATIC
         src/ariadne.cpp
         src/penelope.cpp
         src/pheidippides.cpp
+
         src/rng.cpp
+        src/http_client.cpp
 )
 target_include_directories(arachne_lib PUBLIC include)
 target_compile_features(arachne_lib PUBLIC cxx_std_23)
 target_link_libraries(arachne_lib
         PUBLIC
-        cpr::cpr
+        CURL::libcurl
         nlohmann_json::nlohmann_json
         SQLite::SQLite3
 )
@@ -76,7 +78,9 @@ if (BUILD_TESTS)
         add_executable(unit_tests
                 tests/arachne_tests.cpp
                 tests/pheidippides_tests.cpp
+
                 tests/rng_tests.cpp
+                tests/http_client_tests.cpp
         )
         target_link_libraries(unit_tests PRIVATE arachne_lib GTest::gtest_main dep_coverage)
 

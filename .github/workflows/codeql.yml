@@ -3,7 +3,7 @@ name: CodeQL
 on:
   pull_request:
     branches:
-      - todomaster
+      - master
 
 permissions:
   actions: read
@@ -30,7 +30,11 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcxxopts-dev
+          sudo apt-get install -y \
+            libcxxopts-dev \
+            nlohmann-json3-dev \
+            libsqlite3-dev \
+            libcurl4-openssl-dev
 
       - name: Build (Debug)
         run: |

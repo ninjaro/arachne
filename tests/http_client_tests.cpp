@@ -22,44 +22,42 @@
  * SOFTWARE.
  */
 
-#ifndef ARACHNE_PHEIDIPPIDES_HPP
-#define ARACHNE_PHEIDIPPIDES_HPP
-
-#include "arachne.hpp"
 #include "http_client.hpp"
+#include <gtest/gtest.h>
 
-#include <nlohmann/json.hpp>
+http_client& http_shared_client() {
+    static http_client client;
+    return client;
+}
 
-struct options {
-    std::size_t batch_threshold = 50;
+TEST(HttpClientSmoke, OK) {
+    auto& client = http_shared_client();
+    const auto response = client.get("https://httpbingo.org/get?ping=ok");
 
-    std::vector<std::string> prop = { "info", "revisions" };
-    std::vector<std::string> props
-        = { "aliases", "claims", "datatype",      "descriptions",
-            "info",    "labels", "sitelinks/urls" };
+    EXPECT_EQ(response.status_code, 200);
+    EXPECT_FALSE(response.text.empty());
+    EXPECT_EQ(response.error_code, CURLE_OK);
+    EXPECT_TRUE(response.error_message.empty());
+}
 
-    parameter_list params { { "languages", "en" }, { "languagefallback", "1" },
-                            { "format", "json" },  { "formatversion", "2" },
-                            { "rvslots", "main" }, { "rvprop", "content" },
-                            { "normalize", "1" } };
-};
+TEST(HttpClientSmoke, RedirectFollow) {
+    auto& client = http_shared_client();
+    const auto response
+        = client.get("https://httpbingo.org/redirect-to?url=/status/204");
 
-class pheidippides {
-public:
-    nlohmann::json fetch_json(
-        const std::unordered_set<std::string>& batch,
-        entity_kind kind = entity_kind::any
-    );
+    EXPECT_EQ(response.status_code, 204);
+    EXPECT_TRUE(response.text.empty());
+}
 
-    [[nodiscard]] const network_metrics& metrics_info() const;
-
-    static std::string join_str(
-        std::span<const std::string> ids, std::string_view separator = "|"
-    );
-
-private:
-    options opt {};
-    http_client client {};
-};
-
-#endif // ARACHNE_PHEIDIPPIDES_HPP
+TEST(NetworkMetrics, DefaultInitialization) {
+    auto& client = http_shared_client();
+    const network_metrics& metrics = client.metrics_info();
+    EXPECT_EQ(metrics.requests.load(), 0u);
+    EXPECT_EQ(metrics.retries.load(), 0u);
+    EXPECT_EQ(metrics.sleep_ms.load(), 0u);
+    EXPECT_EQ(metrics.network_ms.load(), 0u);
+    EXPECT_EQ(metrics.bytes_received.load(), 0u);
+    for (const auto& status : metrics.statuses) {
+        EXPECT_EQ(status.load(), 0u);
+    }
+}

@@ -25,23 +25,13 @@
 #include "pheidippides.hpp"
 #include <gtest/gtest.h>
 
-using namespace std::chrono_literals;
-
-TEST(NetworkMetrics, InitializesToZero) {
-    const network_metrics metrics;
-    EXPECT_EQ(metrics.requests.load(), 0u);
-    EXPECT_EQ(metrics.retries.load(), 0u);
-    EXPECT_EQ(metrics.sleep_ns.load(), 0ull);
-    EXPECT_EQ(metrics.network_ns.load(), 0ull);
-    EXPECT_EQ(metrics.bytes_received.load(), 0ull);
-
-    for (const auto& status : metrics.statuses) {
-        EXPECT_EQ(status.load(), 0u);
-    }
+pheidippides& shared_client() {
+    static pheidippides client;
+    return client;
 }
 
 TEST(Pheidippides, FetchJsonItems) {
-    pheidippides client;
+    auto& client = shared_client();
     std::unordered_set<std::string> ids
         = { "Q190082", "Q165769", "Q184874", "Q313728" };
     const std::unordered_map<std::string, std::string> expected_labels {
@@ -65,7 +55,7 @@ TEST(Pheidippides, FetchJsonItems) {
 }
 
 TEST(Pheidippides, FetchJsonProperty) {
-    pheidippides client;
+    auto& client = shared_client();
     std::unordered_set<std::string> ids = { "P1049", "P2925", "P4185" };
     const std::unordered_map<std::string, std::string> expected_labels {
         { "P1049", "worshipped by" },
@@ -87,7 +77,7 @@ TEST(Pheidippides, FetchJsonProperty) {
 }
 
 TEST(Pheidippides, FetchJsonLexeme) {
-    pheidippides client;
+    auto& client = shared_client();
     std::unordered_set<std::string> ids = { "L17828", "L327555" };
     const std::unordered_map<std::string, std::string> expected_lemmas {
         { "L17828", "loom" },
@@ -112,7 +102,7 @@ TEST(Pheidippides, FetchJsonLexeme) {
 }
 
 TEST(Pheidippides, FetchJsonMediainfo) {
-    pheidippides client;
+    auto& client = shared_client();
     // "Velázquez, Diego - The Fable of Arachne (Las Hilanderas) - c. 1657.jpg"
     // "Statue of Pheidippides along the Marathon Road.jpg"
     std::unordered_set<std::string> ids = { "M6940375", "M10678815" };
@@ -135,15 +125,17 @@ TEST(Pheidippides, FetchJsonMediainfo) {
         EXPECT_EQ(entity.at("id"), id);
         ASSERT_TRUE(entity.contains("statements"));
         const auto& st = entity.at("statements");
-        ASSERT_TRUE(st.contains("P180")) << "no P180 (depicts) for " << id;
+        ASSERT_TRUE(st.contains("P180"));
 
         bool found = false;
         for (const auto& stmt : st.at("P180")) {
-            if (!stmt.contains("mainsnak"))
+            if (!stmt.contains("mainsnak")) {
                 continue;
+            }
             const auto& snak = stmt.at("mainsnak");
-            if (!snak.contains("datavalue"))
+            if (!snak.contains("datavalue")) {
                 continue;
+            }
             const auto& dv = snak.at("datavalue");
             if (dv.contains("type") && dv.at("type") == "wikibase-entityid"
                 && dv.contains("value") && dv.at("value").contains("id")) {
@@ -153,18 +145,37 @@ TEST(Pheidippides, FetchJsonMediainfo) {
                 }
             }
         }
-        EXPECT_TRUE(found) << "P180 does not include " << expected_qid
-                           << " for " << id;
-        ;
+        EXPECT_TRUE(found) << id;
     }
 }
 
 TEST(Pheidippides, FetchJsonEntitySchema) {
-    pheidippides client;
-    std::unordered_set<std::string> ids = { "EntitySchema:E10" };
+    auto& client = shared_client();
+    std::unordered_set<std::string> ids = { "E10", "E42" };
     const std::unordered_map<std::string, std::string> expected_labels {
         { "E10", "human" },
+        { "E42", "autor" },
     };
     const auto json = client.fetch_json(ids, entity_kind::entity_schema);
-    ASSERT_FALSE(json.contains("error")) << json.dump(1);
+    ASSERT_TRUE(json.contains("query"));
+    ASSERT_TRUE(json["query"].contains("pages"));
+
+    const auto& pages = json["query"]["pages"];
+    ASSERT_TRUE(pages.is_array());
+    EXPECT_EQ(pages.size(), ids.size());
+
+    std::unordered_set<std::string> found;
+
+    for (const auto& page : pages) {
+        ASSERT_TRUE(page.contains("title"));
+        const auto& title = page.at("title").get_ref<const std::string&>();
+        ASSERT_TRUE(title.rfind("EntitySchema:", 0) == 0) << title;
+        const std::string eid
+            = title.substr(std::string("EntitySchema:").size());
+        found.emplace(eid);
+    }
+
+    for (const auto& id : ids) {
+        EXPECT_TRUE(found.contains(id)) << "missing EntitySchema:" << id;
+    }
 }
