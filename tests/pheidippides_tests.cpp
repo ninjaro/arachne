@@ -25,23 +25,13 @@
 #include "pheidippides.hpp"
 #include <gtest/gtest.h>
 
-using namespace std::chrono_literals;
-
-TEST(NetworkMetrics, InitializesToZero) {
-    const network_metrics metrics;
-    EXPECT_EQ(metrics.requests.load(), 0u);
-    EXPECT_EQ(metrics.retries.load(), 0u);
-    EXPECT_EQ(metrics.sleep_ns.load(), 0ull);
-    EXPECT_EQ(metrics.network_ns.load(), 0ull);
-    EXPECT_EQ(metrics.bytes_received.load(), 0ull);
-
-    for (const auto& status : metrics.statuses) {
-        EXPECT_EQ(status.load(), 0u);
-    }
+pheidippides& shared_client() {
+    static pheidippides client;
+    return client;
 }
 
 TEST(Pheidippides, FetchJsonItems) {
-    pheidippides client;
+    auto& client = shared_client();
     std::unordered_set<std::string> ids
         = { "Q190082", "Q165769", "Q184874", "Q313728" };
     const std::unordered_map<std::string, std::string> expected_labels {
@@ -65,7 +55,7 @@ TEST(Pheidippides, FetchJsonItems) {
 }
 
 TEST(Pheidippides, FetchJsonProperty) {
-    pheidippides client;
+    auto& client = shared_client();
     std::unordered_set<std::string> ids = { "P1049", "P2925", "P4185" };
     const std::unordered_map<std::string, std::string> expected_labels {
         { "P1049", "worshipped by" },
@@ -87,7 +77,7 @@ TEST(Pheidippides, FetchJsonProperty) {
 }
 
 TEST(Pheidippides, FetchJsonLexeme) {
-    pheidippides client;
+    auto& client = shared_client();
     std::unordered_set<std::string> ids = { "L17828", "L327555" };
     const std::unordered_map<std::string, std::string> expected_lemmas {
         { "L17828", "loom" },
@@ -112,7 +102,7 @@ TEST(Pheidippides, FetchJsonLexeme) {
 }
 
 TEST(Pheidippides, FetchJsonMediainfo) {
-    pheidippides client;
+    auto& client = shared_client();
     // "Velázquez, Diego - The Fable of Arachne (Las Hilanderas) - c. 1657.jpg"
     // "Statue of Pheidippides along the Marathon Road.jpg"
     std::unordered_set<std::string> ids = { "M6940375", "M10678815" };
@@ -160,7 +150,7 @@ TEST(Pheidippides, FetchJsonMediainfo) {
 }
 
 TEST(Pheidippides, FetchJsonEntitySchema) {
-    pheidippides client;
+    auto& client = shared_client();
     std::unordered_set<std::string> ids = { "E10", "E42" };
     const std::unordered_map<std::string, std::string> expected_labels {
         { "E10", "human" },

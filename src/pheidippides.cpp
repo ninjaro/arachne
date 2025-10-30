@@ -23,21 +23,6 @@
  */
 
 #include "pheidippides.hpp"
-#include "rng.hpp"
-
-network_metrics::network_metrics() {
-    for (auto& status : statuses) {
-        status.store(0, std::memory_order_relaxed);
-    }
-}
-
-pheidippides::pheidippides() {
-    session.SetHeader(
-        { { "User-Agent", opt.user_agent }, { "Accept", opt.accept } }
-    );
-    session.SetTimeout(cpr::Timeout { opt.timeout_ms });
-    session.SetConnectTimeout(cpr::ConnectTimeout { opt.connect_timeout_ms });
-}
 
 nlohmann::json pheidippides::fetch_json(
     const std::unordered_set<std::string>& batch, const entity_kind kind
@@ -45,210 +30,56 @@ nlohmann::json pheidippides::fetch_json(
     if (batch.empty()) {
         return nlohmann::json::object();
     }
+    std::string url
+        = (kind != entity_kind::mediainfo
+               ? "https://www.wikidata.org/w/api.php"
+               : "https://commons.wikimedia.org/w/api.php");
+    std::string props
+        = (kind != entity_kind::entity_schema ? join_str(opt.props)
+                                              : join_str(opt.prop));
 
-    std::vector<std::string> ids;
-    ids.reserve(batch.size());
+    parameter_list base_params { opt.params };
+    if (kind == entity_kind::entity_schema) {
+        base_params.emplace_back("action", "query");
+    } else {
+        base_params.emplace_back("action", "wbgetentities");
+    }
+
     std::string prefix {};
     if (kind == entity_kind::entity_schema) {
         prefix = "EntitySchema:";
     }
-    for (const auto& id : batch) {
-        const auto detected = arachne::identify(id);
-        if (detected == entity_kind::unknown) {
-            throw std::invalid_argument(
-                "fetch_json: invalid entity identifier: " + id
-            );
-        }
-        if (detected != kind) {
-            continue;
-        }
-        ids.push_back(prefix + id);
-    }
-    if (ids.empty()) {
-        return nlohmann::json::object();
-    }
-
-    if (kind != entity_kind::mediainfo) {
-        session.SetUrl("https://www.wikidata.org/w/api.php");
-    } else {
-        session.SetUrl("https://commons.wikimedia.org/w/api.php");
-    }
-
-    auto base_params { opt.params };
-    if (kind == entity_kind::entity_schema) {
-        base_params.Add({ "action", "query" });
-    } else {
-        base_params.Add({ "action", "wbgetentities" });
-    }
-
     nlohmann::json combined = nlohmann::json::object();
-
-    for (auto&& chunk : ids | std::views::chunk(opt.batch_threshold)) {
+    for (auto&& chunk : batch | std::views::chunk(opt.batch_threshold)) {
         std::vector<std::string> chunk_vec;
-        for (const auto& value : chunk) {
-            chunk_vec.emplace_back(value);
+        for (const auto& id : chunk) {
+            if (arachne::identify(id) != kind) {
+                continue;
+            }
+            chunk_vec.emplace_back(prefix + id);
         }
-        const auto size = chunk_vec.size();
-        if (size == 0) {
-            continue;
-        }
-        const std::span<const std::string> batch_info { chunk_vec.data(),
-                                                        size };
-        auto params { base_params };
-        auto entities = join_str(batch_info);
+        parameter_list params { base_params };
+        auto entities = join_str(chunk_vec);
 
         if (kind == entity_kind::entity_schema) {
-            std::vector<std::string> props = { "info", "revisions" };
-
-            params.Add({ "titles", entities });
-            params.Add({ "prop", join_str(props) });
+            params.emplace_back("titles", entities);
+            params.emplace_back("prop", props);
         } else {
-            std::vector<std::string> props
-                = { "aliases", "claims", "datatype",      "descriptions",
-                    "info",    "labels", "sitelinks/urls" };
-
-            params.Add({ "ids", entities });
-            params.Add({ "props", join_str(props) });
+            params.emplace_back("ids", entities);
+            params.emplace_back("props", props);
         }
-        auto r = get_with_retries(params);
+        auto r = client.get(url, params);
         auto data = nlohmann::json::parse(r.text, nullptr, true);
         if (!data.is_object()) {
             continue;
         }
         combined.merge_patch(data);
     }
-
     return combined;
 }
 
-const network_metrics& pheidippides::metrics_info() { return metrics; }
-
-using sys_seconds = std::chrono::sys_time<std::chrono::seconds>;
-
-static bool parse_http_date_gmt(
-    const std::string_view v, std::chrono::sys_time<std::chrono::seconds>& out
-) {
-    char wday[4] {}, mon[4] {}, tz[4] {};
-    int y = 0, d = 0, H = 0, M = 0, S = 0;
-    if (std::sscanf(
-            v.data(), "%3s, %d %3s %d %d:%d:%d %3s", wday, &d, mon, &y, &H, &M,
-            &S, tz
-        )
-        != 8) {
-        return false;
-    }
-    if (std::strncmp(tz, "GMT", 3) != 0) {
-        return false;
-    }
-    static constexpr const char* months[]
-        = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    int m_idx = -1;
-    for (int i = 0; i < 12; ++i) {
-        if (std::strncmp(mon, months[i], 3) == 0) {
-            m_idx = i + 1;
-            break;
-        }
-    }
-    if (m_idx == -1) {
-        return false;
-    }
-    using namespace std::chrono;
-    const year_month_day ymd { year { y },
-                               month { static_cast<unsigned>(m_idx) },
-                               day { static_cast<unsigned>(d) } };
-    if (!ymd.ok()) {
-        return false;
-    }
-    const sys_days sd { ymd };
-    out = sys_seconds { sd }
-        + seconds { static_cast<long long>(H) * 3600
-                    + static_cast<long long>(M) * 60
-                    + static_cast<long long>(S) };
-    return true;
-}
-
-long long parse_retry(const cpr::Response& r) {
-    const auto it = r.header.find("Retry-After");
-    if (it == r.header.end()) {
-        return -1;
-    }
-    const std::string& v = it->second;
-    try {
-        long long s = std::stoll(v);
-        if (s >= 0) {
-            return s * 1000LL;
-        }
-    } catch (...) { }
-    sys_seconds target {};
-    if (!parse_http_date_gmt(v, target)) {
-        return -1;
-    }
-    const auto now_s = std::chrono::time_point_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now()
-    );
-    const auto diff
-        = std::chrono::duration_cast<std::chrono::milliseconds>(target - now_s);
-    return diff.count() > 0 ? diff.count() : 0;
-}
-
-int jitter_ms(const int base, const int cap) {
-    std::uniform_int_distribution d(0, base);
-    return std::min(base + d(rng()), cap);
-}
-
-cpr::Response pheidippides::get_with_retries(const cpr::Parameters& params) {
-    using namespace std::chrono;
-    for (int attempt = 1;; ++attempt) {
-        session.SetParameters(params);
-
-        const auto t0 = steady_clock::now();
-        auto r = session.Get();
-        const auto t1 = steady_clock::now();
-
-        const auto dt = duration_cast<milliseconds>(t1 - t0).count();
-        ++metrics.requests;
-        metrics.network_ns += static_cast<size_t>(dt);
-
-        if (r.status_code >= 0
-            && r.status_code < static_cast<long>(metrics.statuses.size())) {
-            ++metrics.statuses[static_cast<std::size_t>(r.status_code)];
-        }
-        const std::size_t rx = r.text.size();
-        metrics.bytes_received += rx;
-
-        const bool net_ok = (r.error.code == cpr::ErrorCode::OK);
-        const bool http_ok = (r.status_code >= 200 && r.status_code < 300);
-        if (net_ok && http_ok) {
-            return r;
-        }
-
-        const bool retryable_http = (r.status_code == 429)
-            || (r.status_code == 408)
-            || (r.status_code >= 500 && r.status_code < 600);
-
-        if (attempt <= opt.max_retries && (!net_ok || retryable_http)) {
-            ++metrics.retries;
-            long long sleep_ms = jitter_ms(
-                opt.retry_base_ms * (1 << (attempt - 1)), opt.retry_max_ms
-            );
-            long long ra = parse_retry(r);
-            if (ra >= 0) {
-                sleep_ms = std::min<long long>(sleep_ms, ra);
-            }
-            std::this_thread::sleep_for(milliseconds(sleep_ms));
-            continue;
-        }
-
-        if (!net_ok) {
-            throw std::runtime_error(
-                std::string("cpr error: ") + r.error.message
-            );
-        }
-        throw std::runtime_error(
-            "http error: " + std::to_string(r.status_code)
-        );
-    }
+const network_metrics& pheidippides::metrics_info() const {
+    return client.metrics_info();
 }
 
 std::string pheidippides::join_str(
@@ -259,8 +90,7 @@ std::string pheidippides::join_str(
     }
     auto it = ids.begin();
     std::string result = *it;
-    ++it;
-    for (; it != ids.end(); ++it) {
+    for (++it; it != ids.end(); ++it) {
         result.append(separator);
         result.append(*it);
     }

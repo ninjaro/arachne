@@ -23,32 +23,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libcxxopts-dev \
             nlohmann-json3-dev \
             libsqlite3-dev \
-            libcxxopts-dev \
-            libcurl4-openssl-dev \
-            cmake g++ git ninja-build
-
-      - name:  Build & install CPR
-        run: |
-          git clone --depth 1 https://github.com/libcpr/cpr.git
-          cmake -S cpr -B cpr/build \
-            -G Ninja \
-            -DCPR_USE_SYSTEM_CURL=ON \
-            -DCPR_BUILD_TESTS=OFF \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/deps"
-          cmake --build cpr/build --parallel
-          cmake --install cpr/build
+            libcurl4-openssl-dev
 
       - name: Configure project
         run: |
           cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DBUILD_TESTS=ON \
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/deps"
+            -DBUILD_TESTS=ON
 
       - name: Build project
         run: cmake --build build --parallel
