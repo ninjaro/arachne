@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: MarkusJx/googletest-installer@v28c5d4102d9d57b46254be19a940bf038a9c850a
+      - uses: MarkusJx/googletest-installer@28c5d4102d9d57b46254be19a940bf038a9c850a
 
       - name: Install apt dependencies
         run: |
