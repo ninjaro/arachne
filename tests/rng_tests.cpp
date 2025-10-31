@@ -25,6 +25,8 @@
 #include "rng.hpp"
 #include <gtest/gtest.h>
 
+using namespace corespace;
+
 TEST(Rng, SingletonInstance) {
     auto* p1 = &rng();
     auto* p2 = &rng();
@@ -42,7 +44,7 @@ TEST(RandomHex, LengthAndCharset) {
     }
 }
 
-TEST(RandomHex, LikelyDifferentOnSuccessiveCalls) {
+TEST(RandomHex, LikelyDifferent) {
     std::string a = random_hex(16);
     std::string b = random_hex(16);
     EXPECT_NE(a, b);

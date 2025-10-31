@@ -23,3 +23,5 @@
  */
 
 #include "ariadne.hpp"
+
+namespace arachnespace { }

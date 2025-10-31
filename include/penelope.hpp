@@ -25,6 +25,7 @@
 #ifndef ARACHNE_PENELOPE_HPP
 #define ARACHNE_PENELOPE_HPP
 
+namespace arachnespace {
 class penelope { };
-
+}
 #endif // ARACHNE_PENELOPE_HPP

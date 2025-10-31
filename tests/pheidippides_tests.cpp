@@ -25,6 +25,9 @@
 #include "pheidippides.hpp"
 #include <gtest/gtest.h>
 
+using namespace arachnespace;
+using namespace corespace;
+
 pheidippides& shared_client() {
     static pheidippides client;
     return client;

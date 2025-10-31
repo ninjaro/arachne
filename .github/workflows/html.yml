@@ -3,7 +3,7 @@ name: Deploy
 on:
   push:
     branches:
-      - todomaster
+      - master
     paths:
       - 'src/**/*.cpp'
       - 'include/**/*.hpp'
@@ -11,7 +11,6 @@ on:
       - 'readme.md'
       - 'CMakeLists.txt'
       - '.github/workflows/html.yml'
-
   workflow_dispatch:
 
 permissions:
@@ -20,7 +19,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: true
 
 jobs:
@@ -28,13 +27,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v3
+      - uses: actions/configure-pages@v5
       - uses: MarkusJx/googletest-installer@v1.1
+      - uses: ssciwr/doxygen-install@v1
+        with:
+          version: "1.15.0"
+      - uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20.1.8"
+          env: true
 
       - name: Install apt dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            graphviz lcov libclang-20-dev \
             libcxxopts-dev \
             nlohmann-json3-dev \
             libsqlite3-dev \
@@ -48,34 +55,31 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DCOVERAGE=ON
           cmake --build build --target coverage --parallel $(nproc)
 
-#      - name: Upload results to Codecov
-#        uses: codecov/codecov-action@v5
-#        with:
-#          fail_ci_if_error: true
-#          disable_search: true
-#          files: build/coverage.info
-#          flags: unittests
-#          name: codecov-umbrella
-#          token: ${{ secrets.CODECOV_TOKEN }}
-#          verbose: true
+      - name: Upload results to Codecov
+        if: ${{ hashFiles('build/coverage.info') != '' }}
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          files: build/coverage.info
+          fail_ci_if_error: false
+          use_oidc: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
-#      - name: Upload coverage to Codacy
-#        uses: codacy/codacy-coverage-reporter-action@a38818475bb21847788496e9f0fddaa4e84955ba
-#        with:
-#          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-#          coverage-reports: build/coverage.info
+      - name: Upload coverage to Codacy
+        if: ${{ hashFiles('build/coverage.info') != '' && secrets.CODACY_PROJECT_TOKEN != '' }}
+        uses: codacy/codacy-coverage-reporter-action@a38818475bb21847788496e9f0fddaa4e84955ba
+        continue-on-error: true
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: build/coverage.info
 
       - name: Clean build
         run: rm -rf build/
 
-      - name: Build with Jekyll
-        uses: actions/jekyll-build-pages@v1
-        with:
-          source: ./
-          destination: ./_site
-
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
+        with:
+          path: doc
 
   deploy:
     environment:

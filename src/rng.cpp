@@ -24,6 +24,7 @@
 
 #include "rng.hpp"
 
+namespace corespace {
 std::mt19937_64& rng() {
     static std::mt19937_64 gen { std::random_device {}() };
     return gen;
@@ -40,4 +41,5 @@ std::string random_hex(const std::size_t n) {
         out[i] = digits[nibble(g)];
     }
     return out;
+}
 }
