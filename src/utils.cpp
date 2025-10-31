@@ -22,30 +22,12 @@
  * SOFTWARE.
  */
 
-#ifndef ARACHNE_RNG_HPP
-#define ARACHNE_RNG_HPP
-
-#include <random>
-#include <string>
+#include "utils.hpp"
 
 namespace corespace {
-/**
- * @brief Shared PRNG seeded on first use.
- *
- * The generator is a process-wide `std::mt19937_64` seeded from
- * `std::random_device`. Calls from multiple threads share the same engine and
- * therefore require external synchronization if deterministic ordering is
- * important.
- */
-std::mt19937_64& rng();
-
-/**
- * @brief Return exactly @p n random hexadecimal characters (lowercase).
- *
- * The function draws 4-bit nibbles from the shared PRNG. Characters are not
- * zero-padded beyond the requested length; each position is an independent,
- * uniformly distributed hex digit.
- */
-std::string random_hex(std::size_t n);
+network_metrics::network_metrics() {
+    for (auto& status : statuses) {
+        status.store(0, std::memory_order_relaxed);
+    }
 }
-#endif // ARACHNE_RNG_HPP
+}

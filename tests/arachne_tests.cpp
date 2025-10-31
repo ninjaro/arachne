@@ -25,6 +25,9 @@
 #include "arachne.hpp"
 #include <gtest/gtest.h>
 
+using namespace arachnespace;
+using namespace corespace;
+
 TEST(Identify, ValidSimpleKinds) {
     using K = entity_kind;
     EXPECT_EQ(arachne::identify("Q123"), K::item);

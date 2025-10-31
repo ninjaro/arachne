@@ -23,3 +23,5 @@
  */
 
 #include "penelope.hpp"
+
+namespace arachnespace { }

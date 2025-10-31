@@ -28,19 +28,14 @@
 #include <mutex>
 #include <thread>
 
+namespace corespace {
 namespace {
-std::once_flag global_curl;
+    std::once_flag global_curl;
 
-void curl_inited() {
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
-        throw std::runtime_error("curl_global_init failed");
-    }
-}
-}
-
-network_metrics::network_metrics() {
-    for (auto& status : statuses) {
-        status.store(0, std::memory_order_relaxed);
+    void curl_inited() {
+        if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
+            throw std::runtime_error("curl_global_init failed");
+        }
     }
 }
 
@@ -84,7 +79,7 @@ http_client::get(const std::string_view url, const parameter_list& params) {
         if (status_good(response)) {
             return response;
         }
-        if (attempt <= opt.max_retries && status_bad(response, net_ok)) {
+        if (attempt <= opt.max_retries && status_retry(response, net_ok)) {
             ++metrics.retries;
             long long sleep_ms = next_delay(attempt);
             apply_server_retry_hint(sleep_ms);
@@ -188,7 +183,9 @@ bool http_client::status_good(const http_response& response) {
         && response.status_code < 300;
 }
 
-bool http_client::status_bad(const http_response& response, const bool net_ok) {
+bool http_client::status_retry(
+    const http_response& response, const bool net_ok
+) {
     return !net_ok || response.status_code == 429 || response.status_code == 408
         || (response.status_code >= 500 && response.status_code < 600);
 }
@@ -220,4 +217,5 @@ size_t http_client::write_callback(
     auto* text = static_cast<std::string*>(data);
     text->append(ptr, total);
     return total;
+}
 }

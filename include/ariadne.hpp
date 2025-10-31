@@ -25,6 +25,7 @@
 #ifndef ARACHNE_ARIADNE_HPP
 #define ARACHNE_ARIADNE_HPP
 
+namespace arachnespace {
 class ariadne { };
-
+}
 #endif // ARACHNE_ARIADNE_HPP

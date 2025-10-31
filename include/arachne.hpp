@@ -24,33 +24,12 @@
 
 #ifndef ARACHNE_ARACHNE_HPP
 #define ARACHNE_ARACHNE_HPP
+#include "pheidippides.hpp"
 
-#include <span>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
+namespace arachnespace {
+using std::chrono_literals::operator""h;
 
-/**
- * @brief Wikidata entity kind.
- *
- * Names include the prefix letter for clarity:
- *  - item (Q…), property (P…), lexeme (L…), mediainfo (M…), entity_schema (E…),
- *    form (L…-F…), sense (L…-S…).
- * `any` is an API selector; `unknown` denotes invalid/unrecognized IDs.
- */
-enum class entity_kind {
-    item, ///< Q…
-    property, ///< P…
-    lexeme, ///< L…
-    mediainfo, ///< M…
-    entity_schema, ///< E…
-    form, ///< L…-F…
-    sense, ///< L…-S…
-    any, ///< API selector (e.g., flush(any)); not directly batchable.
-    unknown ///< Unrecognized/invalid identifier.
-};
-
-/** @brief Number of batchable kinds (Q, P, L, M, E, Form, Sense). */
+/** @brief Number of batchable kinds (Q, P, L, M, E, form, sense). */
 inline constexpr std::size_t batched_kind_count = 7;
 
 /**
@@ -71,11 +50,11 @@ public:
     /// @{
 
     /**
-     * @brief Create/select a group.
+     * @brief Create or select a group and make it current.
      *
      * If @p name is empty, creates a new anonymous group with a random name and
      * makes it current. If @p name exists, it becomes current but is NOT
-     * cleared. If it doesn't exist, it is created.
+     * cleared. If it doesn't exist, the group is created and then selected.
      *
      * @param name Group name or empty for an anonymous group.
      * @return true if a new group was created; false if the group already
@@ -85,15 +64,24 @@ public:
      * groups cannot be addressed explicitly.
      */
     bool new_group(std::string name = "");
+    /**
+     * @brief Select an existing group or create it on demand.
+     *
+     * An empty @p name selects/creates the anonymous group. A non-empty name is
+     * delegated to `new_group`, which creates the group if necessary.
+     *
+     * @param name Group name to activate; empty targets the anonymous group.
+     */
+    void select_group(std::string name);
 
     /**
      * @brief Enqueue numeric IDs with a given kind and add them to a group.
      *
      * Numeric IDs are normalized by adding the kind prefix.
-     * - If @p kind is form or sense, a warning is recorded and normalization
-     * yields "L<id>" (lexeme), since forms/senses are not representable
-     * numerically.
-     * - Freshness checks are stubbed; duplicates in the queue are ignored.
+     * - If @p kind is form or sense, normalization maps to the lexeme prefix
+     *   ("L<id>"); no warning is emitted yet (logging TODO).
+     * - Freshness checks are stubbed; the helper `enqueue` always asks for a
+     *   fetch, and the underlying sets deduplicate repeated IDs automatically.
      *
      * @param ids  Span of numeric IDs.
      * @param kind Entity kind (must NOT be any/unknown).
@@ -102,15 +90,60 @@ public:
      * @return The resulting size of the target group after insertions.
      * @throws std::invalid_argument if @p kind is any/unknown.
      */
-    int
-    add_ids(std::span<const int> ids, entity_kind kind, std::string name = "");
+    size_t add_ids(
+        std::span<const int> ids, corespace::entity_kind kind,
+        std::string name = ""
+    );
+    /**
+     * @brief Extract the lexeme root from a full ID string.
+     *
+     * For IDs beginning with "L" followed by digits, returns "L<digits>". For
+     * other prefixes or malformed strings, returns an empty string.
+     *
+     * @param id Identifier to inspect (e.g., "L7-F1").
+     * @return Lexeme root ("L7") or empty on failure.
+     */
+    static std::string entity_root(const std::string& id);
+    /**
+     * @brief Placeholder for interactive staleness confirmation.
+     *
+     * The current implementation is non-interactive and always returns false.
+     * A future version is expected to prompt the user when cached data is
+     * stale and return the user's decision.
+     *
+     * @param id  Entity identifier under consideration.
+     * @param kind Detected kind of the entity.
+     * @param age  Age of the cached entry.
+     * @return Currently always false; future behavior should reflect user
+     *         confirmation.
+     */
+    bool ask_update(
+        std::string_view id, corespace::entity_kind kind,
+        const std::chrono::milliseconds age
+    );
+    /**
+     * @brief Decide whether an entity should be enqueued for fetching.
+     *
+     * This placeholder implementation always returns true, effectively
+     * requesting a fetch for every entity. The expected behavior is to consult
+     * storage state (`exist`, `last`) and return true only when an update is
+     * required.
+     *
+     * @param id   Canonical identifier (e.g., "Q123" or "L7").
+     * @param kind Entity kind (lexeme for forms/senses).
+     * @return true if the caller should enqueue the entity; placeholder always
+     *         true.
+     */
+    bool enqueue(std::string_view id, corespace::entity_kind kind);
 
     /**
      * @brief Enqueue a full (prefixed) ID string and add it to a group.
      *
      * The ID must include its prefix (e.g., "Q123", "L77-F2").
      * Validation is performed via `identify()`. Invalid IDs cause an exception.
-     * For "L…-F…"/"L…-S…" exact IDs are queued (no mapping).
+     * For "L...-F..."/"L...-S...", the group receives the verbatim string while
+     * the batch queue stores the lexeme root ("L...") so fetches target the
+     * parent lexeme.
      *
      * @param id_with_prefix Full ID with prefix.
      * @param force If true, bypass freshness/existence checks and enqueue
@@ -121,8 +154,9 @@ public:
      * @throws std::invalid_argument if the ID is invalid or has an unknown
      * prefix.
      */
-    int add_entity(
-        std::string id_with_prefix, bool force = false, std::string name = ""
+    size_t add_entity(
+        const std::string& id_with_prefix, bool force = false,
+        std::string name = ""
     );
 
     /**
@@ -135,16 +169,20 @@ public:
      * @param kind Entity kind selector or entity_kind::any.
      * @return true if at least one entity was flushed; false otherwise.
      */
-    bool flush(entity_kind kind = entity_kind::any);
+    bool flush(corespace::entity_kind kind = corespace::entity_kind::any);
 
     /**
-     * @brief Get the number of queued (pending) entities.
+     * @brief Get the number of queued (pending) entities tracked in the main
+     *        batch containers.
      *
      * @param kind Specific kind, or entity_kind::any to return the sum across
-     * all batchable kinds.
-     * @return Count of queued entities.
+     *             all batchable kinds.
+     * @return Count of queued entities for the requested kind. Values are
+     *         narrowed to `int` via `static_cast` and therefore inherit the
+     *         implementation-defined behavior of signed narrowing conversions
+     *         when the count exceeds `INT_MAX`.
      */
-    int queue_size(entity_kind kind) const noexcept;
+    int queue_size(corespace::entity_kind kind) const noexcept;
 
     /**
      * @brief Determine the kind of a full ID string.
@@ -155,7 +193,7 @@ public:
      * @param entity Full ID with prefix.
      * @return Detected kind (may be `unknown`).
      */
-    static entity_kind identify(const std::string& entity) noexcept;
+    static corespace::entity_kind identify(const std::string& entity) noexcept;
 
     /**
      * @brief Normalize a numeric ID with the given kind to a prefixed string.
@@ -165,16 +203,21 @@ public:
      *  - (45,  property)  -> "P45"
      *  - (7,   lexeme)    -> "L7"
      *  - (9,   mediainfo) -> "M9"
-     *  - (2,   entity_schema)    -> "E2"
-     *  - (7,   form)      -> "L7"   (warning: mapped to lexeme)
-     *  - (7,   sense)     -> "L7"   (warning: mapped to lexeme)
+     *  - (2,   entity_schema) -> "E2"
+     *  - (7,   form)      -> "L7" (mapped to lexeme)
+     *  - (7,   sense)     -> "L7" (mapped to lexeme)
      *
      * @param id   Numeric identifier.
      * @param kind Kind to prefix with (must not be any/unknown).
      * @return Prefixed ID string.
-     * @throws std::invalid_argument if @p kind is any/unknown.
+     * @throws std::invalid_argument if @p id is negative or @p kind is
+     *         any/unknown.
+     *
+     * @note Form and sense identifiers are currently coerced to the lexeme
+     *       prefix without emitting diagnostics; logging is a planned
+     *       enhancement.
      */
-    static std::string normalize(int id, entity_kind kind);
+    static std::string normalize(int id, corespace::entity_kind kind);
 
     /**
      * @brief Increment the touch counter for a single full ID (prefix
@@ -202,47 +245,53 @@ public:
      * @return The number of entities for which `touch_entity()` returned true.
      * @throws std::invalid_argument if @p kind is any/unknown.
      */
-    int touch_ids(std::span<const int> ids, entity_kind kind) noexcept;
+    int
+    touch_ids(std::span<const int> ids, corespace::entity_kind kind) noexcept;
 
     /// @}
 
 private:
     /**
-     * @brief Parse a full ID string and extract the numeric part
-     * position/value.
+     * @brief Parse a full ID string and extract the numeric portion.
+     *
      * @param entity Full ID (e.g., "Q123", "L7-F1", "L7-S2").
-     * @param pos    Out: index of the first digit within @p entity
-     * (implementation-defined if absent).
-     * @param id     Out: parsed integer portion when present.
+     * @param pos    In/out index of the first digit within @p entity. On
+     *               success the index is advanced past the number.
+     * @param id     Out parameter for the parsed integer portion.
      * @return true on successful parse; false otherwise. Never throws.
-     * @internal Helper used by ID validation/normalization routines.
+     *
+     * @internal Helper used by ID validation and normalization routines.
      */
-
     static bool parse_id(const std::string& entity, size_t& pos, int& id);
 
-    // Queues (batches) per batchable kind; elements are normalized IDs
-    // ("Q123", "P45", "L7", "M9", "E2", "L7-F1", "L7-S2").
+    // Queues (batches) per batchable kind; elements are expected to be
+    // normalized IDs such as "Q123", "P45", "L7", "M9", or "E2". Forms and
+    // senses contribute their lexeme root ("L<id>").
     std::array<std::unordered_set<std::string>, batched_kind_count>
         main_batches;
     std::array<std::unordered_set<std::string>, batched_kind_count>
         extra_batches;
 
-    // Groups: group name -> set of entity IDs as added (verbatim; includes
-    // "L…-F…"/"L…-S…").
+    // Groups: group name -> set of entity IDs as provided by callers (verbatim;
+    // includes "L...-F..." and "L...-S...").
     std::unordered_map<std::string, std::unordered_set<std::string>> groups;
 
     // Touch candidates: full ID string -> touch count.
     std::unordered_map<std::string, int> candidates;
 
     // Thresholds (kept constant for now; make configurable later if needed).
-    const int batch_threshold
+    const size_t batch_threshold
         = 50; ///< Typical unauthenticated entity-per-request cap.
-    const int candidates_threshold
+    const size_t candidates_threshold
         = 50; ///< Intentional high bar for curiosity-driven candidates.
 
     // Current group name (private by design; anonymous groups cannot be
     // addressed explicitly).
     std::string current_group;
-};
+    std::chrono::milliseconds staleness_threshold = 24h;
+    bool interactive = false;
 
+    pheidippides phe_client;
+};
+}
 #endif // ARACHNE_ARACHNE_HPP

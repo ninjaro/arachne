@@ -25,14 +25,13 @@
 #include "arachne.hpp"
 #include "rng.hpp"
 
-#include <stdexcept>
-
+namespace arachnespace {
 static constexpr std::string prefixes = "QPLME";
 
 bool arachne::new_group(std::string name) {
     if (name.empty()) {
         do {
-            name = "g_" + random_hex(8);
+            name = "g_" + corespace::random_hex(8);
         } while (groups.contains(name));
     }
     auto [it, inserted] = groups.try_emplace(name);
@@ -40,8 +39,18 @@ bool arachne::new_group(std::string name) {
     return inserted;
 }
 
-int arachne::queue_size(const entity_kind kind) const noexcept {
-    if (kind == entity_kind::any) {
+void arachne::select_group(std::string name) {
+    if (name.empty()) {
+        if (current_group.empty()) {
+            new_group();
+        }
+        return;
+    }
+    new_group(std::move(name));
+}
+
+int arachne::queue_size(const corespace::entity_kind kind) const noexcept {
+    if (kind == corespace::entity_kind::any) {
         std::size_t sum = 0;
         for (const auto& batch : main_batches) {
             sum += batch.size();
@@ -70,67 +79,155 @@ bool arachne::parse_id(const std::string& entity, size_t& pos, int& id) {
     return true;
 }
 
-entity_kind arachne::identify(const std::string& entity) noexcept {
+corespace::entity_kind arachne::identify(const std::string& entity) noexcept {
     if (entity.size() < 2) {
-        return entity_kind::unknown;
+        return corespace::entity_kind::unknown;
     }
     size_t pos = 0;
     size_t kind = prefixes.find(entity[pos++]);
     int id {};
     if (kind == std::string::npos || !parse_id(entity, pos, id)) {
-        return entity_kind::unknown;
+        return corespace::entity_kind::unknown;
     }
     if (pos == entity.size()) {
-        return static_cast<entity_kind>(kind);
+        return static_cast<corespace::entity_kind>(kind);
     }
-    if (kind != static_cast<size_t>(entity_kind::lexeme) || pos >= entity.size()
-        || entity[pos++] != '-' || pos >= entity.size()) {
-        return entity_kind::unknown;
+    if (kind != static_cast<size_t>(corespace::entity_kind::lexeme)
+        || pos >= entity.size() || entity[pos++] != '-'
+        || pos >= entity.size()) {
+        return corespace::entity_kind::unknown;
     }
     const char tag = entity[pos++];
     if (tag != 'F' && tag != 'S' || !parse_id(entity, pos, id)
         || pos != entity.size()) {
-        return entity_kind::unknown;
+        return corespace::entity_kind::unknown;
     }
-    return tag == 'F' ? entity_kind::form : entity_kind::sense;
+    return tag == 'F' ? corespace::entity_kind::form
+                      : corespace::entity_kind::sense;
 }
 
-std::string arachne::normalize(const int id, const entity_kind kind) {
+std::string
+arachne::normalize(const int id, const corespace::entity_kind kind) {
     if (id < 0) {
         throw std::invalid_argument("normalize: id must be non-negative");
     }
-    if (kind == entity_kind::any || kind == entity_kind::unknown) {
+    if (kind == corespace::entity_kind::any
+        || kind == corespace::entity_kind::unknown) {
         throw std::invalid_argument(
             "normalize: kind must be a concrete, known entity kind"
         );
     }
     auto idx = static_cast<std::size_t>(kind);
-    if (idx >= static_cast<size_t>(entity_kind::form)) {
+    if (idx >= static_cast<size_t>(corespace::entity_kind::form)) {
         // Numeric Form/Sense are not representable; map to lexeme.
         // TODO: emit warning via logging sink.
-        idx = static_cast<size_t>(entity_kind::lexeme);
+        idx = static_cast<size_t>(corespace::entity_kind::lexeme);
     }
     return prefixes[idx] + std::to_string(id);
 }
 
-int arachne::add_ids(
-    std::span<const int> ids, entity_kind kind, std::string name
+size_t arachne::add_ids(
+    std::span<const int> ids, corespace::entity_kind kind, std::string name
 ) {
-    return 0;
+    if (kind == corespace::entity_kind::any
+        || kind == corespace::entity_kind::unknown) {
+        throw std::invalid_argument("unknown kind of numeric IDs");
+    }
+    select_group(std::move(name));
+    size_t last_size = groups[current_group].size();
+    for (const int id : ids) {
+        std::string id_with_prefix = normalize(id, kind);
+        last_size = add_entity(std::move(id_with_prefix), false, current_group);
+    }
+    return last_size;
 }
 
-int arachne::add_entity(
-    std::string id_with_prefix, bool force, std::string name
-) {
-    return 0;
+std::string arachne::entity_root(const std::string& id) {
+    if (id.size() < 2 || id.front() != 'L') {
+        return {};
+    }
+    size_t pos = 1;
+    int val {};
+    if (!parse_id(id, pos, val)) {
+        return {};
+    }
+    return "L" + std::to_string(val);
 }
 
-bool arachne::touch_entity(std::string_view id_with_prefix) noexcept {
+bool arachne::ask_update(
+    std::string_view, corespace::entity_kind, const std::chrono::milliseconds
+) {
+    // UI/UX: todo: ask user if update is needed
     return false;
 }
 
-int arachne::touch_ids(std::span<const int> ids, entity_kind kind) noexcept {
+bool arachne::enqueue(
+    const std::string_view id, const corespace::entity_kind kind
+) {
+    // ariadne.entity_status(id)
+    auto [exist, last] = std::pair<bool, long long>(false, -1);
+    if (!exist || last < 0) {
+        return true;
+    }
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()
+    )
+                            .count();
+    const auto age = std::chrono::milliseconds { now_ms - last };
+    if (age > staleness_threshold) {
+        return true;
+    }
+    if (interactive) {
+        return ask_update(id, kind, age);
+    }
+    return false;
+}
+
+size_t arachne::add_entity(
+    const std::string& id_with_prefix, const bool force, std::string name
+) {
+    corespace::entity_kind kind = identify(id_with_prefix);
+    if (kind == corespace::entity_kind::any
+        || kind == corespace::entity_kind::unknown) {
+        throw std::invalid_argument("unknown kind of numeric IDs");
+    }
+    select_group(std::move(name));
+    auto& group = groups[current_group];
+    group.insert(id_with_prefix);
+    std::string canonical;
+    if (kind == corespace::entity_kind::form
+        || kind == corespace::entity_kind::sense) {
+        canonical = entity_root(id_with_prefix);
+        if (canonical.empty()) {
+            throw std::invalid_argument(
+                "bad root-lexeme prefix of the entity: " + id_with_prefix
+            );
+        }
+        kind = corespace::entity_kind::lexeme;
+    } else {
+        canonical = id_with_prefix;
+    }
+    if (force || enqueue(canonical, kind)) {
+        auto& pool = main_batches[static_cast<size_t>(kind)];
+        pool.insert(canonical);
+        if (pool.size() >= batch_threshold) {
+            flush(kind);
+        }
+    }
+    return group.size();
+}
+
+bool arachne::touch_entity(std::string_view) noexcept { return false; }
+
+int arachne::touch_ids(std::span<const int>, corespace::entity_kind) noexcept {
     return 0;
 }
 
-bool arachne::flush(entity_kind kind) { return false; }
+bool arachne::flush(corespace::entity_kind kind) {
+    const auto& batch = main_batches[static_cast<size_t>(kind)];
+    const size_t size = batch.size();
+    auto data = phe_client.fetch_json(batch, kind);
+    // ariadne.store(data);
+    return size > batch.size();
+}
+}

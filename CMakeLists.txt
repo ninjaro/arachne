@@ -41,10 +41,26 @@ add_library(arachne_lib STATIC
         src/pheidippides.cpp
 
         src/rng.cpp
+        src/utils.cpp
         src/http_client.cpp
 )
-target_include_directories(arachne_lib PUBLIC include)
 target_compile_features(arachne_lib PUBLIC cxx_std_23)
+target_include_directories(arachne_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_sources(arachne_lib
+        PUBLIC
+        FILE_SET public_headers
+        TYPE HEADERS
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include
+        FILES
+        include/arachne.hpp
+        include/ariadne.hpp
+        include/penelope.hpp
+        include/pheidippides.hpp
+
+        include/rng.hpp
+        include/utils.hpp
+        include/http_client.hpp
+)
 target_link_libraries(arachne_lib
         PUBLIC
         CURL::libcurl
@@ -69,6 +85,7 @@ if (COVERAGE)
     else ()
         message(FATAL_ERROR "Coverage only supported on GCC or Clang")
     endif ()
+    target_link_libraries(arachne_lib PRIVATE dep_coverage)
 endif ()
 
 if (BUILD_TESTS)
@@ -93,5 +110,67 @@ if (BUILD_TESTS)
         gtest_discover_tests(unit_tests)
     else ()
         message(WARNING "GTest not found; unit tests will not be built")
+    endif ()
+endif ()
+
+if (COVERAGE)
+    set(COVERAGE_DIR "${CMAKE_BINARY_DIR}/../doc/cov")
+    set(COVERAGE_IGNORE_REGEX ".*/tests/.*|.*/usr/lib/.*")
+
+    if (TARGET unit_tests)
+        add_custom_command(
+                TARGET unit_tests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${COVERAGE_DIR}
+        )
+
+        if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            set(PROFRAW_FILE "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.profraw")
+            set(PROFDATA_FILE "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.profdata")
+
+            add_custom_target(coverage
+                    COMMENT "Generating coverage with llvm-cov"
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                    COMMAND ${CMAKE_COMMAND} --build . --target unit_tests
+                    COMMAND ${CMAKE_COMMAND} -E env LLVM_PROFILE_FILE=${PROFRAW_FILE} $<TARGET_FILE:unit_tests>
+                    COMMAND ${LLVM_PROFDATA} merge -sparse -o ${PROFDATA_FILE} ${PROFRAW_FILE}
+                    COMMAND ${LLVM_COV} show $<TARGET_FILE:unit_tests>
+                    -instr-profile=${PROFDATA_FILE}
+                    -format=html
+                    -output-dir=${COVERAGE_DIR}
+                    -ignore-filename-regex=${COVERAGE_IGNORE_REGEX}
+                    -show-branches=count
+                    -Xdemangler=c++filt
+                    -show-line-counts
+                    -show-regions
+                    -show-instantiations
+                    -show-expansions
+                    -use-color
+                    -coverage-watermark=90,60
+                    COMMAND ${LLVM_COV} export $<TARGET_FILE:unit_tests>
+                    -instr-profile=${PROFDATA_FILE}
+                    -format=lcov
+                    -ignore-filename-regex=${COVERAGE_IGNORE_REGEX} > ${CMAKE_BINARY_DIR}/coverage.info
+                    DEPENDS unit_tests
+                    VERBATIM
+            )
+
+        elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            add_custom_target(coverage
+                    COMMENT "Generating coverage with gcovr"
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                    COMMAND ${CMAKE_COMMAND} --build . --target unit_tests
+                    COMMAND $<TARGET_FILE:unit_tests>
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${COVERAGE_DIR}
+                    COMMAND ${GCOVR}
+                    --root ${CMAKE_SOURCE_DIR}
+                    --exclude '${COVERAGE_IGNORE_REGEX}'
+                    --html --html-details
+                    -o ${COVERAGE_DIR}/index.html
+                    DEPENDS unit_tests
+            )
+        endif ()
+
+    else ()
+        message(STATUS "COVERAGE=ON but tests are not built; 'coverage' target will be a no-op.")
     endif ()
 endif ()
