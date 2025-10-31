@@ -9,8 +9,8 @@ on:
       - 'include/**/*.hpp'
       - 'tests/**/*.cpp'
       - 'readme.md'
+      - 'Doxyfile'
       - 'CMakeLists.txt'
-      - '.github/workflows/html.yml'
   workflow_dispatch:
 
 permissions:
@@ -28,11 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
-      - uses: MarkusJx/googletest-installer@v1.1
-      - uses: ssciwr/doxygen-install@v1
+      - uses: MarkusJx/googletest-installer@28c5d4102d9d57b46254be19a940bf038a9c850a
+      - uses: ssciwr/doxygen-install@501e53b879da7648ab392ee226f5b90e42148449
         with:
           version: "1.15.0"
-      - uses: KyleMayes/install-llvm-action@v2
+      - uses: KyleMayes/install-llvm-action@98e68e10c96dffcb7bfed8b2144541a66b49aa02
         with:
           version: "20.1.8"
           env: true
@@ -57,7 +57,7 @@ jobs:
 
       - name: Upload results to Codecov
         if: ${{ hashFiles('build/coverage.info') != '' }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7
         continue-on-error: true
         with:
           files: build/coverage.info
@@ -66,7 +66,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload coverage to Codacy
-        if: ${{ hashFiles('build/coverage.info') != '' && secrets.CODACY_PROJECT_TOKEN != '' }}
+        if: ${{ hashFiles('build/coverage.info') != '' }}
         uses: codacy/codacy-coverage-reporter-action@a38818475bb21847788496e9f0fddaa4e84955ba
         continue-on-error: true
         with:

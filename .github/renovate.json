@@ -1,0 +1,51 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:best-practices", ":pinGitHubActionDigests"],
+  "timezone": "Europe/Berlin",
+  "baseBranches": ["docs"],
+  "labels": ["deps", "github-actions"],
+  "schedule": ["every weekend"],
+  "dependencyDashboard": true,
+  "commitMessagePrefix": "renovate versions in ymls: ",
+
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["patch", "digest"],
+      "automerge": true,
+      "automergeType": "branch",
+      "groupName": "GitHub Actions",
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "matchManagers": ["regex"],
+      "groupName": "Toolchains (Doxygen & LLVM)",
+      "minimumReleaseAge": "7 days"
+    }
+  ],
+
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/\\.github\\/workflows\\/.*\\.ya?ml$/"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "doxygen/doxygen",
+      "versioningTemplate": "regex",
+      "extractVersionTemplate": "^Release_(?<major>\\d+)_(?<minor>\\d+)_(?<patch>\\d+)$",
+      "matchStrings": [
+        "ssciwr\\/doxygen-install@(?<currentDigest>[0-9a-f]{40})[\\s\\S]*?\\bversion:\\s*\"?(?<currentValue>\\d+\\.\\d+\\.\\d+)\"?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/\\.github\\/workflows\\/.*\\.ya?ml$/"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "llvm/llvm-project",
+      "versioningTemplate": "regex",
+      "extractVersionTemplate": "^llvmorg-(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "matchStrings": [
+        "KyleMayes\\/install-llvm-action@(?<currentDigest>[0-9a-f]{40})[\\s\\S]*?\\bversion:\\s*\"?(?<currentValue>\\d+\\.\\d+\\.\\d+)\"?"
+      ]
+    }
+  ]
+}

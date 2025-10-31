@@ -117,9 +117,9 @@ public:
      * @return Currently always false; future behavior should reflect user
      *         confirmation.
      */
-    bool ask_update(
+    static bool ask_update(
         std::string_view id, corespace::entity_kind kind,
-        const std::chrono::milliseconds age
+        std::chrono::milliseconds age
     );
     /**
      * @brief Decide whether an entity should be enqueued for fetching.
@@ -134,7 +134,7 @@ public:
      * @return true if the caller should enqueue the entity; placeholder always
      *         true.
      */
-    bool enqueue(std::string_view id, corespace::entity_kind kind);
+    bool enqueue(std::string_view id, corespace::entity_kind kind) const;
 
     /**
      * @brief Enqueue a full (prefixed) ID string and add it to a group.

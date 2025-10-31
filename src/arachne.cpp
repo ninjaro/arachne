@@ -127,7 +127,8 @@ arachne::normalize(const int id, const corespace::entity_kind kind) {
 }
 
 size_t arachne::add_ids(
-    std::span<const int> ids, corespace::entity_kind kind, std::string name
+    const std::span<const int> ids, const corespace::entity_kind kind,
+    std::string name
 ) {
     if (kind == corespace::entity_kind::any
         || kind == corespace::entity_kind::unknown) {
@@ -137,21 +138,34 @@ size_t arachne::add_ids(
     size_t last_size = groups[current_group].size();
     for (const int id : ids) {
         std::string id_with_prefix = normalize(id, kind);
-        last_size = add_entity(std::move(id_with_prefix), false, current_group);
+        last_size = add_entity(id_with_prefix, false, current_group);
     }
     return last_size;
 }
 
 std::string arachne::entity_root(const std::string& id) {
-    if (id.size() < 2 || id.front() != 'L') {
-        return {};
+    const corespace::entity_kind kind = identify(id);
+    if (kind == corespace::entity_kind::any
+        || kind == corespace::entity_kind::unknown) {
+        throw std::invalid_argument("invalid or unknown entity kind");
     }
-    size_t pos = 1;
-    int val {};
-    if (!parse_id(id, pos, val)) {
-        return {};
+
+    if (kind == corespace::entity_kind::form
+        || kind == corespace::entity_kind::sense) {
+        if (id.size() < 2 || id.front() != 'L') {
+            throw std::invalid_argument(
+                "bad root-lexeme prefix of the entity: " + id
+            );
+        }
+        int val {};
+        if (size_t pos = 1; !parse_id(id, pos, val)) {
+            throw std::invalid_argument(
+                "bad numeric identifier of the entity: " + id
+            );
+        }
+        return "L" + std::to_string(val);
     }
-    return "L" + std::to_string(val);
+    return id;
 }
 
 bool arachne::ask_update(
@@ -163,7 +177,7 @@ bool arachne::ask_update(
 
 bool arachne::enqueue(
     const std::string_view id, const corespace::entity_kind kind
-) {
+) const {
     // ariadne.entity_status(id)
     auto [exist, last] = std::pair<bool, long long>(false, -1);
     if (!exist || last < 0) {
@@ -186,28 +200,12 @@ bool arachne::enqueue(
 size_t arachne::add_entity(
     const std::string& id_with_prefix, const bool force, std::string name
 ) {
-    corespace::entity_kind kind = identify(id_with_prefix);
-    if (kind == corespace::entity_kind::any
-        || kind == corespace::entity_kind::unknown) {
-        throw std::invalid_argument("unknown kind of numeric IDs");
-    }
+    const std::string canonical = entity_root(id_with_prefix);
     select_group(std::move(name));
     auto& group = groups[current_group];
     group.insert(id_with_prefix);
-    std::string canonical;
-    if (kind == corespace::entity_kind::form
-        || kind == corespace::entity_kind::sense) {
-        canonical = entity_root(id_with_prefix);
-        if (canonical.empty()) {
-            throw std::invalid_argument(
-                "bad root-lexeme prefix of the entity: " + id_with_prefix
-            );
-        }
-        kind = corespace::entity_kind::lexeme;
-    } else {
-        canonical = id_with_prefix;
-    }
-    if (force || enqueue(canonical, kind)) {
+    if (corespace::entity_kind kind = identify(canonical);
+        force || enqueue(canonical, kind)) {
         auto& pool = main_batches[static_cast<size_t>(kind)];
         pool.insert(canonical);
         if (pool.size() >= batch_threshold) {

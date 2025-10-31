@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: MarkusJx/googletest-installer@v1.1
+      - uses: MarkusJx/googletest-installer@v28c5d4102d9d57b46254be19a940bf038a9c850a
 
       - name: Install apt dependencies
         run: |
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Clang-format
-        uses: jidicula/clang-format-action@v4.13.0
+        uses: jidicula/clang-format-action@6cd220de46c89139a0365edae93eee8eb30ca8fe
         with:
-          clang-format-version: '20'
+          clang-format-version: '21'
           check-path: '.'
