@@ -84,10 +84,23 @@ public:
      *
      * @param url    Absolute or base URL.
      * @param params Optional list of query parameters to append.
+     * @param override
      * @return http_response on success (2xx).
      * @throws std::runtime_error on terminal failure as described above.
      */
-    http_response get(std::string_view url, const parameter_list& params = {});
+    http_response
+    get(std::string_view url, const parameter_list& params = {},
+        std::string_view override = {});
+    http_response post_form(
+        std::string_view url, const parameter_list& form,
+        const parameter_list& query = {}, std::string_view override = {}
+    );
+    http_response post_raw(
+        std::string_view url, std::string_view body,
+        std::string_view content_type, const parameter_list& query = {},
+        std::string_view override = {}
+    );
+
     /**
      * @brief Access aggregated network metrics.
      * @return Const reference to the metrics snapshot.
@@ -119,10 +132,20 @@ private:
      *
      * @param url_handle Prepared `CURLU` handle (owned by caller).
      * @param elapsed    Out: time spent in `curl_easy_perform`.
+     * @param override
      * @return Populated `http_response` (may carry a libcurl error).
      */
-    http_response
-    request(CURLU* url_handle, std::chrono::milliseconds& elapsed) const;
+    http_response request_get(
+        CURLU* url_handle, std::chrono::milliseconds& elapsed,
+        std::string_view override = {}
+    ) const;
+    http_response request_post(
+        CURLU* url_handle, std::chrono::milliseconds& elapsed,
+        std::string_view content_type, std::string_view body,
+        std::string_view override
+    ) const;
+    std::string build_form_body(const parameter_list& form) const;
+
     /**
      * @brief Refresh the header multimap from the last transfer.
      *
@@ -199,6 +222,7 @@ private:
 
     const network_options opt {}; ///< Fixed options installed at construction.
     network_metrics metrics; ///< Aggregated metrics (atomic counters).
+    mutable std::mutex mu;
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl {
         nullptr, &curl_easy_cleanup
     }; ///< Reused easy handle (not thread-safe).

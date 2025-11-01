@@ -173,7 +173,7 @@ struct network_options {
     int connect_ms = 3000; ///< Connect timeout (ms).
     int max_retries = 3; ///< Max retry attempts after the first try.
     int retry_base_ms = 200; ///< Base for exponential backoff (ms).
-    int retry_max_ms = 3000; ///< Max per-attempt backoff (ms).
+    long long retry_max_ms = 3000; ///< Max per-attempt backoff (ms).
 
     std::string accept = "application/json"; ///< Default Accept header.
     std::string user_agent = "arachne/client"; ///< Default User-Agent.
