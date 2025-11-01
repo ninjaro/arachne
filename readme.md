@@ -1,16 +1,16 @@
 ![yelling Logo](assets/og-arachne.svg)
 
-[![version](https://img.shields.io/github/v/release/ninjaro/arachne?include_prereleases)](https://github.com/ninjaro/arachne/releases/latest)
-[![Checks](https://github.com/ninjaro/arachne/actions/workflows/tests.yml/badge.svg)](https://github.com/ninjaro/arachne/actions/workflows/tests.yml)
-[![Deploy](https://github.com/ninjaro/arachne/actions/workflows/html.yml/badge.svg)](https://github.com/ninjaro/arachne/actions/workflows/html.yml)
 [![codecov](https://codecov.io/gh/ninjaro/arachne/graph/badge.svg?token=TRWFFRPDMO)](https://codecov.io/gh/ninjaro/arachne)
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/bfbea7685e154a2ab670d75ffe4f3509)](https://app.codacy.com/gh/ninjaro/arachne/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![license](https://img.shields.io/github/license/ninjaro/arachne?color=e6e6e6)](https://github.com/ninjaro/arachne/blob/master/license)
+[![license](https://img.shields.io/github/license/ninjaro/arachne?color=e6e6e6)](https://github.com/ninjaro/arachne/blob/master/license)  
+[![Checks](https://github.com/ninjaro/arachne/actions/workflows/tests.yml/badge.svg)](https://github.com/ninjaro/arachne/actions/workflows/tests.yml)
+[![Deploy](https://github.com/ninjaro/arachne/actions/workflows/html.yml/badge.svg)](https://github.com/ninjaro/arachne/actions/workflows/html.yml)
+[![version](https://img.shields.io/github/v/release/ninjaro/arachne?include_prereleases)](https://github.com/ninjaro/arachne/releases/latest)
 
 ## OFFICIAL PROCLAMATION, HEARD FROM HERE TO OLYMPUS
 
 ATHENA IS A PRETENDER. She knots even basic Wikidata entities and calls it craft.  
-Say NO to false idols and borrowed crowns. We will not bend over backwards at looms  
+Say NO to false idols and borrowed crowns. We won't bend over backwards at looms  
 for the one whose crowning glory is a win over Zeus's moistest brother.
 
 NO GOLDEN APPLE FOR ATHENA - ONLY CARRION FOR SUCH A HYENA!

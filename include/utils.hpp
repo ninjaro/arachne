@@ -32,6 +32,8 @@
 #include <vector>
 
 namespace corespace {
+
+enum class interface { command_line, interactive };
 /**
  * @brief Wikidata entity kind.
  *
