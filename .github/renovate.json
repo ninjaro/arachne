@@ -45,12 +45,12 @@
         "/\\.github\\/workflows\\/.*\\.ya?ml$/"
       ],
       "datasourceTemplate": "github-releases",
-      "depNameTemplate": "doxygen/doxygen",
       "packageNameTemplate": "doxygen/doxygen",
+      "depNameTemplate": "doxygen/doxygen",
+      "versioningTemplate": "semver",
       "extractVersionTemplate": "^Release_(?<major>\\d+)_(?<minor>\\d+)_(?<patch>\\d+)$",
-      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
       "matchStrings": [
-        "ssciwr\\/doxygen-install@(?<currentDigest>[0-9a-f]{40})[\\s\\S]*?\\bversion:\\s*\"?(?<currentValue>\\d+\\.\\d+\\.\\d+)\"?"
+        "ssciwr\\/doxygen-install@[^\\s]+[\\s\\S]*?\\bversion:\\s*\"?(?<currentValue>\\d+\\.\\d+\\.\\d+)\"?"
       ]
     },
     {
@@ -59,12 +59,12 @@
         "/\\.github\\/workflows\\/.*\\.ya?ml$/"
       ],
       "datasourceTemplate": "github-releases",
-      "depNameTemplate": "llvm/llvm-project",
       "packageNameTemplate": "llvm/llvm-project",
-      "extractVersionTemplate": "^llvmorg-(?<version>\\d+\\.\\d+\\.\\d+)$",
-      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "depNameTemplate": "llvm/llvm-project",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^llvmorg-(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
       "matchStrings": [
-        "KyleMayes\\/install-llvm-action@(?<currentDigest>[0-9a-f]{40})[\\s\\S]*?\\bversion:\\s*\"?(?<currentValue>\\d+\\.\\d+\\.\\d+)\"?"
+        "KyleMayes\\/install-llvm-action@[^\\s]+[\\s\\S]*?\\bversion:\\s*\"?(?<currentValue>\\d+\\.\\d+\\.\\d+)\"?"
       ]
     }
   ]
