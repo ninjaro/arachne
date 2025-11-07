@@ -1,14 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:best-practices",
-    ":pinGitHubActionDigests"
+    "config:best-practices"
   ],
   "timezone": "Europe/Berlin",
   "baseBranchPatterns": [
     "docs"
   ],
-  "useBaseBranchConfig": "merge",
   "labels": [
     "deps",
     "github-actions"
@@ -34,7 +32,7 @@
     },
     {
       "matchManagers": [
-        "regex"
+        "custom.regex"
       ],
       "groupName": "Toolchains (Doxygen & LLVM)",
       "minimumReleaseAge": "7 days"
