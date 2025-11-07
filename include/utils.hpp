@@ -27,6 +27,7 @@
 #include <array>
 #include <atomic>
 #include <curl/curl.h>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -62,6 +63,17 @@ using parameter = std::pair<std::string, std::string>;
 using parameter_list = std::vector<parameter>;
 
 /**
+ * @brief Identifies supported SPARQL services.
+ *
+ * Used to select which SPARQL endpoint to query. Currently only
+ * `wdqs` (Wikidata Query Service) is supported.
+ *
+ * Values:
+ *  - wdqs: Wikidata Query Service (https://query.wikidata.org)
+ */
+enum service_kind { wdqs };
+
+/**
  * @struct options
  * @brief Configuration for fetching entities via MediaWiki/Wikibase API.
  *
@@ -73,7 +85,7 @@ using parameter_list = std::vector<parameter>;
  *    revision content, normalization, and related API flags).
  */
 struct options {
-    std::size_t batch_threshold = 50;
+    size_t batch_threshold = 50;
 
     std::vector<std::string> prop = { "info", "revisions" };
     std::vector<std::string> props
@@ -178,5 +190,155 @@ struct network_options {
     std::string accept = "application/json"; ///< Default Accept header.
     std::string user_agent = "arachne/client"; ///< Default User-Agent.
 };
+
+/**
+ * @brief HTTP method to use for a request.
+ *
+ * Represents the actual HTTP method used when sending a request.
+ * - `get`: Use the HTTP GET method.
+ * - `post`: Use the HTTP POST method.
+ */
+enum class http_method { get, post };
+/**
+ * @brief Hint for selecting the HTTP method for a request.
+ *
+ * Used to determine which HTTP method to use based on query length or explicit
+ * override.
+ * - `automatic`: Selects GET or POST based on query length (e.g., GET for short
+ * queries, POST for long).
+ * - `force_get`: Forces the use of GET regardless of query length.
+ * - `force_post`: Forces the use of POST regardless of query length.
+ *
+ * This differs from `http_method` in that it provides a policy for method
+ * selection, rather than specifying the method directly.
+ */
+enum class http_method_hint { automatic, force_get, force_post };
+
+struct sparql_request {
+    std::string query;
+    http_method_hint method = http_method_hint::automatic;
+    static constexpr size_t service_default
+        = std::numeric_limits<size_t>::max();
+    size_t length_threshold = service_default;
+    int timeout_sec = -1;
+    std::string accept;
+    std::string content_type;
+};
+
+/**
+ * @struct service_profile
+ * @brief Static configuration values describing a remote service.
+ *
+ * Contains the base endpoint URL, the default Accept header value used
+ * when a request does not specify one, and optional rate hint strings
+ * (for example, "polite" or "limit") that guide client throttling.
+ */
+struct service_profile {
+    std::string base_url;
+    std::string default_accept;
+    std::vector<std::string> rate_hints;
+};
+
+/**
+ * @brief Options specific to WDQS usage and heuristics.
+ *
+ * - length_threshold: query length above which POST is preferred.
+ * - timeout_sec: per-request timeout in seconds.
+ * - accept_override: optional runtime Accept header override.
+ */
+struct wdqs_options {
+    std::size_t length_threshold = 1800;
+    int timeout_sec = 60;
+    std::string accept_override;
+};
+
+struct call_preview {
+    http_method method {
+        http_method::get
+    }; ///< HTTP method to use for the request (GET, POST, etc.).
+    std::string url; ///< Full request URL (excluding query parameters).
+    parameter_list
+        query_params; ///< Parameters to be appended to the URL as a query
+                      ///< string (for GET/URL-encoded requests).
+    parameter_list
+        form_params; ///< Parameters to be sent in the request body as form data
+                     ///< (for POST requests with form encoding).
+    std::string body; ///< Raw request body (used for POST requests with
+                      ///< non-form content, e.g., JSON or SPARQL).
+    std::string
+        content_type; ///< Content-Type header value for the request body.
+    std::string
+        accept; ///< Accept header value indicating expected response format.
+    int timeout_sec = -1; ///< Per-request timeout in seconds (-1 for default).
+    bool use_form_body { false }; ///< If true, send form_params as the request
+                                  ///< body; otherwise, use raw body.
+
+    /**
+     * @brief Check whether a query parameter with key @p key exists.
+     * @param key Key to search for.
+     * @return true if a parameter with the given key is present.
+     */
+    [[nodiscard]] bool has_param(std::string_view key) const;
+
+    /**
+     * @brief Retrieve the first value for query parameter @p key.
+     * @param key Key to search for.
+     * @return Value associated with @p key or empty string if not found.
+     */
+    [[nodiscard]] std::string get_param(std::string_view key) const;
+};
+
+/**
+ * @brief Retrieve the service profile for a given service kind.
+ * @param kind The service kind to look up.
+ * @return Reference to the corresponding service_profile.
+ */
+const service_profile& get_service_profile(service_kind kind);
+/**
+ * @brief Sorts the parameter list in-place by key.
+ * @param params The parameter list to sort. Modified in-place.
+ * @note Side effect: The input parameter list is reordered.
+ */
+void sort_parameters(parameter_list& params);
+/**
+ * @brief Appends common parameters required for a service and HTTP method.
+ * @param kind The service kind.
+ * @param method The HTTP method.
+ * @param params The parameter list to append to. Modified in-place.
+ * @note Side effect: The input parameter list is extended.
+ */
+void append_common_params(
+    service_kind kind, http_method method, parameter_list& params
+);
+/**
+ * @brief Chooses the appropriate HTTP method for a SPARQL request.
+ * @param request The SPARQL request.
+ * @param threshold The length threshold above which POST is preferred.
+ * @return The selected HTTP method (GET or POST).
+ */
+http_method
+choose_http_method(const sparql_request& request, std::size_t threshold);
+/**
+ * @brief Resolves the Accept header value for a SPARQL request.
+ * @param request The SPARQL request.
+ * @param profile The service profile.
+ * @param override_accept Optional override for the Accept header.
+ * @return The resolved Accept header value.
+ */
+std::string resolve_accept(
+    const sparql_request& request, const service_profile& profile,
+    std::string_view override_accept
+);
+/**
+ * @brief Determines the body content and strategy for a SPARQL request.
+ * @param request The SPARQL request.
+ * @return A pair where:
+ *   - first: The body content as a string.
+ *   - second: A boolean indicating whether to use form body (true) or raw body
+ * (false).
+ */
+std::pair<std::string, bool>
+resolve_body_strategy(const sparql_request& request);
+
 }
 #endif // ARACHNE_UTILS_HPP

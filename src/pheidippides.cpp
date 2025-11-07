@@ -81,8 +81,48 @@ nlohmann::json pheidippides::fetch_json(
     return combined;
 }
 
+nlohmann::json pheidippides::sparql(const corespace::sparql_request& request) {
+    const auto
+        [method, url, query_params, form_params, body, content_type, accept,
+         timeout_sec, use_form_body]
+        = build_call_preview(request);
+    if (method == corespace::http_method::get) {
+        return nlohmann::json::parse(
+            client.get(url, query_params, accept, timeout_sec).text, nullptr,
+            true
+        );
+    }
+    if (use_form_body) {
+        return nlohmann::json::parse(
+            client
+                .post_form(url, form_params, query_params, accept, timeout_sec)
+                .text,
+            nullptr, true
+        );
+    }
+    return nlohmann::json::parse(
+        client
+            .post_raw(
+                url, body, content_type, query_params, accept, timeout_sec
+            )
+            .text,
+        nullptr, true
+    );
+}
+
+nlohmann::json pheidippides::wdqs(std::string query) {
+    corespace::sparql_request request;
+    request.query = std::move(query);
+    return sparql(request);
+}
+
 const corespace::network_metrics& pheidippides::metrics_info() const {
     return client.metrics_info();
+}
+
+corespace::call_preview
+pheidippides::preview(const corespace::sparql_request& request) const {
+    return build_call_preview(request);
 }
 
 std::string pheidippides::join_str(
@@ -98,5 +138,48 @@ std::string pheidippides::join_str(
         result.append(*it);
     }
     return result;
+}
+
+corespace::call_preview pheidippides::build_call_preview(
+    const corespace::sparql_request& request
+) const {
+    using namespace corespace;
+
+    call_preview preview;
+    const auto& profile = get_service_profile(service_kind::wdqs);
+    preview.url = profile.base_url;
+
+    const std::size_t threshold
+        = request.length_threshold == sparql_request::service_default
+        ? wdqs_opt.length_threshold
+        : request.length_threshold;
+
+    const auto method = choose_http_method(request, threshold);
+    preview.method = method;
+
+    preview.timeout_sec
+        = request.timeout_sec >= 0 ? request.timeout_sec : wdqs_opt.timeout_sec;
+
+    preview.accept = resolve_accept(request, profile, wdqs_opt.accept_override);
+
+    if (method == http_method::get) {
+        preview.query_params.emplace_back("query", request.query);
+        append_common_params(service_kind::wdqs, method, preview.query_params);
+    } else {
+        const auto [content_type, use_form_body]
+            = resolve_body_strategy(request);
+
+        preview.content_type = content_type;
+        preview.use_form_body = use_form_body;
+        if (preview.use_form_body) {
+            preview.form_params.emplace_back("query", request.query);
+            sort_parameters(preview.form_params);
+        } else {
+            preview.body = request.query;
+        }
+        append_common_params(service_kind::wdqs, method, preview.query_params);
+    }
+
+    return preview;
 }
 }

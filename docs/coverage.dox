@@ -1,0 +1,29 @@
+/*! \page coverage Code Coverage Report
+\htmlonly
+<div class="cov-container" style="width:100%;">
+  <iframe id="cov-frame" style="width:100%;border:0;height:70vh" loading="lazy"></iframe>
+</div>
+
+<script>
+(function () {
+  function relPrefix() {
+    var s = document.querySelector('script[src$="doxygen.js"],script[src$="dynsections.js"]');
+    if (!s) return ""; // fallback: current dir
+    var src = s.getAttribute('src') || "";
+    return src.replace(/[^/]*$/, ""); // strip filename -> "../../"
+  }
+  var prefix = relPrefix();
+  document.getElementById('cov-frame').src = prefix + 'cov/index.html';
+
+  function resize() {
+    var f = document.getElementById('cov-frame');
+    if (!f) return;
+    var top = f.getBoundingClientRect().top + window.scrollY;
+    f.style.height = (window.innerHeight - (top - window.scrollY) - 24) + 'px';
+  }
+  window.addEventListener('load', resize);
+  window.addEventListener('resize', resize);
+})();
+</script>
+\endhtmlonly
+*/

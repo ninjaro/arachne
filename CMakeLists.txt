@@ -98,6 +98,7 @@ if (BUILD_TESTS)
 
                 tests/rng_tests.cpp
                 tests/http_client_tests.cpp
+                tests/sparql_tests.cpp
         )
         target_link_libraries(unit_tests PRIVATE arachne_lib GTest::gtest_main dep_coverage)
 
