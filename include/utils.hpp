@@ -27,6 +27,7 @@
 #include <array>
 #include <atomic>
 #include <curl/curl.h>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -61,6 +62,8 @@ using parameter = std::pair<std::string, std::string>;
 /// @brief Ordered list of query parameters appended to the URL.
 using parameter_list = std::vector<parameter>;
 
+enum service_kind { wdqs };
+
 /**
  * @struct options
  * @brief Configuration for fetching entities via MediaWiki/Wikibase API.
@@ -73,7 +76,7 @@ using parameter_list = std::vector<parameter>;
  *    revision content, normalization, and related API flags).
  */
 struct options {
-    std::size_t batch_threshold = 50;
+    size_t batch_threshold = 50;
 
     std::vector<std::string> prop = { "info", "revisions" };
     std::vector<std::string> props
@@ -178,5 +181,92 @@ struct network_options {
     std::string accept = "application/json"; ///< Default Accept header.
     std::string user_agent = "arachne/client"; ///< Default User-Agent.
 };
+
+enum class http_method { get, post };
+enum class http_method_hint { automatic, force_get, force_post };
+
+struct sparql_request {
+    std::string query;
+    http_method_hint method = http_method_hint::automatic;
+    static constexpr size_t service_default
+        = std::numeric_limits<size_t>::max();
+    size_t length_threshold = service_default;
+    int timeout_sec = -1;
+    std::string accept;
+    std::string content_type;
+};
+
+/**
+ * @struct service_profile
+ * @brief Static configuration values describing a remote service.
+ *
+ * Contains the base endpoint URL, the default Accept header value used
+ * when a request does not specify one, and optional rate hint strings
+ * (for example, "polite" or "limit") that guide client throttling.
+ */
+struct service_profile {
+    std::string base_url;
+    std::string default_accept;
+    std::vector<std::string> rate_hints;
+};
+
+/**
+ * @brief Options specific to WDQS usage and heuristics.
+ *
+ * - length_threshold: query length above which POST is preferred.
+ * - timeout_sec: per-request timeout in seconds.
+ * - accept_override: optional runtime Accept header override.
+ */
+struct wdqs_options {
+    std::size_t length_threshold = 1800;
+    int timeout_sec = 60;
+    std::string accept_override;
+};
+
+struct call_preview {
+    http_method method { http_method::get };
+    std::string url;
+    parameter_list query_params;
+    parameter_list form_params;
+    std::string body;
+    std::string content_type;
+    std::string accept;
+    int timeout_sec = -1;
+    bool use_form_body { false };
+
+    /**
+     * @brief Check whether a query parameter with key @p key exists.
+     * @param key Key to search for.
+     * @return true if a parameter with the given key is present.
+     */
+    [[nodiscard]] bool has_param(std::string_view key) const;
+
+    /**
+     * @brief Retrieve the first value for query parameter @p key.
+     * @param key Key to search for.
+     * @return Value associated with @p key or empty string if not found.
+     */
+    [[nodiscard]] std::string get_param(std::string_view key) const;
+};
+
+const service_profile& get_service_profile(service_kind kind);
+
+void sort_parameters(parameter_list& params);
+
+void append_common_params(
+    service_kind kind, http_method method, parameter_list& params
+);
+
+http_method
+choose_http_method(const sparql_request& request, std::size_t threshold);
+
+std::string resolve_accept(
+    const sparql_request& request, const service_profile& profile,
+    std::string_view override_accept
+);
+
+std::pair<std::string, bool>
+resolve_body_strategy(const sparql_request& request);
+
 }
 #endif // ARACHNE_UTILS_HPP
