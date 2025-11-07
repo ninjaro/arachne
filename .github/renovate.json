@@ -1,33 +1,49 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:best-practices"],
+  "extends": [
+    "config:best-practices"
+  ],
   "timezone": "Europe/Berlin",
-  "baseBranches": ["docs"],
-  "labels": ["deps", "github-actions"],
-  "schedule": ["every weekend"],
+  "baseBranchPatterns": [
+    "docs"
+  ],
+  "labels": [
+    "deps",
+    "github-actions"
+  ],
+  "schedule": [
+    "every weekend"
+  ],
   "dependencyDashboard": true,
   "commitMessagePrefix": "renovate versions in ymls: ",
-
   "packageRules": [
     {
-      "matchManagers": ["github-actions"],
-      "matchUpdateTypes": ["patch", "digest"],
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
       "automerge": true,
       "automergeType": "branch",
       "groupName": "GitHub Actions",
       "minimumReleaseAge": "7 days"
     },
     {
-      "matchManagers": ["regex"],
+      "matchManagers": [
+        "custom.regex"
+      ],
       "groupName": "Toolchains (Doxygen & LLVM)",
       "minimumReleaseAge": "7 days"
     }
   ],
-
   "customManagers": [
     {
       "customType": "regex",
-      "managerFilePatterns": ["/\\.github\\/workflows\\/.*\\.ya?ml$/"],
+      "managerFilePatterns": [
+        "/\\.github\\/workflows\\/.*\\.ya?ml$/"
+      ],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "doxygen/doxygen",
       "packageNameTemplate": "doxygen/doxygen",
@@ -39,7 +55,9 @@
     },
     {
       "customType": "regex",
-      "managerFilePatterns": ["/\\.github\\/workflows\\/.*\\.ya?ml$/"],
+      "managerFilePatterns": [
+        "/\\.github\\/workflows\\/.*\\.ya?ml$/"
+      ],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "llvm/llvm-project",
       "packageNameTemplate": "llvm/llvm-project",
