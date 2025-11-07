@@ -72,7 +72,7 @@ resolve_body_strategy(const sparql_request& request) {
             = request.content_type == "application/x-www-form-urlencoded";
         return { request.content_type, use_form };
     }
-    if (request.method != http_method_hint::automatic) {
+    if (request.method == http_method_hint::force_post) {
         return { "application/x-www-form-urlencoded", true };
     }
     return { "application/sparql-query", false };
@@ -88,8 +88,9 @@ const service_profile& get_service_profile(const service_kind kind) {
     switch (kind) {
     case service_kind::wdqs:
         return wdqs_profile();
+    default:
+        throw std::invalid_argument("unknown service_kind");
     }
-    throw std::invalid_argument("unknown service_kind");
 }
 
 void sort_parameters(parameter_list& params) {

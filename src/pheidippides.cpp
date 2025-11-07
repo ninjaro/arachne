@@ -82,24 +82,32 @@ nlohmann::json pheidippides::fetch_json(
 }
 
 nlohmann::json pheidippides::sparql(const corespace::sparql_request& request) {
-    const auto [method, url, query_params, form_params, body, content_type, accept,
-         timeout_sec, use_form_body] = build_call_preview(request);
+    const auto
+        [method, url, query_params, form_params, body, content_type, accept,
+         timeout_sec, use_form_body]
+        = build_call_preview(request);
     if (method == corespace::http_method::get) {
-        return nlohmann::json::parse(client.get(
-            url, query_params, accept,
-            timeout_sec
-        ).text, nullptr, true);
+        return nlohmann::json::parse(
+            client.get(url, query_params, accept, timeout_sec).text, nullptr,
+            true
+        );
     }
     if (use_form_body) {
-        return nlohmann::json::parse(client.post_form(
-            url, form_params, query_params,
-            accept, timeout_sec
-        ).text, nullptr, true);
+        return nlohmann::json::parse(
+            client
+                .post_form(url, form_params, query_params, accept, timeout_sec)
+                .text,
+            nullptr, true
+        );
     }
-    return nlohmann::json::parse(client.post_raw(
-        url, body, content_type,
-        query_params, accept, timeout_sec
-    ).text, nullptr, true);
+    return nlohmann::json::parse(
+        client
+            .post_raw(
+                url, body, content_type, query_params, accept, timeout_sec
+            )
+            .text,
+        nullptr, true
+    );
 }
 
 nlohmann::json pheidippides::wdqs(std::string query) {
