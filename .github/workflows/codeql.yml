@@ -18,14 +18,14 @@ jobs:
       matrix:
         language: [ 'cpp' ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@5d5cd550d3e189c569da8f16ea8de2d821c9bf7a # v3
         with:
           languages: ${{ matrix.language }}
           build-mode: manual
 
-      - uses: MarkusJx/googletest-installer@v1.1
+      - uses: MarkusJx/googletest-installer@2dbed3d0a9dc19bebe3e36773185ab9c17664c8d # v1.1
 
       - name: Install Dependencies
         run: |
@@ -47,4 +47,4 @@ jobs:
           cmake --build build-release --parallel $(nproc)
 
       - name: Run CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@5d5cd550d3e189c569da8f16ea8de2d821c9bf7a # v3
