@@ -1,0 +1,31 @@
+name: Experimental mining batch intake
+description: Provisional GitHub-side intake while the final submission UX is deferred.
+title: "[Mining batch] "
+labels:
+  - mining-batch
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Attach one `.json` mining batch or one `.zip` containing a batch. Use the
+        issue title for a short human-readable description. No project software
+        or command-line setup is required.
+
+        The current contributor group is trusted, but mechanical receipt still
+        does not certify factual or semantic correctness. You remain responsible
+        for research, identity decisions, sources, quotations, weights, and
+        confidence.
+
+        This provisional interface returns only `ok` (received and queued) or
+        `fail` (not received). `ok` does not mean database integration succeeded.
+        Arachne sends no later per-author processing notification. Do not attach
+        secrets or private source archives.
+
+  - type: textarea
+    id: batch_file
+    attributes:
+      label: Batch file
+      description: Drag exactly one `.json` or `.zip` file into this field.
+      placeholder: Drag one batch file here; GitHub will insert an attachment link.
+    validations:
+      required: true

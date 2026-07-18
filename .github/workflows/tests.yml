@@ -39,7 +39,7 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run unit tests
-        run: ctest --test-dir build --output-on-failure --parallel $(nproc)
+        run: ctest --test-dir build --output-on-failure
 
   code-style:
     runs-on: ubuntu-latest

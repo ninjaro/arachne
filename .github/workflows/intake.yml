@@ -1,0 +1,174 @@
+name: Mining batch intake
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: intake-state-write
+  cancel-in-progress: false
+
+jobs:
+  validate-request:
+    runs-on: ubuntu-latest
+    outputs:
+      valid: ${{ steps.parse.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse one inert attachment request
+        id: parse
+        continue-on-error: true
+        run: |
+          python3 scripts/issue_intake_request.py \
+            --event "${GITHUB_EVENT_PATH}" \
+            --output "${RUNNER_TEMP}/intake-request.json"
+      - name: Preserve validated request for diagnosis
+        if: steps.parse.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: intake-request-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}/intake-request.json
+          retention-days: 7
+      - name: Report malformed submission
+        if: steps.parse.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --body "fail"
+      - name: Report disabled provisional intake
+        if: >-
+          steps.parse.outcome == 'success' &&
+          vars.ARACHNE_OPERATIONS_ENABLED != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh issue comment "${ISSUE_NUMBER}" --body "fail"
+
+  persist-cocoon:
+    needs: validate-request
+    if: >-
+      needs.validate-request.outputs.valid == 'true' &&
+      vars.ARACHNE_OPERATIONS_ENABLED == 'true'
+    runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require persistent-state settings
+        env:
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+        run: |
+          test -n "${STATE_REPOSITORY}"
+          test -n "${STATE_BASE_BRANCH}"
+          test -n "${STATE_TOKEN}"
+      - name: Checkout protected persistent state
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          path: .arachne-state
+          lfs: true
+      - name: Install application dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            nlohmann-json3-dev
+      - name: Build Arachne operations binary
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/build.sh
+      - name: Materialize runner-local config and request
+        run: |
+          python3 scripts/materialize_ci_config.py \
+            --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --runner-temp "${RUNNER_TEMP}" \
+            --output "${RUNNER_TEMP}/arachne-config.json"
+          python3 scripts/issue_intake_request.py \
+            --event "${GITHUB_EVENT_PATH}" \
+            --output "${RUNNER_TEMP}/intake-request.json"
+          python3 -c 'import json,os; paths=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json"))["paths"]; print("ARACHNE_ARTIFACTS=" + paths["artifact_store"])' >> "${GITHUB_ENV}"
+      - name: Build concrete Pheidippides transport contract
+        run: |
+          python3 scripts/issue_fetch_request.py \
+            --request "${RUNNER_TEMP}/intake-request.json" \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --output "${RUNNER_TEMP}/fetch-request.json"
+          echo "ACQUIRED_CONTROL=${RUNNER_TEMP}/acquired-artifact.json" >> "${GITHUB_ENV}"
+      - name: Acquire attachment through Pheidippides
+        id: fetch
+        continue-on-error: true
+        run: |
+          python3 scripts/arachne_ops.py \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --binary "${GITHUB_WORKSPACE}/build/arachne" \
+            fetch \
+            --request "${RUNNER_TEMP}/fetch-request.json" \
+            --output-control "${ACQUIRED_CONTROL}"
+      - name: Preserve transport result for diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acquired-artifact-${{ github.event.issue.number }}
+          path: ${{ env.ACQUIRED_CONTROL }}
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Preserve payload and create cocoon
+        id: intake
+        if: steps.fetch.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python3 scripts/dispatch_intake_request.py \
+            --request "${RUNNER_TEMP}/intake-request.json" \
+            --fetch-request "${RUNNER_TEMP}/fetch-request.json" \
+            --acquired-control "${ACQUIRED_CONTROL}" \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --binary "${GITHUB_WORKSPACE}/build/arachne"
+      - name: Remove transferred acquisition duplicate
+        if: steps.intake.outcome == 'success'
+        run: |
+          python3 scripts/discard_acquired_artifact.py \
+            --fetch-request "${RUNNER_TEMP}/fetch-request.json" \
+            --acquired-control "${ACQUIRED_CONTROL}" \
+            --config "${RUNNER_TEMP}/arachne-config.json"
+      - name: Stop after an acquisition or intake failure
+        if: steps.fetch.outcome != 'success' || steps.intake.outcome != 'success'
+        run: exit 1
+      - name: Publish serialized official intake state
+        id: publish
+        env:
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+        run: |
+          python3 scripts/publish_intake_state.py \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --queue "${GITHUB_WORKSPACE}/.arachne-state/queue" \
+            --ledger "${GITHUB_WORKSPACE}/.arachne-state/operations/ledger.sqlite3" \
+            --base "${STATE_BASE_BRANCH}" \
+            --title "Arachne intake #${{ github.event.issue.number }}"
+      - name: Return successful intake result
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --body "ok"
+      - name: Return failed intake result
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --body "fail"

@@ -1,0 +1,58 @@
+name: Arachne maintainer dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to dispatch through the reviewed workflow
+        required: true
+        type: choice
+        options:
+          - product-integration
+          - candidate-rebuild
+      plan_mode:
+        description: Candidate plan mode
+        required: false
+        type: choice
+        options:
+          - prebuilt
+          - generate
+        default: prebuilt
+      run_id:
+        description: Candidate rebuild run ID
+        required: false
+        type: string
+      plan_control:
+        description: Prebuilt candidate plan control in the state repository
+        required: false
+        type: string
+      external_graph:
+        description: External graph JSON for generated planning
+        required: false
+        type: string
+      product_snapshot_control:
+        description: Product snapshot control for generated planning
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  product-integration:
+    if: inputs.operation == 'product-integration'
+    uses: ./.github/workflows/product-integration.yml
+    with:
+      force: true
+    secrets: inherit
+
+  candidate-rebuild:
+    if: inputs.operation == 'candidate-rebuild'
+    uses: ./.github/workflows/candidate-rebuild.yml
+    with:
+      plan_mode: ${{ inputs.plan_mode }}
+      plan_control: ${{ inputs.plan_control }}
+      external_graph: ${{ inputs.external_graph }}
+      product_snapshot_control: ${{ inputs.product_snapshot_control }}
+      run_id: ${{ inputs.run_id }}
+    secrets: inherit

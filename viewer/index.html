@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Arachne — Art Lineages</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <p class="eyebrow">Arachne · Art Lineages</p>
+    <h1>Threads through art history</h1>
+    <p class="lede">Accepted research and clearly marked derived paths, woven into a static, inspectable graph.</p>
+    <div id="snapshots" class="snapshot-strip" aria-live="polite">Loading snapshot identity…</div>
+  </header>
+
+  <main>
+    <section class="controls" aria-label="Graph controls">
+      <label>Search <input id="search" type="search" placeholder="Work, creator, concept…"></label>
+      <label>View
+        <select id="view">
+          <option value="relations">Relation graph</option>
+          <option value="chronology">Chronology</option>
+          <option value="similarity">Derived similarity</option>
+          <option value="research">Research suggestions</option>
+        </select>
+      </label>
+      <label class="toggle"><input id="derived" type="checkbox" checked> Show derived paths</label>
+    </section>
+
+    <section class="legend" aria-label="Relation legend">
+      <span><i class="swatch human"></i> Human-authored relation</span>
+      <span><i class="swatch chronology"></i> Derived chronology</span>
+      <span><i class="swatch similarity"></i> Derived similarity</span>
+      <span><i class="swatch suggestion"></i> Soft research suggestion</span>
+    </section>
+
+    <section class="workspace">
+      <div class="explorer">
+        <section class="visualization" aria-labelledby="graph-heading">
+          <div class="canvas-toolbar">
+            <div>
+              <h2 id="graph-heading">Navigable graph</h2>
+              <p id="graph-status" aria-live="polite">Loading projection…</p>
+            </div>
+            <div class="camera-controls" aria-label="Graph camera controls">
+              <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+              <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+              <button id="reset-camera" type="button">Reset view</button>
+            </div>
+          </div>
+          <svg id="graph-canvas" class="graph-canvas" viewBox="0 0 1100 650" tabindex="0" aria-labelledby="graph-title graph-description">
+            <title id="graph-title">Art-lineage graph</title>
+            <desc id="graph-description">Pan and zoom the canvas. Select a node or line to inspect its relation and provenance.</desc>
+          </svg>
+          <p class="navigation-help">Drag empty space to pan, use the mouse wheel or buttons to zoom, and select any node or line for provenance.</p>
+        </section>
+
+        <section class="relation-browser" aria-labelledby="relations-heading">
+          <h2 id="relations-heading">Visible relations</h2>
+          <ol id="relation-list" class="relation-list"></ol>
+        </section>
+      </div>
+
+      <aside id="details" class="details" aria-live="polite">
+        <h2>Select a thread</h2>
+        <p>Choose a node or line to inspect its source, provenance, and explanation.</p>
+      </aside>
+    </section>
+  </main>
+
+  <noscript>This static viewer needs JavaScript to navigate the projection.</noscript>
+  <script src="app.js" defer></script>
+</body>
+</html>

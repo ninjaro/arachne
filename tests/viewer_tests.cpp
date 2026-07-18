@@ -1,0 +1,295 @@
+#include "ariadne/viewer.hpp"
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+
+namespace {
+
+class temporary_directory {
+public:
+    temporary_directory() {
+        path_ = std::filesystem::temp_directory_path()
+            / ("arachne-viewer-tests-"
+               + std::to_string(
+                   std::chrono::steady_clock::now().time_since_epoch().count()
+               ));
+        std::filesystem::create_directories(path_);
+    }
+
+    ~temporary_directory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+nlohmann::json product_export() {
+    return {
+        { "entities",
+          { { { "id", "work-a" }, { "entity_type", "work" } },
+            { { "id", "work-b" }, { "entity_type", "work" } },
+            { { "id", "concept-a" }, { "entity_type", "concept" } } } },
+        { "works",
+          { { { "entity_id", "work-a" },
+              { "medium", "film" },
+              { "year_start", 1950 } },
+            { { "entity_id", "work-b" },
+              { "medium", "film" },
+              { "year_start", 1960 } } } },
+        { "concepts",
+          { { { "entity_id", "concept-a" },
+              { "slug", "body-horror" },
+              { "concept_type", "genre" } } } },
+        { "names",
+          { { { "entity_id", "work-a" },
+              { "value", "Earlier Work" },
+              { "is_preferred", true } },
+            { { "entity_id", "work-b" },
+              { "value", "Later Work" },
+              { "is_preferred", true } },
+            { { "entity_id", "concept-a" },
+              { "value", "Body horror" },
+              { "is_preferred", true } } } },
+        { "work_concepts",
+          { { { "id", "assertion-1" },
+              { "work_id", "work-a" },
+              { "concept_id", "concept-a" },
+              { "relation_type", "anticipates" },
+              { "evidence", { "evidence-1" } } },
+            { { "id", "assertion-2" },
+              { "work_id", "work-b" },
+              { "concept_id", "concept-a" },
+              { "relation_type", "associated_with" } } } },
+        { "sources",
+          { { { "id", "source-1" },
+              { "source_type", "book" },
+              { "bibliography_text", "A cited monograph" } } } },
+        { "evidence",
+          { { { "id", "evidence-1" },
+              { "source_id", "source-1" },
+              { "exact_quote", "A short supporting quotation." },
+              { "stance", "supports" } } } },
+        { "work_concept_evidence",
+          { { { "assertion_id", "assertion-1" },
+              { "evidence_id", "evidence-1" } } } },
+    };
+}
+
+nlohmann::json candidate_export() {
+    return {
+        { "artifact_type", "research_candidate_graph_materialization_v1" },
+        { "format_version", 1 },
+        { "algorithm", { { "version", "1.0.0" } } },
+        { "candidates",
+          { { { "candidate_id", "candidate-Q10" },
+              { "external_id", "Q10" },
+              { "label", "Candidate" },
+              { "kind", "candidate" },
+              { "rank", 1 },
+              { "coverage", 50.0 },
+              { "group_id", "group-1" },
+              { "selection_reasons", { "Coverage rank one." } },
+              { "attributes", { { "noncanonical", true } } } } } },
+        { "works",
+          { { { "work_id", "candidate-work-Q20" },
+              { "candidate_id", "candidate-Q10" },
+              { "external_id", "Q20" },
+              { "label", "Candidate work" },
+              { "attributes", { { "soft_guidance", true } } } } } },
+        { "relations",
+          { { { "relation_id", "suggestion-1" },
+              { "source_id", "candidate-Q10" },
+              { "target_id", "candidate-work-Q20" },
+              { "relation_type", "research_suggestion" },
+              { "provenance",
+                { { "explanation", "Soft candidate relation." } } },
+              { "attributes", { { "soft_guidance", true } } } } } },
+    };
+}
+
+} // namespace
+
+TEST(AriadneViewer, ProjectionCannotConfuseDerivedAndHumanEdges) {
+    const auto projection = arachne::ariadne::viewer_builder::project(
+        product_export(), candidate_export(), "product-1", "candidate-1"
+    );
+    bool found_human = false;
+    bool found_chronology = false;
+    bool found_similarity = false;
+    bool found_suggestion = false;
+    bool found_source_link = false;
+    for (const auto& edge : projection.at("edges")) {
+        if (edge.at("edge_id") == "suggestion-1") {
+            found_suggestion = true;
+            EXPECT_TRUE(edge.at("attributes").at("derived").get<bool>());
+            EXPECT_EQ(edge.at("provenance").at("origin"), "derived_external");
+            EXPECT_TRUE(edge.at("attributes").at("soft_guidance").get<bool>());
+        } else if (edge.at("edge_type") == "derived_chronological") {
+            found_chronology = true;
+            EXPECT_TRUE(edge.at("attributes").at("derived").get<bool>());
+            EXPECT_EQ(edge.at("attributes").at("visual_style"), "red_path");
+        } else if (edge.at("edge_type") == "derived_similarity") {
+            found_similarity = true;
+            EXPECT_EQ(edge.at("source"), "work-a");
+            EXPECT_EQ(edge.at("target"), "work-b");
+            EXPECT_TRUE(edge.at("attributes").at("derived").get<bool>());
+            EXPECT_EQ(
+                edge.at("attributes").at("similarity_basis"),
+                "shared_human_concepts"
+            );
+            EXPECT_EQ(edge.at("attributes").at("shared_concept_count"), 1);
+            EXPECT_EQ(
+                edge.at("attributes").at("shared_concept_ids"),
+                nlohmann::json::array({ "concept-a" })
+            );
+            EXPECT_EQ(
+                edge.at("provenance").at("source_ids"),
+                nlohmann::json::array({ "assertion-1", "assertion-2" })
+            );
+            EXPECT_EQ(edge.at("provenance").at("origin"), "derived_projection");
+            EXPECT_EQ(
+                edge.at("provenance").at("algorithm_version"),
+                "ariadne-viewer-similarity-v1"
+            );
+            EXPECT_NE(
+                edge.at("provenance")
+                    .at("explanation")
+                    .get<std::string>()
+                    .find("not a human-authored relation"),
+                std::string::npos
+            );
+        } else if (
+            edge.at("attributes").value("assertion_id", "") == "assertion-1"
+        ) {
+            found_human = true;
+            EXPECT_FALSE(edge.at("attributes").at("derived").get<bool>());
+            EXPECT_EQ(edge.at("provenance").at("origin"), "human_authored");
+            EXPECT_EQ(edge.at("attributes").at("evidence").at(0), "evidence-1");
+        } else if (edge.at("edge_type") == "documents_evidence") {
+            found_source_link = true;
+            EXPECT_EQ(edge.at("source"), "source-1");
+            EXPECT_EQ(edge.at("target"), "evidence-1");
+        }
+    }
+    EXPECT_EQ(projection.at("artifact_type"), "viewer_projection_data_v1");
+    EXPECT_FALSE(projection.at("projection_id").get<std::string>().empty());
+    EXPECT_TRUE(found_human);
+    EXPECT_TRUE(found_chronology);
+    EXPECT_TRUE(found_similarity);
+    EXPECT_TRUE(found_suggestion);
+    EXPECT_TRUE(found_source_link);
+    bool found_source_node = false;
+    bool found_evidence_node = false;
+    for (const auto& node : projection.at("nodes")) {
+        found_source_node
+            = found_source_node || node.at("node_id") == "source-1";
+        found_evidence_node
+            = found_evidence_node || node.at("node_id") == "evidence-1";
+    }
+    EXPECT_TRUE(found_source_node);
+    EXPECT_TRUE(found_evidence_node);
+}
+
+TEST(AriadneViewer, SimilarityProjectionIsOrderIndependentAndUsesNoHeuristics) {
+    const auto first = arachne::ariadne::viewer_builder::project(
+        product_export(), candidate_export(), "product-1", "candidate-1"
+    );
+    auto reordered_product = product_export();
+    std::ranges::reverse(reordered_product["entities"]);
+    std::ranges::reverse(reordered_product["works"]);
+    std::ranges::reverse(reordered_product["names"]);
+    std::ranges::reverse(reordered_product["work_concepts"]);
+    const auto reordered = arachne::ariadne::viewer_builder::project(
+        reordered_product, candidate_export(), "product-1", "candidate-1"
+    );
+    EXPECT_EQ(first, reordered);
+
+    auto no_shared_assertions = product_export();
+    no_shared_assertions["work_concepts"] = nlohmann::json::array();
+    const auto without_similarity = arachne::ariadne::viewer_builder::project(
+        no_shared_assertions, candidate_export(), "product-1", "candidate-1"
+    );
+    EXPECT_FALSE(
+        std::ranges::any_of(
+            without_similarity.at("edges"), [](const auto& edge) {
+                return edge.value("edge_type", "") == "derived_similarity";
+            }
+        )
+    );
+}
+
+TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
+    temporary_directory temporary;
+    const auto projection = arachne::ariadne::viewer_builder::project(
+        product_export(), candidate_export(), "product-1", "candidate-1"
+    );
+    const auto template_root
+        = std::filesystem::path(__FILE__).parent_path().parent_path()
+        / "viewer";
+    const auto first = arachne::ariadne::viewer_builder::build_site(
+        projection, template_root, temporary.path() / "site",
+        "2026-07-18T05:45:00Z"
+    );
+    const auto second = arachne::ariadne::viewer_builder::build_site(
+        projection, template_root, temporary.path() / "site",
+        "2026-07-18T05:45:00Z"
+    );
+    EXPECT_EQ(first, second);
+    EXPECT_EQ(first.at("product_snapshot_id"), "product-1");
+    EXPECT_EQ(first.at("candidate_snapshot_id"), "candidate-1");
+    const auto bundle = temporary.path() / "site"
+        / first.at("bundle").at("storage_ref").get<std::string>();
+    EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "index.html"));
+    EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "app.js"));
+    EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "styles.css"));
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(bundle / "data" / "projection.json")
+    );
+    EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "build-info.json"));
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(
+            temporary.path() / "site" / "active.json"
+        )
+    );
+    const auto read_bundle_file = [&](const std::string& filename) {
+        std::ifstream input(bundle / filename, std::ios::binary);
+        return std::string(
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()
+        );
+    };
+    const auto index = read_bundle_file("index.html");
+    const auto application = read_bundle_file("app.js");
+    const auto styles = read_bundle_file("styles.css");
+    EXPECT_NE(index.find("id=\"graph-canvas\""), std::string::npos);
+    EXPECT_NE(index.find("value=\"chronology\""), std::string::npos);
+    EXPECT_NE(index.find("value=\"similarity\""), std::string::npos);
+    EXPECT_NE(index.find("id=\"relation-list\""), std::string::npos);
+    EXPECT_NE(application.find("derived_similarity"), std::string::npos);
+    EXPECT_NE(
+        application.find("addEventListener(\"wheel\""), std::string::npos
+    );
+    EXPECT_NE(application.find("chronologyLayout"), std::string::npos);
+    EXPECT_NE(styles.find(".graph-edge.similarity"), std::string::npos);
+    {
+        std::ofstream tamper(bundle / "app.js", std::ios::app);
+        tamper << "\n// tampered\n";
+    }
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::build_site(
+            projection, template_root, temporary.path() / "site",
+            "2026-07-18T05:45:00Z"
+        )),
+        std::runtime_error
+    );
+}

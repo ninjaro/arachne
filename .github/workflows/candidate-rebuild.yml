@@ -1,0 +1,163 @@
+name: Research candidate graph rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_mode:
+        description: Consume a reviewed plan control or generate one with Ariadne
+        required: true
+        type: choice
+        options:
+          - prebuilt
+          - generate
+        default: prebuilt
+      plan_control:
+        description: Prebuilt plan-control path inside the state repository
+        required: false
+        type: string
+      external_graph:
+        description: External graph JSON path for generate mode
+        required: false
+        type: string
+      product_snapshot_control:
+        description: Product snapshot control path for generate mode
+        required: false
+        type: string
+      run_id:
+        description: Stable rebuild run identifier
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      plan_mode:
+        required: false
+        type: string
+        default: prebuilt
+      plan_control:
+        required: false
+        type: string
+      external_graph:
+        required: false
+        type: string
+      product_snapshot_control:
+        required: false
+        type: string
+      run_id:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-graph-write
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    if: vars.ARACHNE_OPERATIONS_ENABLED == 'true'
+    runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require persistent-state settings
+        env:
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+        run: |
+          test -n "${STATE_REPOSITORY}"
+          test -n "${STATE_BASE_BRANCH}"
+          test -n "${STATE_TOKEN}"
+      - name: Checkout protected persistent state
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          path: .arachne-state
+          lfs: true
+      - name: Install application dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            nlohmann-json3-dev
+      - name: Build Arachne operations binary
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/build.sh
+      - name: Materialize config and resolve reviewed inputs
+        env:
+          PLAN_MODE: ${{ inputs.plan_mode }}
+          PLAN_CONTROL_INPUT: ${{ inputs.plan_control }}
+          EXTERNAL_GRAPH_INPUT: ${{ inputs.external_graph }}
+          PRODUCT_SNAPSHOT_INPUT: ${{ inputs.product_snapshot_control }}
+        run: |
+          python3 scripts/materialize_ci_config.py \
+            --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --runner-temp "${RUNNER_TEMP}" \
+            --output "${RUNNER_TEMP}/arachne-config.json"
+          python3 -c 'import json,os; paths=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json"))["paths"]; print("ARACHNE_ARTIFACTS=" + paths["artifact_store"])' >> "${GITHUB_ENV}"
+          if [[ "${PLAN_MODE}" == "prebuilt" ]]; then
+            test -n "${PLAN_CONTROL_INPUT}"
+            python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["PLAN_CONTROL_INPUT"]).resolve(strict=True); value.relative_to(root); print("PLAN_PATH=" + str(value))' >> "${GITHUB_ENV}"
+          elif [[ "${PLAN_MODE}" == "generate" ]]; then
+            test -n "${EXTERNAL_GRAPH_INPUT}"
+            test -n "${PRODUCT_SNAPSHOT_INPUT}"
+            python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["EXTERNAL_GRAPH_INPUT"]).resolve(strict=True); value.relative_to(root); print("EXTERNAL_GRAPH_PATH=" + str(value))' >> "${GITHUB_ENV}"
+            python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["PRODUCT_SNAPSHOT_INPUT"]).resolve(strict=True); value.relative_to(root); print("PRODUCT_SNAPSHOT_PATH=" + str(value))' >> "${GITHUB_ENV}"
+            mkdir -p "${ARACHNE_ARTIFACTS}/candidate-plans"
+            echo "PLAN_ARTIFACT=${ARACHNE_ARTIFACTS}/candidate-plans/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json" >> "${GITHUB_ENV}"
+            echo "PLAN_PATH=${ARACHNE_ARTIFACTS}/candidate-plans/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.control.json" >> "${GITHUB_ENV}"
+          else
+            echo "unsupported plan_mode: ${PLAN_MODE}" >&2
+            exit 2
+          fi
+      - name: Generate candidate plan through Ariadne
+        id: plan
+        if: inputs.plan_mode == 'generate'
+        continue-on-error: true
+        run: |
+          python3 scripts/arachne_ops.py \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --binary "${GITHUB_WORKSPACE}/build/arachne" \
+            candidate-plan \
+            --external-graph "${EXTERNAL_GRAPH_PATH}" \
+            --product-snapshot "${PRODUCT_SNAPSHOT_PATH}" \
+            --output-artifact "${PLAN_ARTIFACT}" \
+            --output-control "${PLAN_PATH}"
+      - name: Recompute and stage candidate graph
+        id: rebuild
+        if: inputs.plan_mode == 'prebuilt' || steps.plan.outcome == 'success'
+        continue-on-error: true
+        env:
+          REBUILD_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          python3 scripts/arachne_ops.py \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --binary "${GITHUB_WORKSPACE}/build/arachne" \
+            candidate-rebuild \
+            --plan-control "${PLAN_PATH}" \
+            --run-id "${REBUILD_RUN_ID}"
+      - name: Stop after planning or rebuild failure
+        if: >-
+          (inputs.plan_mode == 'generate' && steps.plan.outcome != 'success') ||
+          steps.rebuild.outcome != 'success'
+        run: exit 1
+      - name: Propose candidate state for review
+        env:
+          GH_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+        run: |
+          python3 scripts/propose_state_change.py \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --repository "${STATE_REPOSITORY}" \
+            --base "${STATE_BASE_BRANCH}" \
+            --branch "arachne/candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --title "Arachne candidate rebuild" \
+            --body "Full candidate recomputation from run ${{ inputs.run_id }}. Review source snapshot, plan, manifests, and structural reports before merge."

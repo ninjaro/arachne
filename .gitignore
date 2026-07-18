@@ -45,5 +45,9 @@ doc/
 cov/
 assets/skip/
 
+# Local operational state and generated configuration
+.arachne/
+config/arachne.local.json
+
 CMakeLists.txt.user
 CMakeLists.txt.user.*
