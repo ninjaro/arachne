@@ -1,0 +1,9 @@
+{
+  "contract": "batch_envelope_v1",
+  "format_version": 1,
+  "envelope_id": "env-20260718-0001",
+  "payload_ref": "inbox/film-atomic-monsters-001.json",
+  "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "submission_ref": "github-issue:123",
+  "status": "waiting_approval"
+}

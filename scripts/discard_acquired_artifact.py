@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely unlink a verified acquisition after its bytes have entered the queue."""
+"""Safely unlink a verified acquisition after downstream consumption."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 class DiscardError(RuntimeError):
@@ -73,9 +73,24 @@ def main() -> int:
             raise DiscardError(
                 "artifact store and read-only legacy inbox must be disjoint"
             )
-        unresolved = artifact_root / artifact["storage_ref"]
-        if unresolved.is_symlink():
-            raise DiscardError("refusing to unlink a symbolic link")
+        storage_ref = artifact["storage_ref"]
+        if (
+            not isinstance(storage_ref, str)
+            or not storage_ref
+            or "\\" in storage_ref
+            or ":" in storage_ref
+            or PurePosixPath(storage_ref).is_absolute()
+            or any(
+                part in {"", ".", ".."}
+                for part in PurePosixPath(storage_ref).parts
+            )
+        ):
+            raise DiscardError("acquired artifact has an unsafe storage reference")
+        unresolved = artifact_root
+        for part in PurePosixPath(storage_ref).parts:
+            unresolved /= part
+            if unresolved.is_symlink():
+                raise DiscardError("refusing to traverse a symbolic link")
         payload = unresolved.resolve(strict=True)
         payload.relative_to(artifact_root)
         if contains(payload, queue) or any(

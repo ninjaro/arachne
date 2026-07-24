@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/acquired_artifact_v1.schema.json",
+  "title": "Acquired raw artifact and transport evidence v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "artifact_id",
+    "request_id",
+    "source_locator",
+    "transport",
+    "response_metadata",
+    "acquired_at"
+  ],
+  "properties": {
+    "contract": {
+      "const": "acquired_artifact_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "artifact_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "request_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "door_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "operation": {
+      "enum": [
+        "bulk_snapshot",
+        "incremental_harvest",
+        "point_lookup",
+        "resume_download",
+        "backend_read",
+        "external_write"
+      ]
+    },
+    "source_locator": {
+      "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+    },
+    "artifact": {
+      "$ref": "common_v1.schema.json#/$defs/artifact"
+    },
+    "transport": {
+      "type": "object",
+      "required": [
+        "status",
+        "attempts"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "delivered",
+            "failed"
+          ]
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delivery_mode": {
+          "enum": [
+            "fetched",
+            "cache_validated",
+            "stale",
+            "resumed",
+            "offline"
+          ]
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error_code": {
+          "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+        },
+        "error_message": {
+          "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "response_metadata": {
+      "type": "object",
+      "required": [
+        "status_code",
+        "headers",
+        "redirect_chain",
+        "started_at",
+        "completed_at"
+      ],
+      "properties": {
+        "status_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "effective_url": {
+          "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+        },
+        "headers": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": {
+              "name": {
+                "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "redirect_chain": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+          }
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "acquired_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common_v1.schema.json#/$defs/extensions"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "properties": {
+              "status": {
+                "const": "delivered"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "artifact"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

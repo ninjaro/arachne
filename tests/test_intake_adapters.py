@@ -52,7 +52,7 @@ class IntakeAdapterTests(unittest.TestCase):
                         "title": "Observed batch",
                         "body": (
                             "[batch.json](https://github.com/user-attachments/"
-                            "files/1234/batch.json)"
+                            "assets/7f3d7bde-6f85-4a9e-a350-92770d453bc2)"
                         ),
                     },
                 }
@@ -86,6 +86,37 @@ class IntakeAdapterTests(unittest.TestCase):
         self.assertEqual(document["redirect_policy"]["allowed_hosts"],
                          json.loads(self.config.read_text())["security"]["attachment_allowed_hosts"])
         self.assertTrue(document["output_ref"].endswith("-batch.json"))
+
+    def test_provisional_issue_adapter_rejects_undefined_zip_packages(self) -> None:
+        event = self.root / "zip-event.json"
+        event.write_text(
+            json.dumps(
+                {
+                    "repository": {"full_name": "example/arachne"},
+                    "issue": {
+                        "number": 18,
+                        "title": "Undefined archive",
+                        "body": (
+                            "[batch.zip](https://github.com/user-attachments/"
+                            "files/1234/batch.zip)"
+                        ),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        request = self.root / "zip-request.json"
+
+        parsed = self.run_script(
+            "issue_intake_request.py",
+            "--event",
+            str(event),
+            "--output",
+            str(request),
+        )
+
+        self.assertNotEqual(parsed.returncode, 0)
+        self.assertFalse(request.exists())
 
     def test_discards_only_matching_verified_acquisition(self) -> None:
         payload = self.artifacts / "intake" / "batch.json"
@@ -167,6 +198,117 @@ class IntakeAdapterTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(outside.read_bytes(), b"keep")
+
+    def test_refuses_symlinked_artifact_path_components(self) -> None:
+        real = self.artifacts / "real"
+        real.mkdir()
+        payload = real / "keep.json"
+        payload.write_bytes(b"keep")
+        (self.artifacts / "alias").symlink_to(real, target_is_directory=True)
+        request = self.root / "fetch.json"
+        request.write_text(
+            json.dumps(
+                {"request_id": "request-symlink", "output_ref": "alias/keep.json"}
+            ),
+            encoding="utf-8",
+        )
+        control = self.root / "acquired.json"
+        control.write_text(
+            json.dumps(
+                {
+                    "contract": "acquired_artifact_v1",
+                    "format_version": 1,
+                    "request_id": "request-symlink",
+                    "transport": {"status": "delivered"},
+                    "artifact": {
+                        "storage_ref": "alias/keep.json",
+                        "sha256": hashlib.sha256(b"keep").hexdigest(),
+                        "byte_length": 4,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_script(
+            "discard_acquired_artifact.py",
+            "--fetch-request",
+            str(request),
+            "--acquired-control",
+            str(control),
+            "--config",
+            str(self.config),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(payload.read_bytes(), b"keep")
+
+    def test_intake_dispatch_refuses_symlinked_artifact_components(self) -> None:
+        real = self.artifacts / "dispatch-real"
+        real.mkdir()
+        payload = real / "batch.json"
+        payload.write_bytes(b"keep")
+        (self.artifacts / "dispatch-alias").symlink_to(
+            real, target_is_directory=True
+        )
+        locator = "https://github.com/user-attachments/assets/test"
+        request = self.root / "request.json"
+        request.write_text(
+            json.dumps(
+                {
+                    "attachment_url": locator,
+                    "submission_ref": "github-issue:test:1",
+                    "title": "Symlink test",
+                }
+            ),
+            encoding="utf-8",
+        )
+        fetch = self.root / "fetch.json"
+        fetch.write_text(
+            json.dumps(
+                {
+                    "locator": locator,
+                    "request_id": "dispatch-symlink",
+                    "output_ref": "dispatch-alias/batch.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        control = self.root / "acquired.json"
+        control.write_text(
+            json.dumps(
+                {
+                    "contract": "acquired_artifact_v1",
+                    "format_version": 1,
+                    "request_id": "dispatch-symlink",
+                    "source_locator": locator,
+                    "transport": {"status": "delivered"},
+                    "artifact": {
+                        "storage_ref": "dispatch-alias/batch.json",
+                        "sha256": hashlib.sha256(b"keep").hexdigest(),
+                        "byte_length": 4,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_script(
+            "dispatch_intake_request.py",
+            "--request",
+            str(request),
+            "--fetch-request",
+            str(fetch),
+            "--acquired-control",
+            str(control),
+            "--config",
+            str(self.config),
+            "--binary",
+            "/bin/true",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(payload.read_bytes(), b"keep")
 
     def test_refuses_overlapping_queue_and_artifact_store(self) -> None:
         overlap_queue = self.artifacts / "queue"

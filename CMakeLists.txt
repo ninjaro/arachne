@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(arachne VERSION 2.0.0 LANGUAGES CXX)
 
 option(BUILD_TESTS "Build hermetic tests" ON)
-option(BUILD_LEGACY_CLIENT "Build the deprecated Wikidata compatibility API" ON)
+option(BUILD_LEGACY_CLIENT "Build the deprecated Wikidata compatibility API" OFF)
 option(ENABLE_NETWORK_TESTS "Build tests that access live external services" OFF)
 option(COVERAGE "Enable coverage instrumentation" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer for tests" OFF)
@@ -53,7 +53,10 @@ target_link_libraries(arachne_contracts PUBLIC nlohmann_json::nlohmann_json)
 target_compile_features(arachne_contracts PUBLIC cxx_std_23)
 
 # Pheidippides is byte transport only and cannot link either graph store.
-add_library(pheidippides_transport STATIC src/pheidippides/transport.cpp)
+add_library(pheidippides_transport STATIC
+    src/pheidippides/transport.cpp
+    src/pheidippides/hardened_transport.cpp
+)
 target_include_directories(pheidippides_transport PUBLIC include)
 target_link_libraries(
     pheidippides_transport
@@ -201,6 +204,16 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_analyze_legacy_corpus -v
     )
     add_test(
+        NAME legacy_corpus_normalization_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_normalize_legacy_batches -v
+    )
+    add_test(
+        NAME merged_inbox_cleanup_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_cleanup_merged_inbox -v
+    )
+    add_test(
         NAME legacy_inbox_manifest_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_inbox_manifest -v
     )
@@ -217,6 +230,15 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_publication_adapter -v
     )
     add_test(
+        NAME wikidata_hpc_worker_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_wikidata_hpc_worker -v
+    )
+    add_test(
+        NAME source_refresh_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_source_refresh -v
+    )
+    add_test(
         NAME operations_cli_tests
         COMMAND ${CMAKE_COMMAND} -E env
             ARACHNE_TEST_BINARY=$<TARGET_FILE:arachne_app>
@@ -224,9 +246,10 @@ if(BUILD_TESTS)
     )
     set_tests_properties(
         safe_archive_tests actor_boundary_tests legacy_corpus_analysis_tests
-        legacy_inbox_manifest_tests intake_adapter_tests workflow_yaml_tests
-        publication_adapter_tests
-        operations_cli_tests
+        legacy_corpus_normalization_tests merged_inbox_cleanup_tests
+        legacy_inbox_manifest_tests
+        intake_adapter_tests workflow_yaml_tests publication_adapter_tests
+        wikidata_hpc_worker_tests source_refresh_tests operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 

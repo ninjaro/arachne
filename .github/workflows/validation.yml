@@ -25,12 +25,14 @@ jobs:
           sudo apt-get install -y yamllint
 
       - name: Validate repository contracts and operations surface
-        run: python3 scripts/validate_repository.py
+        run: |
+          python3 scripts/validate_repository.py
+          yamllint .github/workflows .github/ISSUE_TEMPLATE/mining-batch.yml
 
       - name: Validate Python and shell syntax
         run: |
-          python3 -m compileall -q scripts tests
-          bash -n scripts/build.sh scripts/run_checks.sh
+          python3 -m compileall -q scripts tests hpc
+          bash -n scripts/build.sh scripts/run_checks.sh hpc/wikidata/*.sbatch
 
       - name: Run hermetic Python tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v

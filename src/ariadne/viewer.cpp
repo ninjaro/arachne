@@ -257,7 +257,14 @@ nlohmann::ordered_json viewer_builder::project(
             || !name.at("value").is_string()) {
             continue;
         }
-        const bool preferred = name.value("is_preferred", false);
+        bool preferred = false;
+        if (const auto value = name.find("is_preferred"); value != name.end()) {
+            if (value->is_boolean()) {
+                preferred = value->get<bool>();
+            } else if (value->is_number_integer()) {
+                preferred = value->get<int>() != 0;
+            }
+        }
         const auto entity_id = name.at("entity_id").get<std::string>();
         if (preferred || !preferred_names.contains(entity_id)) {
             preferred_names[entity_id] = name.at("value").get<std::string>();

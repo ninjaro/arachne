@@ -28,6 +28,22 @@ struct product_snapshot_request final {
     std::vector<accepted_batch_descriptor> batches;
 };
 
+/** A corpus-wide, already-normalized product import transfer artifact. */
+struct normalized_product_import_request final {
+    /** `normalized_product_import_v1` JSON produced after corpus analysis. */
+    std::filesystem::path manifest_path;
+    /** Canonical SQLite file atomically replaced only after validation. */
+    std::filesystem::path database_path;
+};
+
+/** Aggregate result of one direct canonical product import. */
+struct normalized_product_import_result final {
+    std::filesystem::path database_path;
+    std::size_t entity_count { 0 };
+    std::size_t work_count { 0 };
+    std::size_t assertion_count { 0 };
+};
+
 /** A complete research_candidate_graph_plan_v1 artifact. */
 struct candidate_plan_descriptor final {
     /** Validated research_candidate_graph_plan_v1 control contract. */
@@ -88,6 +104,17 @@ public:
 
     [[nodiscard]] snapshot_result
     build_product_snapshot(const product_snapshot_request& request);
+
+    /**
+     * Build a fresh canonical product database from one normalized manifest.
+     *
+     * This path deliberately has no cocoon, ledger, backup, run-ID, or input-
+     * hash dependency. The manifest is imported into private sibling staging
+     * in one transaction, structurally checked, checkpointed, and only then
+     * atomically activated at `database_path`.
+     */
+    [[nodiscard]] static normalized_product_import_result
+    import_normalized_product(const normalized_product_import_request& request);
 
     [[nodiscard]] snapshot_result
     replace_candidate_snapshot(const candidate_snapshot_request& request);

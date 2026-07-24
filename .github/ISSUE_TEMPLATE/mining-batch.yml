@@ -7,8 +7,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Attach one `.json` mining batch or one `.zip` containing a batch. Use the
-        issue title for a short human-readable description. No project software
+        Attach one `.json` mining batch. ZIP package semantics are intentionally
+        deferred, so this adapter does not advertise ZIPs. Use the issue title for
+        a short human-readable description. No project software
         or command-line setup is required.
 
         The current contributor group is trusted, but mechanical receipt still
@@ -25,7 +26,7 @@ body:
     id: batch_file
     attributes:
       label: Batch file
-      description: Drag exactly one `.json` or `.zip` file into this field.
+      description: Drag exactly one `.json` file into this field.
       placeholder: Drag one batch file here; GitHub will insert an attachment link.
     validations:
       required: true

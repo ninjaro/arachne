@@ -8,8 +8,14 @@ on:
       - 'src/**/*.cpp'
       - 'include/**/*.hpp'
       - 'tests/**/*.cpp'
+      - 'tests/**/*.py'
+      - 'scripts/**/*.py'
+      - 'hpc/**/*.py'
+      - 'hpc/**/*.json'
+      - 'contracts/**/*.json'
+      - 'config/**/*.json'
       - 'CMakeLists.txt'
-      - '.github/workflows/tests.yml'
+      - '.github/workflows/*.yml'
 
 jobs:
   build-and-test:

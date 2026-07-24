@@ -15,9 +15,11 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -37,8 +39,12 @@ namespace {
     namespace fs = std::filesystem;
 
     constexpr std::string_view product_contract = "product_graph_snapshot_v1";
+    constexpr std::string_view normalized_product_import_contract
+        = "normalized_product_import_v1";
     constexpr std::string_view candidate_contract
         = "research_candidate_graph_snapshot_v1";
+    constexpr std::uintmax_t maximum_normalized_manifest_bytes
+        = 1024ULL * 1024ULL * 1024ULL;
 
     [[noreturn]] void fail(std::string message) {
         throw store_error(std::move(message));
@@ -138,10 +144,47 @@ namespace {
         sqlite3_stmt* value_ {};
     };
 
+    enum class database_access { ordinary, immutable_readonly };
+
+    std::string sqlite_immutable_uri(const fs::path& path) {
+        static constexpr char hex[] = "0123456789ABCDEF";
+        const std::string native
+            = fs::absolute(path).lexically_normal().generic_string();
+        std::string result = "file:";
+        result.reserve(native.size() + 24U);
+        for (const char raw_value : native) {
+            const auto value = static_cast<unsigned char>(raw_value);
+            if (std::isalnum(value) != 0 || value == '/' || value == ':'
+                || value == '-' || value == '.' || value == '_'
+                || value == '~') {
+                result.push_back(static_cast<char>(value));
+            } else {
+                result.push_back('%');
+                result.push_back(hex[value >> 4U]);
+                result.push_back(hex[value & 0x0FU]);
+            }
+        }
+        result += "?immutable=1";
+        return result;
+    }
+
     class database final {
     public:
-        database(const fs::path& path, int flags) {
-            const std::string native = path.string();
+        database(
+            const fs::path& path, int flags,
+            const database_access access = database_access::ordinary
+        ) {
+            if (access == database_access::immutable_readonly
+                && flags != SQLITE_OPEN_READONLY) {
+                fail("immutable SQLite access must be read-only");
+            }
+            const std::string native
+                = access == database_access::immutable_readonly
+                ? sqlite_immutable_uri(path)
+                : path.string();
+            if (access == database_access::immutable_readonly) {
+                flags |= SQLITE_OPEN_URI;
+            }
             if (sqlite3_open_v2(native.c_str(), &value_, flags, nullptr)
                 != SQLITE_OK) {
                 const std::string message
@@ -221,6 +264,38 @@ namespace {
         }
     };
 
+    struct normalized_import_staging_guard final {
+        fs::path path;
+        fs::path expected_parent;
+        std::string expected_prefix;
+
+        ~normalized_import_staging_guard() {
+            const std::string name = path.filename().string();
+            if (path.empty() || path.parent_path() != expected_parent
+                || expected_prefix.empty()
+                || !name.starts_with(expected_prefix)) {
+                return;
+            }
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    };
+
+    struct normalized_import_lock_guard final {
+        fs::path path;
+        fs::path expected_parent;
+        std::string expected_name;
+
+        ~normalized_import_lock_guard() {
+            if (path.empty() || path.parent_path() != expected_parent
+                || path.filename() != expected_name) {
+                return;
+            }
+            std::error_code error;
+            fs::remove(path, error);
+        }
+    };
+
     std::string read_bytes(const fs::path& path) {
         std::ifstream input(path, std::ios::binary);
         if (!input) {
@@ -234,11 +309,68 @@ namespace {
         return data.str();
     }
 
+    std::string read_bounded_regular_file(
+        const fs::path& path, const std::uintmax_t maximum_bytes,
+        std::string_view description
+    ) {
+        std::error_code error;
+        const fs::file_status status = fs::symlink_status(path, error);
+        if (error || !fs::is_regular_file(status)) {
+            fail(
+                std::string(description)
+                + " must be a non-symlink regular file: " + path.string()
+            );
+        }
+        const std::uintmax_t byte_length = fs::file_size(path, error);
+        if (error || byte_length > maximum_bytes
+            || byte_length > static_cast<std::uintmax_t>(
+                   std::numeric_limits<std::streamsize>::max()
+               )) {
+            fail(
+                std::string(description)
+                + " exceeds its byte limit: " + path.string()
+            );
+        }
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            fail(
+                "cannot read " + std::string(description) + ": " + path.string()
+            );
+        }
+        std::string result(static_cast<std::size_t>(byte_length), '\0');
+        if (!result.empty()) {
+            input.read(
+                result.data(), static_cast<std::streamsize>(result.size())
+            );
+        }
+        if (!input || input.peek() != std::char_traits<char>::eof()) {
+            fail(
+                std::string(description)
+                + " changed or exceeded its declared size while reading"
+            );
+        }
+        return result;
+    }
+
     json read_json(const fs::path& path) {
         try {
             return json::parse(read_bytes(path));
         } catch (const json::exception& error) {
             fail("invalid JSON in " + path.string() + ": " + error.what());
+        }
+    }
+
+    json read_normalized_manifest(const fs::path& path) {
+        try {
+            return json::parse(read_bounded_regular_file(
+                path, maximum_normalized_manifest_bytes,
+                "normalized product manifest"
+            ));
+        } catch (const json::exception& error) {
+            fail(
+                "invalid JSON in normalized product manifest " + path.string()
+                + ": " + error.what()
+            );
         }
     }
 
@@ -259,6 +391,178 @@ namespace {
             return static_cast<char>(std::tolower(c));
         });
         return value;
+    }
+
+    bool valid_isni(std::string_view value) {
+        if (value.size() != 16U) {
+            return false;
+        }
+        int total = 0;
+        for (std::size_t index = 0; index < 15U; ++index) {
+            const unsigned char character
+                = static_cast<unsigned char>(value[index]);
+            if (std::isdigit(character) == 0) {
+                return false;
+            }
+            total = (total + (character - static_cast<unsigned char>('0'))) * 2;
+        }
+        const int check = (12 - (total % 11)) % 11;
+        const char expected
+            = check == 10 ? 'X' : static_cast<char>('0' + check);
+        return value[15] == expected;
+    }
+
+    std::size_t
+    isni_separator_size(const std::string_view value, const std::size_t index) {
+        const auto byte = [&](const std::size_t offset) {
+            return static_cast<unsigned char>(value[index + offset]);
+        };
+        const unsigned char first = byte(0);
+        if (first == '-' || (first >= 0x09U && first <= 0x0DU)
+            || (first >= 0x1CU && first <= 0x20U)) {
+            return 1U;
+        }
+        if (index + 1U < value.size() && first == 0xC2U
+            && (byte(1) == 0x85U || byte(1) == 0xA0U)) {
+            return 2U;
+        }
+        if (index + 2U >= value.size()) {
+            return 0U;
+        }
+        const unsigned char second = byte(1);
+        const unsigned char third = byte(2);
+        if ((first == 0xE1U && second == 0x9AU && third == 0x80U)
+            || (first == 0xE2U && second == 0x80U
+                && ((third >= 0x80U && third <= 0x8AU) || third == 0xA8U
+                    || third == 0xA9U || third == 0xAFU))
+            || (first == 0xE2U && second == 0x81U && third == 0x9FU)
+            || (first == 0xE3U && second == 0x80U && third == 0x80U)) {
+            return 3U;
+        }
+        return 0U;
+    }
+
+    std::optional<std::string> normalized_isni(std::string_view value) {
+        std::string compact;
+        compact.reserve(value.size() + 1U);
+        for (std::size_t index = 0; index < value.size();) {
+            const std::size_t separator = isni_separator_size(value, index);
+            if (separator != 0U) {
+                index += separator;
+                continue;
+            }
+            const auto character = static_cast<unsigned char>(value[index++]);
+            compact.push_back(static_cast<char>(std::toupper(character)));
+        }
+        if (compact.size() == 15U) {
+            compact.insert(compact.begin(), '0');
+        }
+        return valid_isni(compact)
+            ? std::optional<std::string> { std::move(compact) }
+            : std::nullopt;
+    }
+
+    std::optional<std::string> normalized_isbn(std::string_view value) {
+        std::string compact;
+        compact.reserve(value.size());
+        for (char character : value) {
+            if (character == ' ' || character == '-') {
+                continue;
+            }
+            if (character == 'x') {
+                character = 'X';
+            }
+            compact.push_back(character);
+        }
+
+        if (compact.size() == 10U) {
+            int checksum = 0;
+            for (std::size_t index = 0; index < 10U; ++index) {
+                int digit = 0;
+                if (compact[index] >= '0' && compact[index] <= '9') {
+                    digit = compact[index] - '0';
+                } else if (index == 9U && compact[index] == 'X') {
+                    digit = 10;
+                } else {
+                    return std::nullopt;
+                }
+                checksum += static_cast<int>(10U - index) * digit;
+            }
+            return checksum % 11 == 0
+                ? std::optional<std::string> { std::move(compact) }
+                : std::nullopt;
+        }
+
+        if (compact.size() == 13U
+            && (compact.starts_with("978") || compact.starts_with("979"))) {
+            int checksum = 0;
+            for (std::size_t index = 0; index < 13U; ++index) {
+                if (compact[index] < '0' || compact[index] > '9') {
+                    return std::nullopt;
+                }
+                const int digit = compact[index] - '0';
+                checksum += digit * (index % 2U == 0U ? 1 : 3);
+            }
+            return checksum % 10 == 0
+                ? std::optional<std::string> { std::move(compact) }
+                : std::nullopt;
+        }
+
+        return std::nullopt;
+    }
+
+    struct parsed_http_url final {
+        std::string_view prefix;
+        std::string_view path;
+        std::string_view suffix;
+    };
+
+    std::optional<parsed_http_url> parse_http_url(std::string_view value) {
+        const std::size_t scheme_end = value.find("://");
+        if (scheme_end == std::string_view::npos) {
+            return std::nullopt;
+        }
+        const std::string scheme
+            = lowercase(std::string(value.substr(0, scheme_end)));
+        if (scheme != "http" && scheme != "https") {
+            return std::nullopt;
+        }
+
+        const std::size_t authority_begin = scheme_end + 3U;
+        const std::size_t path_or_suffix
+            = value.find_first_of("/?#", authority_begin);
+        const std::size_t authority_end
+            = path_or_suffix == std::string_view::npos ? value.size()
+                                                       : path_or_suffix;
+        if (authority_end == authority_begin) {
+            return std::nullopt;
+        }
+
+        std::size_t path_begin = authority_end;
+        std::size_t path_end = authority_end;
+        if (path_begin < value.size() && value[path_begin] == '/') {
+            path_end = value.find_first_of("?#", path_begin);
+            if (path_end == std::string_view::npos) {
+                path_end = value.size();
+            }
+        }
+        return parsed_http_url {
+            .prefix = value.substr(0, path_begin),
+            .path = value.substr(path_begin, path_end - path_begin),
+            .suffix = value.substr(path_end),
+        };
+    }
+
+    std::optional<std::string>
+    without_http_origin_root_slash(std::string_view value) {
+        const auto parsed = parse_http_url(value);
+        if (!parsed || parsed->path != "/" || !parsed->suffix.empty()) {
+            return std::nullopt;
+        }
+        std::string result;
+        result.reserve(value.size() - 1U);
+        result.append(parsed->prefix);
+        return result;
     }
 
     bool is_sha256(std::string_view value) {
@@ -429,6 +733,748 @@ namespace {
         db.exec(read_bytes(path));
     }
 
+    void normalize_obvious_product_values(const database& db) {
+        struct external_identifier_row final {
+            std::string id;
+            std::string entity_id;
+            std::string scheme;
+            std::string value;
+            std::optional<std::string> canonical_url;
+            bool is_work = false;
+            bool is_agent = false;
+        };
+
+        const auto external_identifier_rows = [&](std::string_view scheme,
+                                                  const bool case_insensitive) {
+            std::vector<external_identifier_row> rows;
+            statement query(
+                db.get(),
+                "SELECT external_ids.id,external_ids.entity_id,scheme,value,"
+                "canonical_url,EXISTS(SELECT 1 FROM works WHERE "
+                "works.entity_id="
+                "external_ids.entity_id),EXISTS(SELECT 1 FROM agents WHERE "
+                "agents.entity_id=external_ids.entity_id) FROM external_ids "
+                    + std::string(
+                        case_insensitive ? "WHERE lower(scheme)=lower(?1) "
+                                         : "WHERE scheme=?1 "
+                    )
+                    + "ORDER BY scheme,value,external_ids.id"
+            );
+            query.text(1, scheme);
+            while (query.row()) {
+                external_identifier_row row;
+                const auto text = [&](const int column) {
+                    const auto* value
+                        = sqlite3_column_text(query.get(), column);
+                    if (value == nullptr) {
+                        fail(
+                            "external identifier contains an unexpected null "
+                            "value"
+                        );
+                    }
+                    return std::string(reinterpret_cast<const char*>(value));
+                };
+                row.id = text(0);
+                row.entity_id = text(1);
+                row.scheme = text(2);
+                row.value = text(3);
+                if (const auto* raw_url = sqlite3_column_text(query.get(), 4)) {
+                    row.canonical_url = reinterpret_cast<const char*>(raw_url);
+                }
+                row.is_work = sqlite3_column_int(query.get(), 5) != 0;
+                row.is_agent = sqlite3_column_int(query.get(), 6) != 0;
+                rows.push_back(std::move(row));
+            }
+            return rows;
+        };
+        const auto normalize_external_identifier = [&db](
+                                                       const auto& row,
+                                                       std::string_view scheme,
+                                                       std::string_view value
+                                                   ) {
+            const std::string canonical_id = stable_id(
+                "xid_", std::string(scheme) + "|" + std::string(value)
+            );
+            statement collision(
+                db.get(),
+                "SELECT id,entity_id,canonical_url FROM external_ids WHERE "
+                "scheme=?1 AND value=?2 AND id<>?3 LIMIT 1"
+            );
+            collision.text(1, scheme);
+            collision.text(2, value);
+            collision.text(3, row.id);
+            if (collision.row()) {
+                const auto* raw_target_id
+                    = sqlite3_column_text(collision.get(), 0);
+                const auto* raw_target_entity
+                    = sqlite3_column_text(collision.get(), 1);
+                if (raw_target_id == nullptr || raw_target_entity == nullptr) {
+                    fail(
+                        "external identifier collision contains an unexpected "
+                        "null value"
+                    );
+                }
+                const std::string target_id
+                    = reinterpret_cast<const char*>(raw_target_id);
+                const std::string target_entity
+                    = reinterpret_cast<const char*>(raw_target_entity);
+                if (target_entity != row.entity_id) {
+                    return;
+                }
+                if (target_id != canonical_id) {
+                    return;
+                }
+                std::optional<std::string> target_url;
+                if (const auto* raw_target_url
+                    = sqlite3_column_text(collision.get(), 2)) {
+                    target_url = reinterpret_cast<const char*>(raw_target_url);
+                }
+                if (target_url && row.canonical_url
+                    && *target_url != *row.canonical_url) {
+                    return;
+                }
+                if (!target_url && row.canonical_url) {
+                    statement retain_url(
+                        db.get(),
+                        "UPDATE external_ids SET canonical_url=?1 WHERE id=?2"
+                    );
+                    retain_url.text(1, *row.canonical_url);
+                    retain_url.text(2, target_id);
+                    retain_url.done();
+                }
+                statement rebind(
+                    db.get(),
+                    "UPDATE remote_assets SET external_id_id=?1 WHERE "
+                    "external_id_id=?2"
+                );
+                rebind.text(1, target_id);
+                rebind.text(2, row.id);
+                rebind.done();
+                statement remove(
+                    db.get(), "DELETE FROM external_ids WHERE id=?1"
+                );
+                remove.text(1, row.id);
+                remove.done();
+                return;
+            }
+            if (canonical_id == row.id) {
+                statement update(
+                    db.get(),
+                    "UPDATE external_ids SET scheme=?1,value=?2 WHERE id=?3"
+                );
+                update.text(1, scheme);
+                update.text(2, value);
+                update.text(3, row.id);
+                update.done();
+                return;
+            }
+
+            statement id_collision(
+                db.get(), "SELECT 1 FROM external_ids WHERE id=?1 LIMIT 1"
+            );
+            id_collision.text(1, canonical_id);
+            if (id_collision.row()) {
+                return;
+            }
+            statement insert(
+                db.get(),
+                "INSERT INTO external_ids"
+                "(id,entity_id,scheme,value,canonical_url) "
+                "VALUES(?1,?2,?3,?4,?5)"
+            );
+            insert.text(1, canonical_id);
+            insert.text(2, row.entity_id);
+            insert.text(3, scheme);
+            insert.text(4, value);
+            insert.optional_text(5, row.canonical_url);
+            insert.done();
+            statement rebind(
+                db.get(),
+                "UPDATE remote_assets SET external_id_id=?1 WHERE "
+                "external_id_id=?2"
+            );
+            rebind.text(1, canonical_id);
+            rebind.text(2, row.id);
+            rebind.done();
+            statement remove(db.get(), "DELETE FROM external_ids WHERE id=?1");
+            remove.text(1, row.id);
+            remove.done();
+        };
+
+        // DOI names are case-insensitive. Keep the source row and its stable
+        // internal ID, changing only unambiguous identifier spellings.
+        db.exec(
+            "UPDATE sources SET doi=lower(doi) WHERE doi<>lower(doi) AND NOT "
+            "EXISTS(SELECT 1 FROM sources other WHERE other.id<>sources.id "
+            "AND other.doi IS NOT NULL AND lower(other.doi)=lower(sources.doi))"
+        );
+        db.exec(
+            "UPDATE sources SET url=replace(url,' ','%20') "
+            "WHERE instr(url,' ')>0"
+        );
+
+        // ISBN punctuation is presentation, not identifier content. Compact
+        // only checksum-valid ISBN-10/13 values; malformed or ambiguous
+        // strings remain unchanged for later review.
+        struct isbn_update final {
+            std::string id;
+            std::string normalized;
+        };
+
+        std::vector<isbn_update> isbn_updates;
+        std::map<std::string, std::size_t, std::less<>> isbn_counts;
+        {
+            statement sources(
+                db.get(),
+                "SELECT id,isbn FROM sources WHERE isbn IS NOT NULL ORDER BY id"
+            );
+            while (sources.row()) {
+                const auto* raw_id = sqlite3_column_text(sources.get(), 0);
+                const auto* raw_isbn = sqlite3_column_text(sources.get(), 1);
+                if (raw_id == nullptr || raw_isbn == nullptr) {
+                    fail("source ISBN contains an unexpected null value");
+                }
+                const std::string isbn
+                    = reinterpret_cast<const char*>(raw_isbn);
+                const auto normalized = normalized_isbn(isbn);
+                if (normalized) {
+                    ++isbn_counts[*normalized];
+                    if (*normalized != isbn) {
+                        isbn_updates.push_back(
+                            { reinterpret_cast<const char*>(raw_id),
+                              *normalized }
+                        );
+                    }
+                }
+            }
+        }
+        for (const auto& update : isbn_updates) {
+            if (isbn_counts.at(update.normalized) != 1U) {
+                continue;
+            }
+            statement update_source(
+                db.get(), "UPDATE sources SET isbn=?1 WHERE id=?2"
+            );
+            update_source.text(1, update.normalized);
+            update_source.text(2, update.id);
+            update_source.done();
+        }
+
+        // ISO 639 special-purpose codes already used elsewhere in the same
+        // columns replace prose aliases with no loss of meaning.
+        db.exec(
+            "UPDATE works SET language_code=CASE language_code "
+            "WHEN 'none' THEN 'zxx' WHEN 'mixed' THEN 'mul' ELSE "
+            "language_code END WHERE language_code IN ('none','mixed')"
+        );
+        db.exec(
+            "UPDATE sources SET language_code='mul' "
+            "WHERE language_code='multilingual'"
+        );
+
+        // These four values are machine-token spellings of prose qualifiers.
+        // Do not replace underscores in any other qualifier.
+        db.exec(
+            "UPDATE works SET date_qualifier=CASE date_qualifier "
+            "WHEN 'five_installment_serialization' THEN "
+            "'five installment serialization' "
+            "WHEN 'newspaper_serialization_and_completion' THEN "
+            "'newspaper serialization and completion' "
+            "WHEN 'serial_composition_and_revision' THEN "
+            "'serial composition and revision' "
+            "WHEN 'serialization_and_book_publication' THEN "
+            "'serialization and book publication' ELSE date_qualifier END "
+            "WHERE date_qualifier IN "
+            "('five_installment_serialization',"
+            "'newspaper_serialization_and_completion',"
+            "'serial_composition_and_revision',"
+            "'serialization_and_book_publication')"
+        );
+
+        // Production vocabulary remains deliberately open. Normalize only
+        // exact, corpus-observed format spellings that are equivalent.
+        static const std::map<std::string, std::string, std::less<>>
+            production_format_aliases {
+                { "16mm", "16 mm" },
+                { "35mm", "35 mm" },
+                { "3-D", "3D" },
+                { "70mm", "70 mm" },
+                { "8mm film", "8 mm film" },
+                { "Academy ratio", "academy ratio" },
+                { "Dolby stereo", "Dolby Stereo" },
+                { "FujiColor", "Fujicolor" },
+                { "HDCam", "HDCAM" },
+                { "HDcam", "HDCAM" },
+                { "Super 16mm", "Super 16 mm" },
+                { "super 8", "Super 8" },
+            };
+        std::vector<std::pair<std::string, std::string>> production_updates;
+        {
+            statement works(
+                db.get(),
+                "SELECT entity_id,production_info_json FROM works WHERE "
+                "production_info_json IS NOT NULL ORDER BY entity_id"
+            );
+            while (works.row()) {
+                const auto* raw_id = sqlite3_column_text(works.get(), 0);
+                const auto* raw_info = sqlite3_column_text(works.get(), 1);
+                if (raw_id == nullptr || raw_info == nullptr) {
+                    fail(
+                        "production information contains an unexpected null "
+                        "value"
+                    );
+                }
+                json info;
+                try {
+                    info = json::parse(reinterpret_cast<const char*>(raw_info));
+                } catch (const json::exception& error) {
+                    fail(
+                        std::string("invalid production_info_json: ")
+                        + error.what()
+                    );
+                }
+                auto formats = info.find("formats");
+                if (formats == info.end()) {
+                    continue;
+                }
+                if (!formats->is_array()) {
+                    fail("production_info_json.formats must be an array");
+                }
+                json normalized = json::array();
+                std::map<std::string, std::string, std::less<>>
+                    retained_spelling;
+                bool changed = false;
+                for (const auto& item : *formats) {
+                    if (!item.is_string()) {
+                        fail(
+                            "production_info_json.formats must contain "
+                            "strings"
+                        );
+                    }
+                    const std::string original = item.get<std::string>();
+                    std::string value = original;
+                    if (const auto alias
+                        = production_format_aliases.find(value);
+                        alias != production_format_aliases.end()) {
+                        value = alias->second;
+                        changed = true;
+                    }
+                    const auto [retained, inserted]
+                        = retained_spelling.try_emplace(value, original);
+                    if (inserted || retained->second == original) {
+                        normalized.push_back(std::move(value));
+                    } else {
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    *formats = std::move(normalized);
+                    production_updates.emplace_back(
+                        reinterpret_cast<const char*>(raw_id),
+                        canonical_json(info)
+                    );
+                }
+            }
+        }
+        for (const auto& [id, info] : production_updates) {
+            statement update(
+                db.get(),
+                "UPDATE works SET production_info_json=?1 WHERE entity_id=?2"
+            );
+            update.text(1, info);
+            update.text(2, id);
+            update.done();
+        }
+
+        // names has a dedicated script_code column. Split only a simple BCP
+        // 47 language-script pair and only when an existing script agrees.
+        constexpr std::string_view language_script
+            = "(language_code GLOB '[a-z][a-z]-[A-Z][a-z][a-z][a-z]' "
+              "OR language_code GLOB "
+              "'[a-z][a-z][a-z]-[A-Z][a-z][a-z][a-z]')";
+        const std::string script
+            = "substr(language_code,length(language_code)-3,4)";
+        db.exec(
+            "UPDATE names SET script_code=coalesce(script_code," + script
+            + "), "
+              "language_code=substr(language_code,1,length(language_code)-5) "
+              "WHERE "
+            + std::string(language_script)
+            + " AND (script_code IS NULL OR script_code=" + script + ")"
+        );
+
+        // Identifier schemes name authority namespaces, not the spelling used
+        // by an individual batch. Apply each alias only to its known entity
+        // family and identifier shape; context-bearing qualifiers are absent.
+        enum class identifier_entity_family { work, agent };
+        enum class identifier_value_shape {
+            digits,
+            allmovie_person,
+            loc_name,
+            openlibrary_author,
+            social_handle,
+            x_handle,
+        };
+
+        struct scheme_alias final {
+            std::string_view alias;
+            std::string_view canonical;
+            identifier_entity_family family;
+            identifier_value_shape shape;
+        };
+
+        static constexpr std::array scheme_aliases {
+            scheme_alias { "adultfilmdatabase_actor",
+                           "adult_film_database_actor",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::digits },
+            scheme_alias { "adultfilmdatabase_director",
+                           "adult_film_database_director",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::digits },
+            scheme_alias { "aic_object", "artic_object",
+                           identifier_entity_family::work,
+                           identifier_value_shape::digits },
+            scheme_alias { "allmovie_artist", "allmovie_person",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::allmovie_person },
+            scheme_alias { "aozora_author", "aozora_bunko_author",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::digits },
+            scheme_alias { "lcnaf", "loc", identifier_entity_family::agent,
+                           identifier_value_shape::loc_name },
+            scheme_alias { "library_of_congress", "loc",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::loc_name },
+            scheme_alias { "library_of_congress_name", "loc",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::loc_name },
+            scheme_alias { "loc_name", "loc", identifier_entity_family::agent,
+                           identifier_value_shape::loc_name },
+            scheme_alias { "openlibrary", "openlibrary_author",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::openlibrary_author },
+            scheme_alias { "project_gutenberg", "project_gutenberg_ebook",
+                           identifier_entity_family::work,
+                           identifier_value_shape::digits },
+            scheme_alias { "fansly", "fansly_handle",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::social_handle },
+            scheme_alias { "instagram", "instagram_handle",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::social_handle },
+            scheme_alias { "onlyfans", "onlyfans_handle",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::social_handle },
+            scheme_alias { "tiktok", "tiktok_handle",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::social_handle },
+            scheme_alias { "x_username", "x_handle",
+                           identifier_entity_family::agent,
+                           identifier_value_shape::x_handle },
+        };
+        const auto digits = [](std::string_view value) {
+            return !value.empty()
+                && std::ranges::all_of(value, [](char character) {
+                       return character >= '0' && character <= '9';
+                   });
+        };
+        const auto social_handle = [](std::string_view value) {
+            return !value.empty() && value.size() <= 64U
+                && std::ranges::all_of(value, [](char character) {
+                       return (character >= 'a' && character <= 'z')
+                           || (character >= 'A' && character <= 'Z')
+                           || (character >= '0' && character <= '9')
+                           || character == '_' || character == '.'
+                           || character == '-';
+                   });
+        };
+        const auto valid_shape = [&](std::string_view value,
+                                     identifier_value_shape shape) {
+            switch (shape) {
+            case identifier_value_shape::digits:
+                return digits(value);
+            case identifier_value_shape::allmovie_person:
+                return value.size() > 2U && value[0] >= 'a' && value[0] <= 'z'
+                    && value[1] >= 'a' && value[1] <= 'z'
+                    && digits(value.substr(2));
+            case identifier_value_shape::loc_name: {
+                if (value.size() < 2U || value.front() != 'n') {
+                    return false;
+                }
+                std::size_t digits_begin = 1U;
+                if (value[digits_begin] >= 'a' && value[digits_begin] <= 'z') {
+                    ++digits_begin;
+                }
+                return digits(value.substr(digits_begin));
+            }
+            case identifier_value_shape::openlibrary_author:
+                return value.size() > 3U && value.starts_with("OL")
+                    && value.ends_with('A')
+                    && digits(value.substr(2, value.size() - 3U));
+            case identifier_value_shape::social_handle:
+                return social_handle(value);
+            case identifier_value_shape::x_handle:
+                return value.size() <= 15U && social_handle(value)
+                    && value.find_first_of(".-") == std::string_view::npos;
+            }
+            return false;
+        };
+
+        struct identifier_normalization final {
+            external_identifier_row row;
+            std::string scheme;
+            std::string value;
+        };
+
+        std::vector<identifier_normalization> alias_updates;
+        std::map<
+            std::pair<std::string, std::string>, std::set<std::string>,
+            std::less<>>
+            alias_target_entities;
+        for (const auto& alias : scheme_aliases) {
+            for (const auto& row :
+                 external_identifier_rows(alias.alias, false)) {
+                const bool correct_family
+                    = alias.family == identifier_entity_family::work
+                    ? row.is_work
+                    : row.is_agent;
+                if (correct_family && valid_shape(row.value, alias.shape)) {
+                    auto key
+                        = std::pair { std::string(alias.canonical), row.value };
+                    alias_target_entities[key].insert(row.entity_id);
+                    alias_updates.push_back(
+                        { row, std::move(key.first), std::move(key.second) }
+                    );
+                }
+            }
+        }
+
+        for (auto& [target, entities] : alias_target_entities) {
+            statement existing(
+                db.get(),
+                "SELECT entity_id FROM external_ids WHERE scheme=?1 AND "
+                "value=?2"
+            );
+            existing.text(1, target.first);
+            existing.text(2, target.second);
+            if (existing.row()) {
+                const auto* raw_entity = sqlite3_column_text(existing.get(), 0);
+                if (raw_entity == nullptr) {
+                    fail(
+                        "canonical external identifier contains an unexpected "
+                        "null entity"
+                    );
+                }
+                entities.emplace(reinterpret_cast<const char*>(raw_entity));
+            }
+        }
+        for (const auto& update : alias_updates) {
+            if (alias_target_entities.at({ update.scheme, update.value }).size()
+                == 1U) {
+                normalize_external_identifier(
+                    update.row, update.scheme, update.value
+                );
+            }
+        }
+
+        // ISNI is a fixed-width, check-digit identifier. Invalid submissions
+        // cannot remain canonical; valid presentation variants normalize only
+        // after they have already served their identity-assignment purpose.
+        std::vector<identifier_normalization> isni_updates;
+        std::map<std::string, std::set<std::string>, std::less<>>
+            isni_target_entities;
+        for (const auto& row : external_identifier_rows("isni", true)) {
+            const auto normalized = normalized_isni(row.value);
+            if (!normalized) {
+                statement remove(
+                    db.get(), "DELETE FROM external_ids WHERE id=?1"
+                );
+                remove.text(1, row.id);
+                remove.done();
+            } else {
+                isni_target_entities[*normalized].insert(row.entity_id);
+                if (row.scheme != "isni" || *normalized != row.value) {
+                    isni_updates.push_back({ row, "isni", *normalized });
+                }
+            }
+        }
+        std::ranges::sort(isni_updates, [](const auto& lhs, const auto& rhs) {
+            const auto rank = [](const auto& update) {
+                return std::tuple { update.row.scheme != "isni",
+                                    update.row.value != update.value,
+                                    update.row.scheme, update.row.value,
+                                    update.row.canonical_url.value_or("") };
+            };
+            return rank(lhs) < rank(rhs);
+        });
+        for (const auto& update : isni_updates) {
+            if (isni_target_entities.at(update.value).size() == 1U) {
+                normalize_external_identifier(
+                    update.row, update.scheme, update.value
+                );
+            }
+        }
+
+        // The corpus contains one exact duration duplicate differing only in
+        // the capitalization of this qualifier. Prefer the lowercase prose.
+        db.exec(
+            "DELETE FROM measurements WHERE measurement_type='duration' AND "
+            "qualifier='Average episode duration' AND EXISTS ("
+            "SELECT 1 FROM measurements lower_value WHERE "
+            "lower_value.id<>measurements.id AND "
+            "lower_value.entity_id=measurements.entity_id AND "
+            "lower_value.measurement_type=measurements.measurement_type AND "
+            "lower_value.value=measurements.value AND "
+            "lower_value.unit=measurements.unit AND "
+            "lower_value.qualifier='average episode duration')"
+        );
+        db.exec(
+            "UPDATE measurements SET qualifier='average episode duration' "
+            "WHERE measurement_type='duration' AND "
+            "qualifier='Average episode duration'"
+        );
+
+        // Only an HTTP(S) origin and its explicit root-path spelling are
+        // interchangeable without making assumptions about server routing.
+        // Retain a referenced row, otherwise retain the origin-only row.
+        struct source_duplicate final {
+            std::string loser_id;
+            std::string winner_id;
+            std::string normalized_url;
+        };
+
+        struct source_row final {
+            std::string id;
+            std::string source_type;
+            std::optional<std::string> title;
+            std::optional<std::string> bibliography;
+            std::optional<std::string> author;
+            std::optional<std::string> publisher;
+            std::optional<std::string> publication_date;
+            std::string url;
+            std::optional<std::string> doi;
+            std::optional<std::string> isbn;
+            std::optional<std::string> language;
+            bool used = false;
+        };
+
+        std::vector<source_row> source_rows;
+        {
+            statement sources(
+                db.get(),
+                "SELECT id,source_type,title,bibliography_text,author_text,"
+                "publisher,publication_date,url,doi,isbn,language_code,"
+                "EXISTS(SELECT 1 FROM evidence WHERE evidence.source_id="
+                "sources.id) OR EXISTS(SELECT 1 FROM source_archives WHERE "
+                "source_archives.source_id=sources.id) FROM sources WHERE "
+                "url IS NOT NULL ORDER BY url,id"
+            );
+            while (sources.row()) {
+                const auto required_text = [&](const int column) {
+                    const auto* value
+                        = sqlite3_column_text(sources.get(), column);
+                    if (value == nullptr) {
+                        fail(
+                            "source URL normalization contains an unexpected "
+                            "null value"
+                        );
+                    }
+                    return std::string(reinterpret_cast<const char*>(value));
+                };
+                const auto optional_text = [&](const int column) {
+                    const auto* value
+                        = sqlite3_column_text(sources.get(), column);
+                    return value == nullptr
+                        ? std::optional<std::string> {}
+                        : std::optional<std::string> {
+                              reinterpret_cast<const char*>(value)
+                          };
+                };
+                source_rows.push_back(
+                    { .id = required_text(0),
+                      .source_type = required_text(1),
+                      .title = optional_text(2),
+                      .bibliography = optional_text(3),
+                      .author = optional_text(4),
+                      .publisher = optional_text(5),
+                      .publication_date = optional_text(6),
+                      .url = required_text(7),
+                      .doi = optional_text(8),
+                      .isbn = optional_text(9),
+                      .language = optional_text(10),
+                      .used = sqlite3_column_int(sources.get(), 11) != 0 }
+                );
+            }
+        }
+
+        const auto same_source_metadata
+            = [](const source_row& lhs, const source_row& rhs) {
+                  return std::tie(
+                             lhs.source_type, lhs.title, lhs.bibliography,
+                             lhs.author, lhs.publisher, lhs.publication_date,
+                             lhs.doi, lhs.isbn, lhs.language
+                         )
+                      == std::tie(
+                             rhs.source_type, rhs.title, rhs.bibliography,
+                             rhs.author, rhs.publisher, rhs.publication_date,
+                             rhs.doi, rhs.isbn, rhs.language
+                      );
+              };
+        std::map<std::string, std::vector<std::size_t>, std::less<>> by_url;
+        for (std::size_t index = 0; index < source_rows.size(); ++index) {
+            by_url[source_rows[index].url].push_back(index);
+        }
+
+        std::vector<source_duplicate> source_duplicates;
+        for (std::size_t slash_index = 0; slash_index < source_rows.size();
+             ++slash_index) {
+            const auto normalized
+                = without_http_origin_root_slash(source_rows[slash_index].url);
+            if (!normalized) {
+                continue;
+            }
+            const auto candidates = by_url.find(*normalized);
+            if (candidates == by_url.end()) {
+                continue;
+            }
+            std::vector<std::size_t> matching;
+            for (const std::size_t candidate : candidates->second) {
+                if (same_source_metadata(
+                        source_rows[slash_index], source_rows[candidate]
+                    )) {
+                    matching.push_back(candidate);
+                }
+            }
+            if (matching.size() != 1U) {
+                continue;
+            }
+            const std::size_t base_index = matching.front();
+            const auto& base = source_rows[base_index];
+            const auto& slash = source_rows[slash_index];
+            if (base.used && slash.used) {
+                continue;
+            }
+            const bool keep_slash = slash.used;
+            source_duplicates.push_back(
+                { .loser_id = keep_slash ? base.id : slash.id,
+                  .winner_id = keep_slash ? slash.id : base.id,
+                  .normalized_url = base.url }
+            );
+        }
+        for (const auto& duplicate : source_duplicates) {
+            statement remove(db.get(), "DELETE FROM sources WHERE id=?1");
+            remove.text(1, duplicate.loser_id);
+            remove.done();
+        }
+        for (const auto& duplicate : source_duplicates) {
+            statement update(db.get(), "UPDATE sources SET url=?1 WHERE id=?2");
+            update.text(1, duplicate.normalized_url);
+            update.text(2, duplicate.winner_id);
+            update.done();
+        }
+    }
+
     void copy_database(const fs::path& source, const fs::path& destination) {
         // Published snapshots are checkpointed before activation and are
         // immutable. A byte-for-byte copy avoids opening the WAL-mode source,
@@ -510,6 +1556,92 @@ namespace {
             }
         }
         fail("cannot allocate a unique staging directory");
+    }
+
+    fs::path
+    make_normalized_import_staging_directory(const fs::path& destination) {
+        const fs::path parent = destination.parent_path();
+        const std::string base
+            = "." + destination.filename().string() + ".import-staging";
+        for (std::size_t suffix = 0; suffix < 1000; ++suffix) {
+            fs::path candidate = parent / base;
+            if (suffix != 0) {
+                candidate += "-" + std::to_string(suffix);
+            }
+            std::error_code error;
+            if (fs::create_directory(candidate, error)) {
+                return candidate;
+            }
+            if (error) {
+                fail(
+                    "cannot create normalized import staging directory: "
+                    + error.message()
+                );
+            }
+        }
+        fail("cannot allocate normalized import staging directory");
+    }
+
+    void remove_staging_sqlite_sidecars(
+        const fs::path& database_path,
+        const fs::path& expected_staging_directory
+    ) {
+        if (database_path.filename() != "graph.sqlite"
+            || database_path.parent_path() != expected_staging_directory) {
+            fail("refusing to clean SQLite sidecars outside expected staging");
+        }
+
+        const std::string directory_name
+            = expected_staging_directory.filename().string();
+        const bool snapshot_staging
+            = expected_staging_directory.parent_path().filename() == ".staging"
+            && directory_name.starts_with("stage-");
+        constexpr std::string_view import_marker = ".import-staging";
+        const std::size_t marker = directory_name.rfind(import_marker);
+        bool normalized_staging = directory_name.starts_with('.')
+            && marker != std::string::npos && marker >= 2U;
+        if (normalized_staging) {
+            const std::string_view suffix
+                = std::string_view(directory_name)
+                      .substr(marker + import_marker.size());
+            normalized_staging = suffix.empty()
+                || (suffix.size() > 1U && suffix.front() == '-'
+                    && std::ranges::all_of(
+                        suffix.substr(1), [](const unsigned char value) {
+                            return std::isdigit(value) != 0;
+                        }
+                    ));
+        }
+        std::error_code error;
+        const fs::file_status staging_status
+            = fs::symlink_status(expected_staging_directory, error);
+        if ((!snapshot_staging && !normalized_staging) || error
+            || !fs::is_directory(staging_status)) {
+            fail("refusing to clean SQLite sidecars outside safe staging");
+        }
+
+        for (const std::string_view suffix : { "-wal", "-shm", "-journal" }) {
+            fs::path sidecar = database_path;
+            sidecar += suffix;
+            error.clear();
+            const fs::file_status status = fs::symlink_status(sidecar, error);
+            if (error == std::errc::no_such_file_or_directory
+                || (!error && status.type() == fs::file_type::not_found)) {
+                continue;
+            }
+            if (error || !fs::is_regular_file(status)) {
+                fail(
+                    "refusing to remove unsafe staging sidecar: "
+                    + sidecar.string()
+                );
+            }
+            if (!fs::remove(sidecar, error) || error) {
+                fail(
+                    "cannot remove checkpointed staging sidecar: "
+                    + sidecar.string() + ": " + error.message()
+                );
+            }
+        }
     }
 
 } // namespace
@@ -1194,7 +2326,8 @@ namespace {
     std::string resolve_entity(
         sqlite3* db, const json& object, std::string_view entity_type,
         std::string_view payload_hash, std::string_view category,
-        std::string_view local_id, std::string_view context
+        std::string_view local_id, std::string_view context,
+        const bool require_canonical_id = false
     ) {
         const auto identifiers = parse_external_ids(object, context);
         std::optional<std::string> resolved;
@@ -1221,6 +2354,12 @@ namespace {
         }
         const auto supplied_id
             = optional_string(object, "canonical_id", context);
+        if (require_canonical_id && !supplied_id) {
+            fail(
+                std::string(context)
+                + ".canonical_id is required by normalized_product_import_v1"
+            );
+        }
         if (supplied_id && resolved && *supplied_id != *resolved) {
             fail(
                 std::string(context)
@@ -1363,6 +2502,7 @@ namespace {
     struct batch_context final {
         sqlite3* db {};
         std::string payload_hash;
+        bool require_canonical_ids { false };
         std::unordered_map<std::string, std::string> creators;
         std::unordered_map<std::string, std::string> works;
         std::unordered_map<std::string, std::string> concepts;
@@ -1432,7 +2572,7 @@ namespace {
             }
             const std::string entity_id = resolve_entity(
                 context.db, creator, type, context.payload_hash, "creator",
-                local_id, where
+                local_id, where, context.require_canonical_ids
             );
             statement agent(
                 context.db,
@@ -1463,12 +2603,44 @@ namespace {
             verify_agent.optional_integer(3, birth_year);
             verify_agent.optional_integer(4, death_year);
             require_matching_row(verify_agent, where);
-            const std::string name = require_string(creator, "name", where);
-            insert_name(
-                context.db, entity_id, "original",
-                optional_string(creator, "language", where), std::nullopt, name,
-                true
-            );
+            const auto scalar_name = optional_string(creator, "name", where);
+            const auto& names = array_or_empty(creator, "names", where);
+            if (!scalar_name && names.empty()) {
+                fail(where + " requires name or names");
+            }
+            bool preferred = false;
+            if (scalar_name) {
+                insert_name(
+                    context.db, entity_id, "original",
+                    optional_string(creator, "language", where), std::nullopt,
+                    *scalar_name, true
+                );
+                preferred = true;
+            }
+            std::size_t name_index = 0;
+            for (const auto& name : names) {
+                const std::string name_where
+                    = where + ".names[" + std::to_string(name_index++) + "]";
+                if (!name.is_object()) {
+                    fail(name_where + " must be an object");
+                }
+                const bool is_preferred = name.value("preferred", false);
+                if (name.contains("preferred")
+                    && !name["preferred"].is_boolean()) {
+                    fail(name_where + ".preferred must be boolean");
+                }
+                insert_name(
+                    context.db, entity_id,
+                    require_string(name, "type", name_where),
+                    optional_string(name, "language", name_where),
+                    optional_string(name, "script", name_where),
+                    require_string(name, "value", name_where), is_preferred
+                );
+                preferred = preferred || is_preferred;
+            }
+            if (!preferred) {
+                fail(where + " requires at least one preferred name");
+            }
             context.creators.emplace(local_id, entity_id);
         }
     }
@@ -1581,7 +2753,7 @@ namespace {
             require_unique_local_id(context.works, local_id, where);
             const std::string entity_id = resolve_entity(
                 context.db, work, "work", context.payload_hash, "work",
-                local_id, where
+                local_id, where, context.require_canonical_ids
             );
             const std::string medium = require_string(work, "medium", where);
             const parsed_date date = parse_date(work, where);
@@ -1657,7 +2829,7 @@ namespace {
             );
             const std::string entity_id = resolve_entity(
                 context.db, item, "manifestation", context.payload_hash,
-                "manifestation", local_id, where
+                "manifestation", local_id, where, context.require_canonical_ids
             );
             statement insert(
                 context.db,
@@ -1708,18 +2880,60 @@ namespace {
         const batch_context& context, std::string_view local_id,
         std::string_view where
     ) {
-        if (const auto it = context.works.find(std::string(local_id));
-            it != context.works.end()) {
-            return it->second;
-        }
-        if (const auto it = context.manifestations.find(std::string(local_id));
-            it != context.manifestations.end()) {
-            return it->second;
+        std::optional<std::string> resolved;
+        const auto consider = [&](const auto& values) {
+            if (const auto it = values.find(std::string(local_id));
+                it != values.end()) {
+                if (resolved && *resolved != it->second) {
+                    fail(
+                        std::string(where)
+                        + " has an ambiguous work/manifestation local ID "
+                        + std::string(local_id)
+                    );
+                }
+                resolved = it->second;
+            }
+        };
+        consider(context.works);
+        consider(context.manifestations);
+        if (resolved) {
+            return *resolved;
         }
         fail(
             std::string(where) + " references unknown work/manifestation "
             + std::string(local_id)
         );
+    }
+
+    std::string lookup_any_entity_reference(
+        const batch_context& context, std::string_view local_id,
+        std::string_view where
+    ) {
+        std::optional<std::string> resolved;
+        const auto consider = [&](const auto& values) {
+            if (const auto it = values.find(std::string(local_id));
+                it != values.end()) {
+                if (resolved && *resolved != it->second) {
+                    fail(
+                        std::string(where)
+                        + " has an ambiguous cross-category local ID "
+                        + std::string(local_id)
+                    );
+                }
+                resolved = it->second;
+            }
+        };
+        consider(context.creators);
+        consider(context.works);
+        consider(context.concepts);
+        consider(context.manifestations);
+        if (!resolved) {
+            fail(
+                std::string(where) + " references unknown entity "
+                + std::string(local_id)
+            );
+        }
+        return *resolved;
     }
 
     void import_measurements(batch_context& context, const json& batch) {
@@ -1868,7 +3082,7 @@ namespace {
             if (!item.is_object()) {
                 fail(where + " must be an object");
             }
-            const std::string entity_id = lookup_entity_reference(
+            const std::string entity_id = lookup_any_entity_reference(
                 context, require_string(item, "entity", where), where
             );
             const std::string provider
@@ -2332,9 +3546,47 @@ namespace {
         }
     }
 
-    void validate_batch_transfer_surface(const json& batch) {
-        validate_batch_header(batch);
-        static const std::set<std::string_view> transferred_top_level {
+    void validate_normalized_canonical_id(
+        const json& value, std::string_view context
+    ) {
+        const std::string id = require_string(value, "canonical_id", context);
+        if (id.size() > 128 || !std::ranges::all_of(id, [](unsigned char c) {
+                return std::isalnum(c) != 0 || c == '_' || c == '-';
+            })) {
+            fail(
+                std::string(context) + ".canonical_id is not a safe stable ID"
+            );
+        }
+    }
+
+    void validate_batch_transfer_surface(
+        const json& batch, const bool normalized_manifest = false
+    ) {
+        if (normalized_manifest) {
+            if (!batch.is_object()) {
+                fail("normalized product manifest must be a JSON object");
+            }
+            const auto contract = batch.find("contract");
+            if (contract == batch.end() || !contract->is_string()
+                || contract->get_ref<const std::string&>()
+                    != normalized_product_import_contract) {
+                fail(
+                    "normalized product manifest contract must be '"
+                    + std::string(normalized_product_import_contract) + "'"
+                );
+            }
+            const auto version = batch.find("format_version");
+            if (version == batch.end() || !version->is_number_integer()
+                || version->get<int>() != 1) {
+                fail(
+                    "normalized product manifest format_version must be "
+                    "integer 1"
+                );
+            }
+        } else {
+            validate_batch_header(batch);
+        }
+        static const std::set<std::string_view> legacy_top_level {
             "contract",
             "format_version",
             "batch_id",
@@ -2353,14 +3605,50 @@ namespace {
             "parent_guide_assertions",
             "remote_assets"
         };
+        static const std::set<std::string_view> normalized_top_level {
+            "contract",
+            "format_version",
+            "creators",
+            "works",
+            "credits",
+            "tags",
+            "references",
+            "assertions",
+            "manifestations",
+            "concept_relations",
+            "measurements",
+            "financial_facts",
+            "parent_guide_assertions",
+            "remote_assets"
+        };
+        const auto& transferred_top_level
+            = normalized_manifest ? normalized_top_level : legacy_top_level;
         for (const auto& [key, value] : batch.items()) {
             if (!transferred_top_level.contains(key)
-                && has_transfer_content(value)) {
+                && (normalized_manifest || has_transfer_content(value))) {
                 fail(
-                    "MINER legacy-v1 field '" + key
-                    + "' has no lossless product-database adapter; retain it "
-                      "as a problematic remainder"
+                    (normalized_manifest ? "normalized product manifest field '"
+                                         : "MINER legacy-v1 field '")
+                    + key
+                    + (normalized_manifest
+                           ? "' is outside normalized_product_import_v1"
+                           : "' has no lossless product-database adapter; "
+                             "retain it as a problematic remainder")
                 );
+            }
+        }
+        if (normalized_manifest) {
+            for (const std::string_view key : normalized_top_level) {
+                if (key == "contract" || key == "format_version") {
+                    continue;
+                }
+                const auto value = batch.find(std::string(key));
+                if (value == batch.end() || !value->is_array()) {
+                    fail(
+                        "normalized product manifest requires array field '"
+                        + std::string(key) + "'"
+                    );
+                }
             }
         }
 
@@ -2442,6 +3730,9 @@ namespace {
         static const std::set<std::string_view> evidence_stances {
             "supports", "contradicts", "contextualizes"
         };
+        static const std::set<std::string_view> archive_scopes {
+            "full", "article_text", "excerpt_bundle"
+        };
         static const std::set<std::string_view> parent_categories {
             "violence",  "sex_nudity",     "language", "drugs", "frightening",
             "self_harm", "discrimination", "abuse",    "taboo"
@@ -2469,6 +3760,13 @@ namespace {
             if (!external_ids->is_object()) {
                 fail(where + ".external_ids must be an object");
             }
+            if (normalized_manifest && external_ids->empty()) {
+                fail(
+                    where
+                    + ".external_ids must not be empty in a normalized "
+                      "product manifest"
+                );
+            }
             for (const auto& [scheme, identifier] : external_ids->items()) {
                 if (identifier.is_object()) {
                     require_only_fields(
@@ -2478,38 +3776,67 @@ namespace {
                 }
             }
         };
-        const auto validate_evidence = [&](const json& owner,
-                                           const std::string& where) {
-            std::size_t index = 0;
-            for (const auto& evidence :
-                 array_or_empty(owner, "evidence", where)) {
-                const std::string evidence_where
-                    = where + ".evidence[" + std::to_string(index++) + "]";
-                if (!evidence.is_object()) {
-                    fail(evidence_where + " must be an object");
-                }
-                require_only_fields(
-                    evidence,
-                    { "ref_id", "quote", "locator", "language", "translation",
-                      "stance" },
-                    evidence_where
-                );
-                validate_controlled_value(
-                    evidence, "stance", evidence_stances, evidence_where, false
-                );
-            }
-        };
+        const auto validate_evidence
+            = [&](const json& owner, const std::string& where) {
+                  std::size_t index = 0;
+                  for (const auto& evidence :
+                       array_or_empty(owner, "evidence", where)) {
+                      const std::string evidence_where = where + ".evidence["
+                          + std::to_string(index++) + "]";
+                      if (!evidence.is_object()) {
+                          fail(evidence_where + " must be an object");
+                      }
+                      require_only_fields(
+                          evidence,
+                          { "ref_id", "quote", "locator", "language",
+                            "translation", "stance" },
+                          evidence_where
+                      );
+                      validate_controlled_value(
+                          evidence, "stance", evidence_stances, evidence_where,
+                          normalized_manifest
+                      );
+                  }
+              };
         records("creators", [&](const json& value, const std::string& where) {
             require_only_fields(
                 value,
                 { "local_id", "canonical_id", "external_ids", "entity_type",
-                  "birth_year", "death_year", "name", "language" },
+                  "birth_year", "death_year", "name", "language", "names" },
                 where
             );
             validate_external_ids(value, where);
             validate_controlled_value(
-                value, "entity_type", agent_types, where, false
+                value, "entity_type", agent_types, where, normalized_manifest
             );
+            if (normalized_manifest) {
+                validate_normalized_canonical_id(value, where);
+            }
+            std::size_t index = 0;
+            for (const auto& name : array_or_empty(value, "names", where)) {
+                const std::string name_where
+                    = where + ".names[" + std::to_string(index++) + "]";
+                if (!name.is_object()) {
+                    fail(name_where + " must be an object");
+                }
+                require_only_fields(
+                    name,
+                    { "type", "language", "script", "value", "preferred" },
+                    name_where
+                );
+                validate_controlled_value(
+                    name, "type", name_types, name_where, true
+                );
+                if (normalized_manifest
+                    && (!name.contains("preferred")
+                        || !name.at("preferred").is_boolean())) {
+                    fail(
+                        name_where
+                        + ".preferred must be an explicit boolean in a "
+                          "normalized product manifest"
+                    );
+                }
+            }
         });
         records("works", [&](const json& value, const std::string& where) {
             require_only_fields(
@@ -2521,6 +3848,9 @@ namespace {
             );
             validate_external_ids(value, where);
             validate_controlled_value(value, "medium", media, where, true);
+            if (normalized_manifest) {
+                validate_normalized_canonical_id(value, where);
+            }
             if (const auto date = value.find("date");
                 date != value.end() && date->is_object()) {
                 require_only_fields(
@@ -2543,6 +3873,15 @@ namespace {
                 validate_controlled_value(
                     title, "type", name_types, title_where, true
                 );
+                if (normalized_manifest
+                    && (!title.contains("preferred")
+                        || !title.at("preferred").is_boolean())) {
+                    fail(
+                        title_where
+                        + ".preferred must be an explicit boolean in a "
+                          "normalized product manifest"
+                    );
+                }
             }
         });
         records("tags", [&](const json& value, const std::string& where) {
@@ -2554,6 +3893,9 @@ namespace {
             validate_controlled_value(
                 value, "type", concept_types, where, true
             );
+            if (normalized_manifest) {
+                validate_slug(require_string(value, "slug", where), where);
+            }
         });
         records(
             "manifestations", [&](const json& value, const std::string& where) {
@@ -2568,6 +3910,9 @@ namespace {
                 validate_controlled_value(
                     value, "type", manifestation_types, where, true
                 );
+                if (normalized_manifest) {
+                    validate_normalized_canonical_id(value, where);
+                }
             }
         );
         records("credits", [&](const json& value, const std::string& where) {
@@ -2579,7 +3924,7 @@ namespace {
             );
             validate_controlled_value(value, "role", credit_roles, where, true);
             validate_controlled_value(
-                value, "importance", importance, where, false
+                value, "importance", importance, where, normalized_manifest
             );
         });
         records(
@@ -2615,6 +3960,15 @@ namespace {
                 validate_controlled_value(
                     value, "type", fact_types, where, true
                 );
+                if (normalized_manifest
+                    && (!value.contains("estimated")
+                        || !value.at("estimated").is_boolean())) {
+                    fail(
+                        where
+                        + ".estimated must be an explicit boolean in a "
+                          "normalized product manifest"
+                    );
+                }
             }
         );
         records("references", [&](const json& value, const std::string& where) {
@@ -2633,9 +3987,31 @@ namespace {
                       "rights_note" },
                     where + ".archive"
                 );
+                if (normalized_manifest) {
+                    (void)require_string(
+                        *archive, "storage_ref", where + ".archive"
+                    );
+                    const auto media_type = optional_string(
+                        *archive, "media_type", where + ".archive"
+                    );
+                    const auto format = optional_string(
+                        *archive, "format", where + ".archive"
+                    );
+                    if (!media_type && !format) {
+                        fail(
+                            where
+                            + ".archive requires media_type or format in a "
+                              "normalized product manifest"
+                        );
+                    }
+                    validate_controlled_value(
+                        *archive, "scope", archive_scopes, where + ".archive",
+                        true
+                    );
+                }
             }
             validate_controlled_value(
-                value, "source_type", source_types, where, false
+                value, "source_type", source_types, where, normalized_manifest
             );
         });
         records("assertions", [&](const json& value, const std::string& where) {
@@ -2699,12 +4075,15 @@ namespace {
         );
     }
 
-    void
-    import_batch(sqlite3* db, const json& batch, std::string payload_hash) {
-        validate_batch_transfer_surface(batch);
+    void import_batch(
+        sqlite3* db, const json& batch, std::string payload_hash,
+        const bool normalized_manifest = false
+    ) {
+        validate_batch_transfer_surface(batch, normalized_manifest);
         batch_context context;
         context.db = db;
         context.payload_hash = std::move(payload_hash);
+        context.require_canonical_ids = normalized_manifest;
         import_creators(context, batch);
         import_concepts(context, batch);
         import_works(context, batch);
@@ -2975,15 +4354,17 @@ namespace {
         }
     }
 
-    integrity_report
-    inspect_database(graph_domain domain, const fs::path& database_path) {
+    integrity_report inspect_database(
+        graph_domain domain, const fs::path& database_path,
+        const database_access access = database_access::ordinary
+    ) {
         integrity_report report;
         if (!fs::is_regular_file(database_path)) {
             report.problems.push_back("database file does not exist");
             return report;
         }
         try {
-            database db(database_path, SQLITE_OPEN_READONLY);
+            database db(database_path, SQLITE_OPEN_READONLY, access);
             db.exec("PRAGMA foreign_keys = ON");
             {
                 statement check(db.get(), "PRAGMA integrity_check");
@@ -3133,6 +4514,49 @@ namespace {
         }
         report.ok = report.problems.empty();
         return report;
+    }
+
+    void seal_and_validate_database(
+        const graph_domain domain, const fs::path& database_path
+    ) {
+        {
+            database db(database_path, SQLITE_OPEN_READWRITE);
+            configure_connection(db);
+            db.exec("PRAGMA optimize");
+            {
+                statement checkpoint(
+                    db.get(), "PRAGMA wal_checkpoint(TRUNCATE)"
+                );
+                if (!checkpoint.row()
+                    || sqlite3_column_int(checkpoint.get(), 0) != 0) {
+                    fail("SQLite WAL checkpoint did not complete");
+                }
+            }
+            statement required_mode(db.get(), "PRAGMA journal_mode");
+            if (!required_mode.row()) {
+                fail("cannot inspect checkpointed database journal mode");
+            }
+            const auto* mode = sqlite3_column_text(required_mode.get(), 0);
+            const std::string actual_mode = mode == nullptr
+                ? std::string {}
+                : lowercase(reinterpret_cast<const char*>(mode));
+            if (actual_mode != "wal") {
+                fail(
+                    "checkpointed database did not retain required WAL mode: "
+                    + actual_mode
+                );
+            }
+        }
+        const auto report = inspect_database(
+            domain, database_path, database_access::immutable_readonly
+        );
+        if (!report.ok) {
+            std::string message = "database integrity validation failed";
+            for (const auto& problem : report.problems) {
+                message += "\n- " + problem;
+            }
+            fail(std::move(message));
+        }
     }
 
     struct export_table final {
@@ -3327,7 +4751,9 @@ store::active_snapshot(const graph_domain domain) const {
 integrity_report store::integrity_check(
     const graph_domain domain, const fs::path& database_path
 ) const {
-    return inspect_database(domain, database_path);
+    return inspect_database(
+        domain, database_path, database_access::immutable_readonly
+    );
 }
 
 void store::checkpoint_staging(
@@ -3340,47 +4766,17 @@ void store::checkpoint_staging(
             fail("refusing to checkpoint an active immutable snapshot");
         }
     }
-    {
-        database db(database_path, SQLITE_OPEN_READWRITE);
-        configure_connection(db);
-        {
-            statement checkpoint(db.get(), "PRAGMA wal_checkpoint(TRUNCATE)");
-            if (!checkpoint.row()
-                || sqlite3_column_int(checkpoint.get(), 0) != 0) {
-                fail("SQLite WAL checkpoint did not complete");
-            }
-        }
-        db.exec("PRAGMA optimize");
-        statement durable_mode(db.get(), "PRAGMA journal_mode = DELETE");
-        if (!durable_mode.row()) {
-            fail("cannot seal checkpointed snapshot journal mode");
-        }
-        const auto* mode = sqlite3_column_text(durable_mode.get(), 0);
-        const std::string actual_mode = mode == nullptr
-            ? std::string {}
-            : lowercase(reinterpret_cast<const char*>(mode));
-        if (actual_mode != "delete") {
-            fail(
-                "checkpointed snapshot did not enter immutable journal mode: "
-                + actual_mode
-            );
-        }
-    }
-    const auto report = inspect_database(domain, database_path);
-    if (!report.ok) {
-        std::string message = "snapshot integrity validation failed";
-        for (const auto& problem : report.problems) {
-            message += "\n- " + problem;
-        }
-        fail(std::move(message));
-    }
+    seal_and_validate_database(domain, database_path);
+    remove_staging_sqlite_sidecars(database_path, database_path.parent_path());
 }
 
 std::string store::export_jsonl(
     const graph_domain domain, const fs::path& database_path,
     const fs::path& destination
 ) const {
-    database db(database_path, SQLITE_OPEN_READONLY);
+    database db(
+        database_path, SQLITE_OPEN_READONLY, database_access::immutable_readonly
+    );
     db.exec("PRAGMA foreign_keys = ON");
     if (!destination.parent_path().empty()) {
         fs::create_directories(destination.parent_path());
@@ -3542,26 +4938,6 @@ namespace {
         return result;
     }
 
-    void remove_staging_sqlite_sidecars(const fs::path& database_path) {
-        if (database_path.parent_path().parent_path().filename() != ".staging"
-            || !database_path.parent_path().filename().string().starts_with(
-                "stage-"
-            )) {
-            fail("refusing to clean SQLite sidecars outside Penelope staging");
-        }
-        for (const auto suffix : { "-wal", "-shm", "-journal" }) {
-            fs::path sidecar = database_path;
-            sidecar += suffix;
-            std::error_code error;
-            if (fs::exists(sidecar, error) && !fs::remove(sidecar, error)) {
-                fail(
-                    "cannot remove checkpointed staging sidecar: "
-                    + sidecar.string() + ": " + error.message()
-                );
-            }
-        }
-    }
-
     std::string utc_now() {
         const std::time_t now = std::time(nullptr);
         std::tm broken_down {};
@@ -3614,6 +4990,193 @@ namespace {
     }
 
 } // namespace
+
+normalized_product_import_result store::import_normalized_product(
+    const normalized_product_import_request& request
+) {
+    if (request.manifest_path.empty()) {
+        fail("normalized product import requires a manifest path");
+    }
+    if (request.database_path.empty()) {
+        fail("normalized product import requires a database path");
+    }
+
+    const fs::path manifest_path
+        = fs::absolute(request.manifest_path).lexically_normal();
+    const fs::path requested_destination
+        = fs::absolute(request.database_path).lexically_normal();
+    if (manifest_path == requested_destination) {
+        fail("normalized product manifest and database paths must differ");
+    }
+    if (requested_destination == requested_destination.root_path()
+        || requested_destination.filename().empty()) {
+        fail("normalized product database path must name a file");
+    }
+    for (const auto& component : requested_destination) {
+        if (component == "inbox") {
+            fail("normalized product database must not be inside inbox");
+        }
+    }
+    std::error_code path_error;
+    const fs::path resolved_parent
+        = fs::weakly_canonical(requested_destination.parent_path(), path_error);
+    if (path_error) {
+        fail(
+            "cannot resolve normalized product database parent: "
+            + path_error.message()
+        );
+    }
+    for (const auto& component : resolved_parent) {
+        if (component == "inbox") {
+            fail("normalized product database must not resolve inside inbox");
+        }
+    }
+    const fs::path destination
+        = resolved_parent / requested_destination.filename();
+
+    const json manifest = read_normalized_manifest(manifest_path);
+    // Complete preflight happens before any staging or destination mutation.
+    validate_batch_transfer_surface(manifest, true);
+
+    fs::create_directories(destination.parent_path());
+    path_error.clear();
+    const fs::path anchored_parent
+        = fs::weakly_canonical(destination.parent_path(), path_error);
+    if (path_error || anchored_parent != resolved_parent) {
+        fail(
+            "normalized product database parent changed during manifest "
+            "preflight"
+        );
+    }
+    const fs::path lock_path = destination.parent_path()
+        / ("." + destination.filename().string() + ".import-lock");
+    path_error.clear();
+    if (!fs::create_directory(lock_path, path_error)) {
+        if (path_error) {
+            fail(
+                "cannot acquire normalized product import lock: "
+                + path_error.message()
+            );
+        }
+        fail(
+            "another normalized product import holds the destination lock: "
+            + lock_path.string()
+        );
+    }
+    normalized_import_lock_guard writer_lock {
+        .path = lock_path,
+        .expected_parent = destination.parent_path(),
+        .expected_name = lock_path.filename().string()
+    };
+    const auto validate_destination = [&]() {
+        std::error_code error;
+        const fs::file_status destination_status
+            = fs::symlink_status(destination, error);
+        if (error && error != std::errc::no_such_file_or_directory) {
+            fail(
+                "cannot inspect normalized product database destination: "
+                + error.message()
+            );
+        }
+        if (!error && fs::exists(destination_status)
+            && !fs::is_regular_file(destination_status)) {
+            fail(
+                "normalized product database destination is not a "
+                "non-symlink regular file"
+            );
+        }
+        for (const std::string_view suffix : { "-wal", "-shm", "-journal" }) {
+            fs::path sidecar = destination;
+            sidecar += suffix;
+            error.clear();
+            const fs::file_status sidecar_status
+                = fs::symlink_status(sidecar, error);
+            if (error && error != std::errc::no_such_file_or_directory) {
+                fail(
+                    "cannot inspect normalized product database sidecar: "
+                    + error.message()
+                );
+            }
+            if (!error && fs::exists(sidecar_status)) {
+                fail(
+                    "refusing to replace a canonical database with a live "
+                    "SQLite sidecar: "
+                    + sidecar.string()
+                );
+            }
+        }
+    };
+    validate_destination();
+
+    normalized_import_staging_guard staging {
+        .path = make_normalized_import_staging_directory(destination),
+        .expected_parent = destination.parent_path(),
+        .expected_prefix
+        = "." + destination.filename().string() + ".import-staging"
+    };
+    const fs::path staging_database = staging.path / "graph.sqlite";
+    {
+        database db(
+            staging_database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+        );
+        configure_connection(db);
+        create_schema(db, graph_domain::product);
+        transaction import(db);
+        import_batch(db.get(), manifest, {}, true);
+        normalize_obvious_product_values(db);
+        import.commit();
+    }
+    seal_and_validate_database(graph_domain::product, staging_database);
+
+    normalized_product_import_result result;
+    result.database_path = destination;
+    {
+        database db(
+            staging_database, SQLITE_OPEN_READONLY,
+            database_access::immutable_readonly
+        );
+        const auto count = [&](std::string_view sql) {
+            statement query(db.get(), sql);
+            if (!query.row()) {
+                fail("normalized import count query returned no row");
+            }
+            const sqlite3_int64 value = sqlite3_column_int64(query.get(), 0);
+            if (value < 0) {
+                fail("normalized import count query returned a negative value");
+            }
+            return static_cast<std::size_t>(value);
+        };
+        result.entity_count = count("SELECT count(*) FROM entities");
+        result.work_count = count("SELECT count(*) FROM works");
+        result.assertion_count = count(
+            "SELECT (SELECT count(*) FROM work_concepts)"
+            "+(SELECT count(*) FROM concept_relations)"
+            "+(SELECT count(*) FROM parent_guide_assertions)"
+        );
+    }
+
+    remove_staging_sqlite_sidecars(staging_database, staging.path);
+
+    for (const std::string_view suffix : { "-wal", "-shm", "-journal" }) {
+        fs::path sidecar = staging_database;
+        sidecar += suffix;
+        if (fs::exists(sidecar)) {
+            fail(
+                "checkpointed normalized product database retained a SQLite "
+                "sidecar: "
+                + sidecar.string()
+            );
+        }
+    }
+    validate_destination();
+    if (std::rename(staging_database.c_str(), destination.c_str()) != 0) {
+        fail(
+            "cannot atomically activate normalized product database: "
+            + destination.string()
+        );
+    }
+    return result;
+}
 
 snapshot_result
 store::build_product_snapshot(const product_snapshot_request& request) {
@@ -3742,7 +5305,7 @@ store::build_product_snapshot(const product_snapshot_request& request) {
     const std::string export_hash
         = export_jsonl(graph_domain::product, database_path, export_path);
     const std::string database_hash = crypto::sha256_file(database_path);
-    remove_staging_sqlite_sidecars(database_path);
+    remove_staging_sqlite_sidecars(database_path, staging.path);
     const std::string snapshot_id = "product_" + export_hash.substr(0, 32);
     json run_cocoons = json::array();
     for (const auto& descriptor : apply) {
@@ -3870,7 +5433,7 @@ store::replace_candidate_snapshot(const candidate_snapshot_request& request) {
     const std::string export_hash
         = export_jsonl(graph_domain::candidate, database_path, export_path);
     const std::string database_hash = crypto::sha256_file(database_path);
-    remove_staging_sqlite_sidecars(database_path);
+    remove_staging_sqlite_sidecars(database_path, staging.path);
     const std::string snapshot_id = "candidate_" + export_hash.substr(0, 32);
     const json validation_artifact = write_validation_report(
         staging.path, graph_domain::candidate, snapshot_id

@@ -1,0 +1,78 @@
+{
+  "artifact_type": "research_candidate_graph_materialization_v1",
+  "format_version": 1,
+  "plan_id": "candidate-plan-20260718-01",
+  "source_snapshot": {
+    "snapshot_id": "wikidata-20260718",
+    "storage_ref": "artifacts/sources/wikidata-20260718.jsonl.zst",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "algorithm": {
+    "name": "ariadne-candidates",
+    "version": "1.0.0",
+    "configuration_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "groups": [
+    {
+      "group_id": "group-1",
+      "label": "Early experimental film",
+      "order": 0,
+      "candidate_count": 1,
+      "rationale": "Balanced temporal and medium bucket",
+      "attributes": {
+        "profile": "early-experimental-film"
+      }
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "candidate-Q123",
+      "external_id": "Q123",
+      "label": "Example Creator",
+      "kind": "candidate",
+      "rank": 1,
+      "coverage": 42.5,
+      "group_id": "group-1",
+      "selection_reasons": [
+        "High uncovered-work coverage",
+        "Retained by deterministic greedy pruning"
+      ],
+      "source_snapshot_id": "wikidata-20260718",
+      "attributes": {
+        "grey": false,
+        "rank_explanation": "Highest deterministic score in its group"
+      }
+    }
+  ],
+  "works": [
+    {
+      "work_id": "candidate-work-Q456",
+      "candidate_id": "candidate-Q123",
+      "external_id": "Q456",
+      "label": "Example Work",
+      "year": 1968,
+      "source_snapshot_id": "wikidata-20260718",
+      "attributes": {
+        "profile": "uncovered-work"
+      }
+    }
+  ],
+  "relations": [
+    {
+      "relation_id": "candidate-Q123-created-Q456",
+      "source_id": "candidate-Q123",
+      "target_id": "candidate-work-Q456",
+      "relation_type": "external_creator_work",
+      "weight": 1.0,
+      "provenance": {
+        "origin": "algorithmic_external",
+        "source_snapshot_id": "wikidata-20260718",
+        "algorithm_version": "1.0.0",
+        "explanation": "Relation was present in the declared source snapshot."
+      },
+      "attributes": {
+        "profile_explanation": "Creator-to-work source relation"
+      }
+    }
+  ]
+}

@@ -4,6 +4,7 @@
 #include "ariadne/candidates.hpp"
 #include "ariadne/viewer.hpp"
 #include "penelope/store.hpp"
+#include "pheidippides/hardened_transport.hpp"
 #include "pheidippides/transport.hpp"
 
 #include <nlohmann/json.hpp>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -27,6 +29,7 @@
 #include <optional>
 #include <ranges>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -90,8 +93,7 @@ resolved_path(const fs::path& path, const fs::path& relative_root) {
         return std::nullopt;
     }
     return resolved_path(
-        fs::path(home) / "Projects/new/art-lineages/inbox",
-        repository_root()
+        fs::path(home) / "Projects/new/art-lineages/inbox", repository_root()
     );
 }
 
@@ -449,13 +451,31 @@ required_object(const json& parent, const std::string_view key) {
     return result;
 }
 
+[[nodiscard]] std::string policy_configuration_hash(
+    const configuration& config, const std::string_view section
+) {
+    const auto value = config.document.find(section);
+    if (value == config.document.end()) {
+        throw cli_error(
+            "configuration section is missing: " + std::string(section)
+        );
+    }
+    const ordered_json stable {
+        { "format_version", config.document.at("format_version") },
+        { "project_timezone", config.document.at("project_timezone") },
+        { std::string(section), *value },
+    };
+    return arachne::crypto::sha256(
+        arachnespace::contracts::canonical_json(stable)
+    );
+}
+
 [[nodiscard]] fs::path command_path(const std::string& value) {
     return resolved_path(fs::path(value), repository_root());
 }
 
-[[nodiscard]] bool path_is_in_protected_legacy(
-    const fs::path& path, const configuration& config
-) {
+[[nodiscard]] bool
+path_is_in_protected_legacy(const fs::path& path, const configuration& config) {
     return std::ranges::any_of(
         config.protected_legacy_inboxes, [&](const fs::path& legacy) {
             return arachne::coordination::path_is_within(path, legacy);
@@ -515,6 +535,26 @@ void atomic_write(
     }
 }
 
+void write_immutable_exact(
+    const fs::path& destination, const std::string_view bytes,
+    const std::string_view description
+) {
+    if (fs::exists(destination)) {
+        if (read_bytes(
+                destination, maximum_control_bytes,
+                std::string("existing ") + std::string(description)
+            )
+            != bytes) {
+            throw cli_error(
+                std::string(description)
+                + " identity is already bound to different content"
+            );
+        }
+        return;
+    }
+    atomic_write(destination, bytes, false);
+}
+
 [[nodiscard]] ordered_json
 envelope_json(const arachne::coordination::envelope_record& envelope) {
     ordered_json result {
@@ -552,6 +592,104 @@ snapshot_json(const arachne::penelope::snapshot_result& snapshot) {
         { "activated", snapshot.activated },
         { "changed", snapshot.changed },
     };
+}
+
+struct written_run_manifest final {
+    ordered_json document;
+    fs::path path;
+    std::string storage_ref;
+};
+
+[[nodiscard]] written_run_manifest write_graph_run_manifest(
+    const configuration& config, const std::string_view domain_directory,
+    const std::string_view graph_domain, const std::string_view run_id,
+    ordered_json configuration_hashes, ordered_json inputs,
+    const arachne::penelope::snapshot_result& snapshot
+) {
+    const json metadata = read_json(
+        snapshot.metadata_path, maximum_control_bytes, "snapshot metadata"
+    );
+    ordered_json outputs = ordered_json::array();
+    outputs.push_back(
+        { { "kind", "graph-database" },
+          { "artifact", metadata.at("database") } }
+    );
+    for (const auto& exported : metadata.at("exports")) {
+        outputs.push_back(
+            { { "kind", exported.at("kind") },
+              { "artifact", exported.at("artifact") } }
+        );
+    }
+    outputs.push_back(
+        { { "kind", "structural-validation-report" },
+          { "artifact", metadata.at("structural_validation").at("report") } }
+    );
+    const fs::path metadata_ref
+        = snapshot.metadata_path.lexically_relative(config.graph_store);
+    if (metadata_ref.empty()
+        || !arachne::crypto::is_safe_relative_artifact_ref(
+            metadata_ref.generic_string()
+        )) {
+        throw cli_error("snapshot metadata has no safe graph-store reference");
+    }
+    outputs.push_back(
+        { { "kind", "snapshot-control" },
+          { "artifact",
+            { { "storage_ref", metadata_ref.generic_string() },
+              { "sha256",
+                arachne::crypto::sha256_file(snapshot.metadata_path) },
+              { "byte_length", fs::file_size(snapshot.metadata_path) },
+              { "media_type", "application/json" } } } }
+    );
+
+    ordered_json manifest {
+        { "manifest_type", "arachne_run_manifest_v1" },
+        { "format_version", 1 },
+        { "run_id", std::string(run_id) },
+        { "graph_domain", std::string(graph_domain) },
+        { "generated_at", metadata.at("activated_at") },
+        { "actor_versions",
+          { { "arachne", "2.0.0" },
+            { "pheidippides", "pheidippides-transport-2.0.0" },
+            { "ariadne", "ariadne-engine-2.0.0" },
+            { "penelope", "penelope-store-2.0.0" } } },
+        { "contract_versions",
+          { { "controls",
+              { "mining_batch_v1", "batch_envelope_v1", "fetch_plan_v1",
+                "fetch_request_v1", "acquired_artifact_v1",
+                "research_candidate_graph_plan_v1", "product_graph_snapshot_v1",
+                "research_candidate_graph_snapshot_v1", "viewer_projection_v1",
+                "site_bundle_v1" } },
+            { "artifacts",
+              { "external_candidate_source_graph_v1",
+                "research_candidate_graph_materialization_v1",
+                "viewer_projection_data_v1" } } } },
+        { "configuration_hashes", std::move(configuration_hashes) },
+        { "inputs", std::move(inputs) },
+        { "outputs", std::move(outputs) },
+        { "structural_validation", metadata.at("structural_validation") },
+    };
+    const fs::path path = config.graph_store / domain_directory / "runs"
+        / (std::string(run_id) + ".json");
+    const fs::path relative = path.lexically_relative(config.graph_store);
+    if (!arachne::crypto::is_safe_relative_artifact_ref(
+            relative.generic_string()
+        )) {
+        throw cli_error("run manifest has no safe graph-store reference");
+    }
+    const std::string bytes
+        = arachnespace::contracts::canonical_json(manifest) + "\n";
+    if (fs::exists(path)) {
+        if (read_bytes(path, maximum_control_bytes, "existing run manifest")
+            != bytes) {
+            throw cli_error(
+                "run manifest identity is already bound to different content"
+            );
+        }
+    } else {
+        atomic_write(path, bytes, false);
+    }
+    return { std::move(manifest), path, relative.generic_string() };
 }
 
 [[nodiscard]] ordered_json issue_json(std::string path, std::string message) {
@@ -701,8 +839,7 @@ void verify_external_source_snapshot(
     const configuration& config, const json& external_graph
 ) {
     const auto& source = external_graph.at("source_snapshot");
-    const std::string storage_ref
-        = source.at("storage_ref").get<std::string>();
+    const std::string storage_ref = source.at("storage_ref").get<std::string>();
     if (!arachne::crypto::is_safe_relative_artifact_ref(storage_ref)) {
         throw cli_error("external source snapshot storage_ref is unsafe");
     }
@@ -734,7 +871,8 @@ void verify_product_coverage(
     std::set<std::string, std::less<>> covered_external_ids;
     for (const auto& identifier :
          product_tables.value("external_ids", json::array())) {
-        if (identifier.is_object() && identifier.value("scheme", "") == "wikidata"
+        if (identifier.is_object()
+            && identifier.value("scheme", "") == "wikidata"
             && product_works.contains(identifier.value("entity_id", ""))
             && identifier.contains("value")
             && identifier.at("value").is_string()) {
@@ -750,7 +888,8 @@ void verify_product_coverage(
             || work.at("covered").get<bool>() != expected) {
             throw cli_error(
                 "external graph coverage disagrees with the verified product "
-                "snapshot for work " + id
+                "snapshot for work "
+                + id
             );
         }
     }
@@ -1025,21 +1164,14 @@ int command_intake(const options& arguments) {
     if (fs::is_symlink(state) || !fs::is_regular_file(state)) {
         throw cli_error("intake payload must be a non-symlink regular file");
     }
-    const auto envelope = ledger.intake(
+    static_cast<void>(ledger.intake(
         { .source_path = payload,
           .inbox_root = config.queue,
           .submission_ref = arguments.require("--submission-ref"),
           .title = arguments.require("--title"),
           .supersedes = arguments.optional("--supersedes"),
           .max_payload_bytes = config.submission_max_bytes }
-    );
-    if (envelope.status == cocoon_status::waiting_approval) {
-        static_cast<void>(ledger.transition(
-            envelope.envelope_id, cocoon_status::accepted,
-            "arachne:trusted-intake",
-            "trusted participant batch received into the accumulated queue"
-        ));
-    }
+    ));
     emit(ordered_json { { "status", "ok" } });
     return 0;
 }
@@ -1164,6 +1296,30 @@ int command_inbox_verify(const options& arguments) {
     return 0;
 }
 
+int command_product_import_normalized(const options& arguments) {
+    const fs::path manifest = resolved_path(
+        fs::path(arguments.require("--manifest")), repository_root()
+    );
+    const fs::path database = resolved_path(
+        fs::path(arguments.require("--database")), repository_root()
+    );
+    const auto result
+        = arachne::penelope::store::import_normalized_product(
+            { .manifest_path = manifest, .database_path = database }
+        );
+    emit(
+        ordered_json {
+            { "status", "ok" },
+            { "command", "product-import-normalized" },
+            { "database_path", result.database_path.generic_string() },
+            { "entity_count", result.entity_count },
+            { "work_count", result.work_count },
+            { "assertion_count", result.assertion_count },
+        }
+    );
+    return 0;
+}
+
 [[nodiscard]] std::vector<arachne::coordination::envelope_record>
 product_pending(arachne::coordination::operational_ledger& ledger) {
     std::vector<arachne::coordination::envelope_record> result
@@ -1213,6 +1369,34 @@ void fail_processing_envelopes(
     }
 }
 
+struct queue_cleanup_result final {
+    std::size_t removed = 0;
+    ordered_json issues = ordered_json::array();
+};
+
+[[nodiscard]] queue_cleanup_result cleanup_integrated_queue(
+    arachne::coordination::operational_ledger& ledger,
+    const configuration& config
+) {
+    queue_cleanup_result result;
+    for (const auto& envelope : ledger.list(cocoon_status::integrated)) {
+        try {
+            if (ledger.retire_queued_payload(
+                    envelope.envelope_id, config.queue, config.legacy_inbox
+                )) {
+                ++result.removed;
+            }
+        } catch (const std::exception& error) {
+            result.issues.push_back(
+                { { "envelope_id", envelope.envelope_id },
+                  { "path", envelope.payload_ref.generic_string() },
+                  { "message", error.what() } }
+            );
+        }
+    }
+    return result;
+}
+
 int command_product_integrate(const options& arguments) {
     const configuration config
         = load_configuration(arguments.require("--config"));
@@ -1229,8 +1413,23 @@ int command_product_integrate(const options& arguments) {
         = required_object(config.document, "product_integration");
     const std::size_t threshold
         = size_value(product_config, "queued_batch_threshold", 15U);
+    queue_cleanup_result cleanup = cleanup_integrated_queue(ledger, config);
     const auto accumulation = ledger.accumulation();
-    if (!force && accumulation.accepted_count < threshold) {
+    std::vector<arachne::coordination::envelope_record> bound_inputs;
+    bool known_run = false;
+    try {
+        bound_inputs = ledger.product_run_inputs(run_id);
+        known_run = true;
+    } catch (const std::out_of_range&) {
+        // A new run has no ledger row until the queue threshold is satisfied.
+    }
+    const auto retryable = product_pending(ledger);
+    const bool has_failed_input
+        = std::ranges::any_of(retryable, [](const auto& envelope) {
+              return envelope.status == cocoon_status::failed;
+          });
+    if (!force && !known_run && !has_failed_input
+        && accumulation.accepted_count < threshold) {
         emit(
             ordered_json {
                 { "status", "ok" },
@@ -1238,16 +1437,26 @@ int command_product_integrate(const options& arguments) {
                 { "reason", "queued_batch_threshold_not_met" },
                 { "queued", accumulation.accepted_count },
                 { "threshold", threshold },
+                { "queue_files_removed", cleanup.removed },
+                { "cleanup_issues", cleanup.issues },
                 { "aggregate",
                   { { "successful", 0 },
                     { "partial", 0 },
-                    { "problematic", 0 } } },
+                    { "problematic", cleanup.issues.size() } } },
             }
         );
         return 0;
     }
-    auto envelopes = product_pending(ledger);
-    if (envelopes.empty()) {
+
+    arachne::coordination::domain_lock lock(
+        config.lock_root, "product_graph", run_id, config.product_lock_stale
+    );
+    const std::string configuration_hash
+        = policy_configuration_hash(config, "product_integration");
+    if (bound_inputs.empty()) {
+        bound_inputs = product_pending(ledger);
+    }
+    if (bound_inputs.empty() && !known_run) {
         emit(
             ordered_json {
                 { "status", "ok" },
@@ -1255,41 +1464,79 @@ int command_product_integrate(const options& arguments) {
                 { "reason", "queue_empty" },
                 { "queued", 0 },
                 { "threshold", threshold },
+                { "queue_files_removed", cleanup.removed },
+                { "cleanup_issues", cleanup.issues },
                 { "aggregate",
                   { { "successful", 0 },
                     { "partial", 0 },
-                    { "problematic", 0 } } },
+                    { "problematic", cleanup.issues.size() } } },
             }
         );
         return 0;
     }
-    for (const auto& envelope : envelopes) {
-        if (!arachne::coordination::path_is_within(
-                envelope.payload_ref, config.queue
-            )
-            || !fs::is_regular_file(envelope.payload_ref)) {
-            throw cli_error(
-                "eligible cocoon payload is not an immutable inbox file: "
-                + envelope.envelope_id
-            );
-        }
-    }
-
-    arachne::coordination::domain_lock lock(
-        config.lock_root, "product_graph", run_id, config.product_lock_stale
-    );
-    const std::string configuration_hash = arachne::crypto::sha256(
-        arachnespace::contracts::canonical_json(config.document)
-    );
     if (!ledger.claim_logical_run(
-            run_id, "product_graph", logical_date, configuration_hash, true
+            run_id, "product_graph", logical_date, configuration_hash, true,
+            true
         )) {
-        throw cli_error(
-            "the product logical date or run ID was already claimed", 3
+        emit(
+            ordered_json {
+                { "status", "ok" },
+                { "processed", false },
+                { "reason", "run_already_succeeded" },
+                { "run_id", run_id },
+                { "queue_files_removed", cleanup.removed },
+                { "cleanup_issues", cleanup.issues },
+                { "aggregate",
+                  { { "successful", 0 },
+                    { "partial", 0 },
+                    { "problematic", cleanup.issues.size() } } },
+            }
         );
+        return 0;
+    }
+    if (bound_inputs.empty()) {
+        ledger.finish_run(run_id, "failed");
+        throw cli_error(
+            "resumed product run has no bound or retryable queue inputs", 3
+        );
+    }
+    std::vector<std::string> selected_ids;
+    selected_ids.reserve(bound_inputs.size());
+    for (const auto& envelope : bound_inputs) {
+        selected_ids.push_back(envelope.envelope_id);
+    }
+    std::vector<arachne::coordination::envelope_record> envelopes;
+    try {
+        ledger.bind_product_run_inputs(run_id, selected_ids);
+        envelopes = ledger.product_run_inputs(run_id);
+        for (const auto& envelope : envelopes) {
+            if (!arachne::coordination::path_is_within(
+                    envelope.payload_ref, config.queue
+                )
+                || (envelope.status != cocoon_status::integrated
+                    && !fs::is_regular_file(envelope.payload_ref))) {
+                throw cli_error(
+                    "eligible cocoon payload is not an immutable "
+                    "internal-queue "
+                    "file: "
+                    + envelope.envelope_id
+                );
+            }
+        }
+    } catch (...) {
+        const std::exception_ptr failure = std::current_exception();
+        try {
+            ledger.finish_run(run_id, "failed");
+        } catch (const std::exception& error) {
+            std::cerr << "warning: cannot finish invalid product run " << run_id
+                      << ": " << error.what() << '\n';
+        }
+        std::rethrow_exception(failure);
     }
 
     std::vector<std::string> transitioned;
+    std::optional<written_run_manifest> run_manifest;
+    bool reconciled = false;
     try {
         std::vector<arachne::penelope::accepted_batch_descriptor> batches;
         batches.reserve(envelopes.size());
@@ -1308,6 +1555,8 @@ int command_product_integrate(const options& arguments) {
                     "arachne:product-integrate",
                     "Penelope product snapshot build started"
                 );
+            }
+            if (envelope.status == cocoon_status::processing) {
                 transitioned.push_back(envelope.envelope_id);
             }
             batches.push_back(
@@ -1321,39 +1570,26 @@ int command_product_integrate(const options& arguments) {
             .run_id = run_id, .batches = std::move(batches)
         };
         const auto snapshot = persistence.build_product_snapshot(request);
-        for (const std::string& envelope_id : transitioned) {
-            static_cast<void>(ledger.transition(
-                envelope_id, cocoon_status::integrated,
-                "arachne:product-integrate",
-                "Penelope atomically activated the product snapshot"
-            ));
-        }
-        ledger.finish_run(
-            run_id, "succeeded", snapshot.metadata_path.generic_string()
-        );
-        ordered_json cleanup_issues = ordered_json::array();
-        std::size_t removed = 0;
-        for (const std::string& envelope_id : transitioned) {
-            const auto envelope = std::ranges::find(
-                envelopes, envelope_id,
-                &arachne::coordination::envelope_record::envelope_id
+        ordered_json manifest_inputs = ordered_json::array();
+        for (const auto& envelope : envelopes) {
+            manifest_inputs.push_back(
+                { { "kind", "mining-cocoon" },
+                  { "identity", envelope.envelope_id },
+                  { "sha256", envelope.payload_sha256 },
+                  { "byte_length", envelope.byte_length } }
             );
-            if (envelope == envelopes.end()) {
-                continue;
-            }
-            try {
-                if (ledger.retire_queued_payload(
-                        envelope_id, config.queue, config.legacy_inbox
-                    )) {
-                    ++removed;
-                }
-            } catch (const std::exception& error) {
-                cleanup_issues.push_back(
-                    { { "envelope_id", envelope_id },
-                      { "path", envelope->payload_ref.generic_string() },
-                      { "message", error.what() } }
-                );
-            }
+        }
+        run_manifest = write_graph_run_manifest(
+            config, "product", "product_graph", run_id,
+            { { "operations", configuration_hash } },
+            std::move(manifest_inputs), snapshot
+        );
+        ledger.finish_integrated_product_run(run_id, run_manifest->storage_ref);
+        reconciled = true;
+        queue_cleanup_result after = cleanup_integrated_queue(ledger, config);
+        cleanup.removed += after.removed;
+        for (auto& issue : after.issues) {
+            cleanup.issues.push_back(std::move(issue));
         }
         ordered_json ids = ordered_json::array();
         for (const auto& envelope : envelopes) {
@@ -1369,20 +1605,29 @@ int command_product_integrate(const options& arguments) {
                 { "forced", force },
                 { "cocoon_ids", std::move(ids) },
                 { "snapshot", snapshot_json(snapshot) },
-                { "queue_files_removed", removed },
-                { "cleanup_issues", cleanup_issues },
+                { "run_manifest_path", run_manifest->path.generic_string() },
+                { "run_manifest", run_manifest->document },
+                { "queue_files_removed", cleanup.removed },
+                { "cleanup_issues", cleanup.issues },
                 { "aggregate",
-                  { { "successful", transitioned.size() },
+                  { { "successful", envelopes.size() },
                     { "partial", 0 },
-                    { "problematic", cleanup_issues.size() } } },
+                    { "problematic", cleanup.issues.size() } } },
             }
         );
         return 0;
     } catch (...) {
         const std::exception_ptr failure = std::current_exception();
+        if (reconciled) {
+            std::rethrow_exception(failure);
+        }
         fail_processing_envelopes(ledger, transitioned);
         try {
-            ledger.finish_run(run_id, "failed");
+            ledger.finish_run(
+                run_id, "failed",
+                run_manifest ? std::string_view(run_manifest->storage_ref)
+                             : std::string_view {}
+            );
         } catch (const std::exception& error) {
             std::cerr << "warning: cannot finish failed run " << run_id << ": "
                       << error.what() << '\n';
@@ -1412,26 +1657,135 @@ int command_candidate_rebuild(const options& arguments) {
         config, control_path,
         control.at("plan_artifact").at("storage_ref").get<std::string>()
     );
+    verify_external_source_snapshot(
+        config, json { { "source_snapshot", control.at("source_snapshot") } }
+    );
+    const std::string product_snapshot_id
+        = control.at("product_snapshot").at("snapshot_id").get<std::string>();
+    const fs::path product_control_path = config.graph_store / "product"
+        / "snapshots" / product_snapshot_id / "metadata.json";
+    const resolved_snapshot_export product_snapshot = resolve_snapshot_export(
+        config, product_control_path,
+        arachnespace::contracts::contract_name::product_graph_snapshot,
+        "product-jsonl"
+    );
+    if (product_snapshot.control.at("snapshot_id") != product_snapshot_id
+        || product_snapshot.control.at("content_sha256")
+            != control.at("product_snapshot").at("sha256")) {
+        throw cli_error(
+            "candidate plan product input does not match the verified product "
+            "snapshot"
+        );
+    }
     const std::string& run_id = arguments.require("--run-id");
+    const std::string created_at = control.at("created_at").get<std::string>();
+    if (created_at.size() < 10U
+        || !valid_logical_date(std::string_view(created_at).substr(0, 10U))) {
+        throw cli_error("candidate plan created_at has no valid logical date");
+    }
+    const std::string logical_date = created_at.substr(0, 10U);
     arachne::coordination::domain_lock lock(
         config.lock_root, "research_candidate_graph", run_id,
         config.candidate_lock_stale
     );
-    arachne::penelope::store persistence(config.graph_store);
-    const auto snapshot = persistence.replace_candidate_snapshot(
-        { .run_id = run_id,
-          .plan = { .control_contract_path = control_path,
-                    .resolved_plan_payload_path = payload } }
+    arachne::coordination::operational_ledger ledger(
+        config.ledger, config.legacy_inbox
     );
-    emit(
-        ordered_json {
-            { "command", "candidate-rebuild" },
-            { "run_id", run_id },
-            { "plan_id", control.at("plan_id") },
-            { "snapshot", snapshot_json(snapshot) },
+    const std::string operations_hash
+        = policy_configuration_hash(config, "candidate_rebuild");
+    const std::string plan_control_hash
+        = arachne::crypto::sha256_file(control_path);
+    const std::string run_claim_hash = arachne::crypto::sha256(
+        arachnespace::contracts::canonical_json(
+            ordered_json { { "operations", operations_hash },
+                           { "plan_control", plan_control_hash } }
+        )
+    );
+    if (!ledger.claim_logical_run(
+            run_id, "research_candidate_graph", logical_date, run_claim_hash,
+            true, true
+        )) {
+        emit(
+            ordered_json {
+                { "command", "candidate-rebuild" },
+                { "run_id", run_id },
+                { "processed", false },
+                { "reason", "run_already_succeeded" },
+            }
+        );
+        return 0;
+    }
+    std::optional<written_run_manifest> run_manifest;
+    bool completed = false;
+    try {
+        arachne::penelope::store persistence(config.graph_store);
+        const auto snapshot = persistence.replace_candidate_snapshot(
+            { .run_id = run_id,
+              .plan = { .control_contract_path = control_path,
+                        .resolved_plan_payload_path = payload } }
+        );
+        ordered_json inputs = ordered_json::array();
+        inputs.push_back(
+            { { "kind", "candidate-plan-control" },
+              { "identity", control.at("plan_id") },
+              { "sha256", plan_control_hash },
+              { "byte_length", fs::file_size(control_path) } }
+        );
+        inputs.push_back(
+            { { "kind", "candidate-plan-artifact" },
+              { "identity", control.at("plan_id") },
+              { "storage_ref", control.at("plan_artifact").at("storage_ref") },
+              { "sha256", control.at("plan_artifact").at("sha256") },
+              { "byte_length", control.at("plan_artifact").at("byte_length") } }
+        );
+        inputs.push_back(
+            { { "kind", "external-source-snapshot" },
+              { "identity", control.at("source_snapshot").at("snapshot_id") },
+              { "storage_ref",
+                control.at("source_snapshot").at("storage_ref") },
+              { "sha256", control.at("source_snapshot").at("sha256") } }
+        );
+        inputs.push_back(
+            { { "kind", "product-snapshot" },
+              { "identity", product_snapshot_id },
+              { "sha256", control.at("product_snapshot").at("sha256") } }
+        );
+        run_manifest = write_graph_run_manifest(
+            config, "candidate", "research_candidate_graph", run_id,
+            { { "operations", operations_hash },
+              { "algorithm", control.at("configuration").at("sha256") } },
+            std::move(inputs), snapshot
+        );
+        ledger.finish_run(run_id, "succeeded", run_manifest->storage_ref);
+        completed = true;
+        emit(
+            ordered_json {
+                { "command", "candidate-rebuild" },
+                { "run_id", run_id },
+                { "plan_id", control.at("plan_id") },
+                { "snapshot", snapshot_json(snapshot) },
+                { "run_manifest_path", run_manifest->path.generic_string() },
+                { "run_manifest", run_manifest->document },
+            }
+        );
+        return 0;
+    } catch (...) {
+        const std::exception_ptr failure = std::current_exception();
+        if (completed) {
+            std::rethrow_exception(failure);
         }
-    );
-    return 0;
+        try {
+            ledger.finish_run(
+                run_id, "failed",
+                run_manifest ? std::string_view(run_manifest->storage_ref)
+                             : std::string_view {}
+            );
+        } catch (const std::exception& error) {
+            std::cerr << "warning: cannot finish failed candidate run "
+                      << run_id << ": " << error.what() << '\n';
+        }
+        std::rethrow_exception(failure);
+    }
 }
 
 int command_fetch(const options& arguments) {
@@ -1448,7 +1802,9 @@ int command_fetch(const options& arguments) {
     try {
         const json request
             = read_json(request_path, maximum_control_bytes, "fetch request");
-        arachne::pheidippides::transport transport(config.artifact_store);
+        arachne::pheidippides::hardened_transport transport(
+            config.artifact_store, required_object(config.document, "transport")
+        );
         acquired = transport.execute(request);
     } catch (const std::exception& error) {
         const auto now = std::chrono::system_clock::now();
@@ -1471,6 +1827,409 @@ int command_fetch(const options& arguments) {
         std::cerr << "transport failed: " << acquired.error_message << '\n';
         return 3;
     }
+    return 0;
+}
+
+[[nodiscard]] std::string form_encode(const std::string_view value) {
+    constexpr std::string_view hexadecimal = "0123456789ABCDEF";
+    std::string result;
+    result.reserve(value.size());
+    for (const char raw_character : value) {
+        const auto character = static_cast<unsigned char>(raw_character);
+        if (std::isalnum(character) != 0 || character == '-' || character == '_'
+            || character == '.' || character == '~') {
+            result.push_back(static_cast<char>(character));
+        } else {
+            result.push_back('%');
+            result.push_back(hexadecimal.at(character >> 4U));
+            result.push_back(hexadecimal.at(character & 0x0fU));
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] bool wikidata_entity_id(const std::string_view value) {
+    return value.size() >= 2U
+        && (value.front() == 'Q' || value.front() == 'P' || value.front() == 'L'
+            || value.front() == 'M')
+        && std::ranges::all_of(value.substr(1U), [](const char character) {
+               return character >= '0' && character <= '9';
+           });
+}
+
+[[nodiscard]] std::string join_strings(
+    const std::span<const std::string> values, const std::string_view separator
+) {
+    std::string result;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0U) {
+            result += separator;
+        }
+        result += values[index];
+    }
+    return result;
+}
+
+[[nodiscard]] ordered_json wikidata_point_fetch_request(
+    const configuration& config, const json& plan, const json& planned,
+    const std::span<const std::string> entities, const std::string& request_id
+) {
+    static const std::map<std::string, std::string, std::less<>> field_props {
+        { "labels", "labels" },         { "descriptions", "descriptions" },
+        { "aliases", "aliases" },       { "sitelinks", "sitelinks" },
+        { "claims", "claims" },         { "gender", "claims" },
+        { "country", "claims" },        { "field", "claims" },
+        { "occupation", "claims" },     { "movement", "claims" },
+        { "genre", "claims" },          { "language", "claims" },
+        { "activity_dates", "claims" }, { "dates", "claims" },
+    };
+    if (!planned.contains("fields") || !planned.at("fields").is_array()
+        || planned.at("fields").empty()) {
+        throw cli_error(
+            "Wikidata entity fetches require a non-empty fields selector"
+        );
+    }
+    std::set<std::string, std::less<>> props;
+    for (const auto& field : planned.at("fields")) {
+        if (!field.is_string()) {
+            throw cli_error("Wikidata fetch field must be a string");
+        }
+        const auto found
+            = field_props.find(field.get_ref<const std::string&>());
+        if (found == field_props.end()) {
+            throw cli_error(
+                "unsupported Wikidata fetch field: " + field.get<std::string>()
+            );
+        }
+        props.insert(found->second);
+    }
+    // Claim-oriented profile fields still require human-readable context.
+    if (props.contains("claims")) {
+        props.insert("labels");
+        props.insert("descriptions");
+    }
+    const std::vector<std::string> ordered_props(props.begin(), props.end());
+    const std::string body = "action=wbgetentities&format=json&ids="
+        + form_encode(join_strings(entities, "|"))
+        + "&props=" + form_encode(join_strings(ordered_props, "|"))
+        + "&languages=en&languagefallback=1";
+    const fs::path body_path = config.artifact_store / "fetch-bodies"
+        / plan.at("plan_id").get<std::string>() / (request_id + ".form");
+    const fs::path body_relative
+        = body_path.lexically_relative(config.artifact_store);
+    if (!arachne::crypto::is_safe_relative_artifact_ref(
+            body_relative.generic_string()
+        )) {
+        throw cli_error(
+            "generated fetch body has an unsafe artifact reference"
+        );
+    }
+    write_immutable_exact(body_path, body, "fetch request body artifact");
+
+    ordered_json document {
+        { "contract", "fetch_request_v1" },
+        { "format_version", 1 },
+        { "request_id", request_id },
+        { "door_id", "wikidata" },
+        { "endpoint_id", "entity-api" },
+        { "operation", "point_lookup" },
+        { "freshness_policy", "fresh_required" },
+        { "plan_id", plan.at("plan_id") },
+        { "locator", planned.at("locator") },
+        { "method", "POST" },
+        { "headers",
+          { { "Accept", "application/json" },
+            { "Content-Type", "application/x-www-form-urlencoded" },
+            { "User-Agent",
+              "Arachne/2.0 (+https://github.com/ninjaro/arachne)" } } },
+        { "pagination", { { "mode", "none" } } },
+        { "retry",
+          { { "maximum_attempts", 3 },
+            { "initial_delay_ms", 250 },
+            { "maximum_delay_ms", 10000 },
+            { "total_delay_budget_ms", 30000 },
+            { "respect_retry_after", true } } },
+        { "expected",
+          { { "maximum_bytes", 16777216 },
+            { "timeout_ms", 60000 },
+            { "connect_timeout_ms", 10000 },
+            { "read_timeout_ms", 30000 },
+            { "write_timeout_ms", 30000 } } },
+        { "redirect_policy",
+          { { "follow", false },
+            { "maximum_redirects", 0 },
+            { "allow_https_to_http", false },
+            { "allowed_hosts", { "www.wikidata.org" } } } },
+        { "output_ref",
+          "acquired/" + plan.at("plan_id").get<std::string>() + "/" + request_id
+              + ".json" },
+        { "body_artifact",
+          { { "storage_ref", body_relative.generic_string() },
+            { "sha256", arachne::crypto::sha256(body) },
+            { "byte_length", body.size() },
+            { "media_type", "application/x-www-form-urlencoded" } } },
+    };
+    const auto validation = arachnespace::contracts::validate(
+        arachnespace::contracts::contract_name::fetch_request, document
+    );
+    if (!validation) {
+        throw cli_error(
+            validation_details(validation, "translated fetch request")
+        );
+    }
+    return document;
+}
+
+[[nodiscard]] ordered_json wikidata_bulk_fetch_request(
+    const json& plan, const json& planned, std::string request_id,
+    std::string locator
+) {
+    constexpr std::string_view dump_base
+        = "https://dumps.wikimedia.org/wikidatawiki/entities/";
+    if (!locator.starts_with(dump_base)) {
+        throw cli_error(
+            "Wikidata bulk fetch locator must use the official dump endpoint"
+        );
+    }
+    const std::size_t locator_end = locator.find_first_of("?#");
+    if (locator_end != std::string::npos) {
+        throw cli_error(
+            "Wikidata bulk fetch locator cannot contain a query or fragment"
+        );
+    }
+    const std::string_view locator_path(locator);
+    std::string compression_suffix;
+    for (const std::string_view supported : {
+             std::string_view { ".json.bz2" },
+             std::string_view { ".json.gz" },
+             std::string_view { ".json" },
+         }) {
+        if (locator_path.ends_with(supported)) {
+            compression_suffix = supported;
+            break;
+        }
+    }
+    if (compression_suffix.empty()) {
+        throw cli_error(
+            "Wikidata bulk fetch locator has an unsupported dump encoding"
+        );
+    }
+    const std::string output_ref = "bulk/"
+        + plan.at("plan_id").get<std::string>() + "/" + request_id
+        + compression_suffix;
+    ordered_json document {
+        { "contract", "fetch_request_v1" },
+        { "format_version", 1 },
+        { "request_id", request_id },
+        { "door_id", "wikidata" },
+        { "endpoint_id", "official-dumps" },
+        { "operation", "bulk_snapshot" },
+        { "freshness_policy", "fresh_required" },
+        { "plan_id", plan.at("plan_id") },
+        { "locator", std::move(locator) },
+        { "method", "GET" },
+        { "headers",
+          { { "Accept", "application/octet-stream" },
+            { "User-Agent",
+              "Arachne/2.0 (+https://github.com/ninjaro/arachne)" } } },
+        { "pagination", { { "mode", "none" } } },
+        { "retry",
+          { { "maximum_attempts", 5 },
+            { "initial_delay_ms", 1000 },
+            { "maximum_delay_ms", 60000 },
+            { "total_delay_budget_ms", 300000 },
+            { "respect_retry_after", true } } },
+        { "expected",
+          { { "maximum_bytes", 1099511627776ULL },
+            { "timeout_ms", 86400000 },
+            { "connect_timeout_ms", 30000 },
+            { "read_timeout_ms", 900000 },
+            { "write_timeout_ms", 30000 } } },
+        { "redirect_policy",
+          { { "follow", false },
+            { "maximum_redirects", 0 },
+            { "allow_https_to_http", false },
+            { "allowed_hosts", { "dumps.wikimedia.org" } } } },
+        { "output_ref", output_ref },
+    };
+    static_cast<void>(planned);
+    const auto validation = arachnespace::contracts::validate(
+        arachnespace::contracts::contract_name::fetch_request, document
+    );
+    if (!validation) {
+        throw cli_error(
+            validation_details(validation, "translated bulk request")
+        );
+    }
+    return document;
+}
+
+int command_fetch_plan(const options& arguments) {
+    const configuration config
+        = load_configuration(arguments.require("--config"));
+    const fs::path plan_path = command_path(arguments.require("--plan"));
+    const fs::path output_directory
+        = command_path(arguments.require("--output-directory"));
+    if (arachne::coordination::path_is_within(output_directory, config.queue)
+        || path_is_in_protected_legacy(output_directory, config)) {
+        throw cli_error("translated fetch controls must be outside the inbox");
+    }
+    const json plan = read_json(plan_path, maximum_control_bytes, "fetch plan");
+    const auto validation = arachnespace::contracts::validate(
+        arachnespace::contracts::contract_name::fetch_plan, plan
+    );
+    if (!validation) {
+        throw cli_error(validation_details(validation, "fetch plan"));
+    }
+    if (plan.at("source") != "wikidata") {
+        throw cli_error(
+            "no closed fetch-plan adapter is registered for source "
+            + plan.at("source").get<std::string>()
+        );
+    }
+
+    ordered_json generated = ordered_json::array();
+    std::set<std::string, std::less<>> concrete_ids;
+    for (const auto& planned : plan.at("requests")) {
+        const bool has_entities = planned.contains("entities");
+        const bool has_fields = planned.contains("fields");
+        const bool has_pages = planned.contains("pages");
+        const bool has_archives = planned.contains("archives");
+        if (has_pages) {
+            throw cli_error(
+                "Wikidata page selectors are not supported by this adapter"
+            );
+        }
+        if (has_entities || has_fields) {
+            if (!has_entities || !planned.at("entities").is_array()
+                || planned.at("entities").empty() || !has_fields
+                || has_archives) {
+                throw cli_error(
+                    "Wikidata point selectors require non-empty entities and "
+                    "fields only"
+                );
+            }
+            if (planned.at("locator") != "https://www.wikidata.org/w/api.php") {
+                throw cli_error(
+                    "Wikidata entity selector uses an unsupported locator"
+                );
+            }
+            std::vector<std::string> entities;
+            std::set<std::string, std::less<>> unique;
+            for (const auto& entity : planned.at("entities")) {
+                if (!entity.is_string()
+                    || !wikidata_entity_id(
+                        entity.get_ref<const std::string&>()
+                    )) {
+                    throw cli_error(
+                        "Wikidata entity selector contains an invalid ID"
+                    );
+                }
+                if (!unique.emplace(entity.get<std::string>()).second) {
+                    throw cli_error(
+                        "Wikidata entity selector contains a duplicate ID"
+                    );
+                }
+                entities.push_back(entity.get<std::string>());
+            }
+            constexpr std::size_t maximum_entities_per_request = 50U;
+            const std::size_t part_count
+                = (entities.size() - 1U) / maximum_entities_per_request + 1U;
+            for (std::size_t part = 0; part < part_count; ++part) {
+                const std::size_t begin = part * maximum_entities_per_request;
+                const std::size_t count = std::min(
+                    maximum_entities_per_request, entities.size() - begin
+                );
+                std::string request_id
+                    = planned.at("request_id").get<std::string>();
+                if (part_count != 1U) {
+                    request_id += "-part-" + std::to_string(part + 1U);
+                }
+                if (!concrete_ids.emplace(request_id).second) {
+                    throw cli_error(
+                        "fetch plan produces a duplicate request identity"
+                    );
+                }
+                generated.push_back(wikidata_point_fetch_request(
+                    config, plan, planned,
+                    std::span<const std::string>(entities).subspan(
+                        begin, count
+                    ),
+                    request_id
+                ));
+            }
+            continue;
+        }
+        if (has_archives) {
+            if (!planned.at("archives").is_array()
+                || planned.at("archives").empty()) {
+                throw cli_error("Wikidata archives selector must not be empty");
+            }
+            const std::string base = planned.at("locator").get<std::string>();
+            if (!base.ends_with('/')) {
+                throw cli_error(
+                    "Wikidata archive locator must end with a slash"
+                );
+            }
+            std::size_t part = 0;
+            for (const auto& archive : planned.at("archives")) {
+                if (!archive.is_string()
+                    || !arachne::crypto::is_safe_relative_artifact_ref(
+                        archive.get_ref<const std::string&>()
+                    )
+                    || archive.get_ref<const std::string&>().find('/')
+                        != std::string::npos) {
+                    throw cli_error(
+                        "Wikidata archive selector is not a safe filename"
+                    );
+                }
+                std::string request_id
+                    = planned.at("request_id").get<std::string>() + "-archive-"
+                    + std::to_string(++part);
+                if (!concrete_ids.emplace(request_id).second) {
+                    throw cli_error(
+                        "fetch plan produces a duplicate request identity"
+                    );
+                }
+                generated.push_back(wikidata_bulk_fetch_request(
+                    plan, planned, std::move(request_id),
+                    base + archive.get<std::string>()
+                ));
+            }
+            continue;
+        }
+        std::string request_id = planned.at("request_id").get<std::string>();
+        if (!concrete_ids.emplace(request_id).second) {
+            throw cli_error("fetch plan contains a duplicate request identity");
+        }
+        generated.push_back(wikidata_bulk_fetch_request(
+            plan, planned, std::move(request_id),
+            planned.at("locator").get<std::string>()
+        ));
+    }
+
+    ordered_json controls = ordered_json::array();
+    for (const auto& request : generated) {
+        const fs::path path = output_directory
+            / (request.at("request_id").get<std::string>() + ".json");
+        const std::string bytes
+            = arachnespace::contracts::canonical_json(request) + "\n";
+        write_immutable_exact(path, bytes, "translated fetch request");
+        controls.push_back(
+            { { "request_id", request.at("request_id") },
+              { "path", path.generic_string() },
+              { "sha256", arachne::crypto::sha256(bytes) },
+              { "request", request } }
+        );
+    }
+    emit(
+        ordered_json {
+            { "command", "fetch-plan-translate" },
+            { "plan_id", plan.at("plan_id") },
+            { "request_count", controls.size() },
+            { "controls", std::move(controls) },
+        }
+    );
     return 0;
 }
 
@@ -1509,18 +2268,15 @@ int command_candidate_plan(const options& arguments) {
             "external graph must be external_candidate_source_graph_v1"
         );
     }
-    const json product_control = read_json(
-        product_control_path, maximum_control_bytes, "product snapshot control"
-    );
-    const auto validation = arachnespace::contracts::validate(
+    const resolved_snapshot_export product_snapshot = resolve_snapshot_export(
+        config, product_control_path,
         arachnespace::contracts::contract_name::product_graph_snapshot,
-        product_control
+        "product-jsonl"
     );
-    if (!validation) {
-        throw cli_error(
-            validation_details(validation, "product snapshot control")
-        );
-    }
+    const json product_tables
+        = materialize_jsonl_export(product_snapshot.export_path, false);
+    verify_external_source_snapshot(config, external_graph);
+    verify_product_coverage(external_graph, product_tables);
     const auto candidate_config = candidate_configuration_from(config);
     const ordered_json materialization
         = arachne::ariadne::candidate_planner::build(
@@ -1539,8 +2295,8 @@ int command_candidate_plan(const options& arguments) {
     const ordered_json control
         = arachne::ariadne::candidate_planner::write_plan(
             materialization, output_artifact, storage_path.generic_string(),
-            product_control.at("snapshot_id").get<std::string>(),
-            product_control.at("content_sha256").get<std::string>(),
+            product_snapshot.control.at("snapshot_id").get<std::string>(),
+            product_snapshot.control.at("content_sha256").get<std::string>(),
             candidate_config, utc_now()
         );
     atomic_write(
@@ -1554,30 +2310,35 @@ int command_candidate_plan(const options& arguments) {
 int command_viewer_build(const options& arguments) {
     const configuration config
         = load_configuration(arguments.require("--config"));
-    const auto candidate_export = arguments.optional("--candidate-export");
-    const auto candidate_snapshot
-        = arguments.optional("--candidate-snapshot-id");
-    if (candidate_export.has_value() != candidate_snapshot.has_value()) {
-        throw cli_error(
-            "--candidate-export and --candidate-snapshot-id must be supplied "
-            "together"
-        );
-    }
+    const auto candidate_control = arguments.optional("--candidate-snapshot");
     if (!fs::is_directory(config.viewer_templates)) {
         throw cli_error("configured viewer template directory does not exist");
     }
-    const fs::path product_path
-        = command_path(arguments.require("--product-export"));
-    const json product = materialize_jsonl_export(product_path, false);
+    const resolved_snapshot_export product_snapshot = resolve_snapshot_export(
+        config, command_path(arguments.require("--product-snapshot")),
+        arachnespace::contracts::contract_name::product_graph_snapshot,
+        "product-jsonl"
+    );
+    const json product
+        = materialize_jsonl_export(product_snapshot.export_path, false);
     json candidate = json::object();
     std::string candidate_id = "none";
-    if (candidate_export) {
+    if (candidate_control) {
+        const resolved_snapshot_export candidate_snapshot
+            = resolve_snapshot_export(
+                config, command_path(*candidate_control),
+                arachnespace::contracts::contract_name::
+                    research_candidate_graph_snapshot,
+                "candidate-jsonl"
+            );
         candidate
-            = materialize_jsonl_export(command_path(*candidate_export), true);
-        candidate_id = *candidate_snapshot;
+            = materialize_jsonl_export(candidate_snapshot.export_path, true);
+        candidate_id
+            = candidate_snapshot.control.at("snapshot_id").get<std::string>();
     }
     const ordered_json projection = arachne::ariadne::viewer_builder::project(
-        product, candidate, arguments.require("--product-snapshot-id"),
+        product, candidate,
+        product_snapshot.control.at("snapshot_id").get<std::string>(),
         candidate_id
     );
     const std::string projection_id
@@ -1625,8 +2386,9 @@ int command_viewer_build(const options& arguments) {
         { "format_version", 1 },
         { "commands",
           { "candidate-plan", "candidate-rebuild", "cocoon-transition",
-            "contract-validate", "fetch", "inbox-baseline", "inbox-verify",
-            "intake", "product-integrate", "viewer-build" } },
+            "contract-validate", "fetch", "fetch-plan-translate",
+            "inbox-baseline", "inbox-verify", "intake", "product-integrate",
+            "product-import-normalized", "viewer-build" } },
     };
 }
 
@@ -1674,6 +2436,12 @@ int dispatch(const std::vector<std::string>& arguments) {
             { "--force" }
         ));
     }
+    if (arguments[1] == "product" && arguments.size() >= 3U
+        && arguments[2] == "import-normalized") {
+        return command_product_import_normalized(
+            options(arguments, 3U, { "--manifest", "--database" })
+        );
+    }
     if (arguments[1] == "candidate" && arguments.size() >= 3U
         && arguments[2] == "rebuild") {
         return command_candidate_rebuild(
@@ -1688,6 +2456,12 @@ int dispatch(const std::vector<std::string>& arguments) {
               "--output-artifact", "--output-control" }
         ));
     }
+    if (arguments[1] == "fetch" && arguments.size() >= 3U
+        && arguments[2] == "plan") {
+        return command_fetch_plan(options(
+            arguments, 3U, { "--config", "--plan", "--output-directory" }
+        ));
+    }
     if (arguments[1] == "fetch") {
         return command_fetch(options(
             arguments, 2U, { "--config", "--request", "--output-control" }
@@ -1697,8 +2471,7 @@ int dispatch(const std::vector<std::string>& arguments) {
         && arguments[2] == "build") {
         return command_viewer_build(options(
             arguments, 3U,
-            { "--config", "--product-export", "--product-snapshot-id",
-              "--candidate-export", "--candidate-snapshot-id" }
+            { "--config", "--product-snapshot", "--candidate-snapshot" }
         ));
     }
     throw cli_error("unknown operations command");

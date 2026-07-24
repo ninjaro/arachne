@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/consolidated_corpus_unresolved_v1.schema.json",
+  "title": "Consolidated unresolved corpus material v1",
+  "description": "Flexible, external working artifact for conflicts and exact input fragments that could not be transferred safely. It is evidence derived from this corpus, not a universal conflict-resolution contract.",
+  "type": "object",
+  "required": [
+    "artifact_type",
+    "format_version",
+    "summary",
+    "conflicts",
+    "remainders"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "consolidated_corpus_unresolved_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "summary": {
+      "type": "object",
+      "description": "Aggregate counts and categories. New aggregate keys may be added without changing preserved-record semantics.",
+      "additionalProperties": true
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/conflict"
+      }
+    },
+    "remainders": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/remainder"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "container"
+      ],
+      "properties": {
+        "batch_id": {
+          "$ref": "#/$defs/non_empty_string",
+          "description": "Present when a batch document was content-detected; absent for container-level loader findings."
+        },
+        "container": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "member": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "occurrence": {
+      "type": "object",
+      "required": [
+        "source",
+        "json_pointer",
+        "value"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "json_pointer": {
+          "type": "string",
+          "description": "RFC 6901-style pointer into the detected batch document."
+        },
+        "value": {
+          "description": "Exact preserved JSON value; any JSON type is permitted."
+        }
+      },
+      "additionalProperties": false
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Pointers or compact structured descriptions of records that prevented safe transfer.",
+      "items": {}
+    },
+    "conflict": {
+      "type": "object",
+      "required": [
+        "category",
+        "identity",
+        "field",
+        "reason",
+        "occurrences"
+      ],
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "identity": {
+          "description": "Stable semantic identity key or compact structured identity; never an input hash."
+        },
+        "field": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "reason": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "occurrences": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/occurrence"
+          }
+        },
+        "dependencies": {
+          "$ref": "#/$defs/dependencies"
+        }
+      },
+      "additionalProperties": false
+    },
+    "remainder": {
+      "type": "object",
+      "required": [
+        "category",
+        "reason",
+        "source",
+        "json_pointer",
+        "value"
+      ],
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "reason": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "json_pointer": {
+          "type": "string",
+          "description": "RFC 6901-style pointer into the detected batch document."
+        },
+        "value": {
+          "description": "Exact preserved JSON value; any JSON type is permitted."
+        },
+        "dependencies": {
+          "$ref": "#/$defs/dependencies"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

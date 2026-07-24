@@ -266,6 +266,17 @@ TEST(Contracts, UnknownTopLevelFieldIsRejected) {
     EXPECT_TRUE(has_code(result, "unknown_field"));
 }
 
+TEST(Contracts, ProductSnapshotDoesNotRequirePermanentCocoonListing) {
+    json document = example("product_graph_snapshot_v1");
+    document.erase("cocoon_ids");
+    EXPECT_TRUE(
+        arachnespace::contracts::validate(
+            contract_name::product_graph_snapshot, document
+        )
+            .valid()
+    );
+}
+
 TEST(Contracts, ExtensionMustBeNamespaced) {
     json document = example("batch_envelope_v1");
     document["extensions"] = { { "trace", "bad" } };
@@ -296,6 +307,23 @@ TEST(Contracts, DeliveredTransportRequiresArtifact) {
 
     document["transport"]["status"] = "failed";
     EXPECT_TRUE(arachnespace::contracts::validate(document).valid());
+}
+
+TEST(Contracts, TransportResponseMetadataIsClosedAndTyped) {
+    json document = example("acquired_artifact_v1");
+    document["response_metadata"]["provider_private_state"] = "forbidden";
+    auto result = arachnespace::contracts::validate(document);
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "unknown_field"));
+
+    document["response_metadata"].erase("provider_private_state");
+    document["response_metadata"]["headers"][0]["value"] = "";
+    EXPECT_TRUE(arachnespace::contracts::validate(document).valid());
+
+    document["response_metadata"]["status_code"] = 1000;
+    result = arachnespace::contracts::validate(document);
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "range"));
 }
 
 TEST(Contracts, InvalidCocoonStateIsRejected) {

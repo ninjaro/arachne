@@ -573,12 +573,39 @@ namespace {
     validate_fetch_request(const json& document, validation_result& result) {
         reject_unknown_fields(
             document, "",
-            { "contract", "format_version", "request_id", "plan_id", "locator",
-              "method", "headers", "pagination", "retry", "expected",
-              "redirect_policy", "output_ref", "body_artifact", "extensions" },
+            { "contract",         "format_version",  "request_id",
+              "door_id",          "endpoint_id",     "operation",
+              "freshness_policy", "idempotency_key", "plan_id",
+              "locator",          "method",          "headers",
+              "pagination",       "retry",           "expected",
+              "redirect_policy",  "output_ref",      "body_artifact",
+              "resume_artifact",  "extensions" },
             result
         );
         require_stable_id(document, "request_id", "", result);
+        if (document.contains("door_id")) {
+            require_stable_id(document, "door_id", "", result);
+        }
+        if (document.contains("endpoint_id")) {
+            require_stable_id(document, "endpoint_id", "", result);
+        }
+        if (document.contains("operation")) {
+            require_enum(
+                document, "operation", "",
+                { "bulk_snapshot", "incremental_harvest", "point_lookup",
+                  "resume_download", "backend_read", "external_write" },
+                result
+            );
+        }
+        if (document.contains("freshness_policy")) {
+            require_enum(
+                document, "freshness_policy", "",
+                { "fresh_required", "cache_allowed", "stale_allowed",
+                  "offline_only" },
+                result
+            );
+        }
+        optional_string(document, "idempotency_key", "", result);
         optional_string(document, "plan_id", "", result);
         require_string(document, "locator", "", result);
         require_enum(document, "method", "", { "GET", "POST" }, result);
@@ -598,16 +625,35 @@ namespace {
         if (const json* retry
             = optional_object(document, "retry", "", result)) {
             reject_unknown_fields(
-                *retry, "/retry", { "maximum_attempts" }, result
+                *retry, "/retry",
+                { "maximum_attempts", "initial_delay_ms", "maximum_delay_ms",
+                  "total_delay_budget_ms", "respect_retry_after" },
+                result
             );
             optional_bounded_integer(
                 *retry, "maximum_attempts", "/retry", 1, 20, result
             );
+            optional_bounded_integer(
+                *retry, "initial_delay_ms", "/retry", 0, 60'000, result
+            );
+            optional_bounded_integer(
+                *retry, "maximum_delay_ms", "/retry", 0, 3'600'000, result
+            );
+            optional_bounded_integer(
+                *retry, "total_delay_budget_ms", "/retry", 0, 3'600'000, result
+            );
+            if (const auto value = retry->find("respect_retry_after");
+                value != retry->end() && !value->is_boolean()) {
+                add(result, "/retry/respect_retry_after", "type",
+                    "expected a boolean");
+            }
         }
         if (const json* expected
             = optional_object(document, "expected", "", result)) {
             reject_unknown_fields(
-                *expected, "/expected", { "maximum_bytes", "timeout_ms" },
+                *expected, "/expected",
+                { "maximum_bytes", "timeout_ms", "connect_timeout_ms",
+                  "read_timeout_ms", "write_timeout_ms", "sha256" },
                 result
             );
             optional_bounded_integer(
@@ -615,8 +661,22 @@ namespace {
                 1'099'511'627'776ULL, result
             );
             optional_bounded_integer(
-                *expected, "timeout_ms", "/expected", 1, 3'600'000, result
+                *expected, "timeout_ms", "/expected", 1, 86'400'000, result
             );
+            optional_bounded_integer(
+                *expected, "connect_timeout_ms", "/expected", 1, 86'400'000,
+                result
+            );
+            optional_bounded_integer(
+                *expected, "read_timeout_ms", "/expected", 1, 86'400'000, result
+            );
+            optional_bounded_integer(
+                *expected, "write_timeout_ms", "/expected", 1, 86'400'000,
+                result
+            );
+            if (expected->contains("sha256")) {
+                require_sha256(*expected, "sha256", "/expected", result);
+            }
         }
         if (const json* redirect
             = optional_object(document, "redirect_policy", "", result)) {
@@ -679,6 +739,19 @@ namespace {
             = optional_object(document, "body_artifact", "", result)) {
             validate_artifact(*body, "/body_artifact", result);
         }
+        if (const json* partial
+            = optional_object(document, "resume_artifact", "", result)) {
+            validate_artifact(*partial, "/resume_artifact", result);
+        }
+        const bool resume_operation
+            = document.value("operation", "point_lookup") == "resume_download";
+        if (resume_operation && !document.contains("resume_artifact")) {
+            add(result, "/resume_artifact", "required",
+                "resume_download requires a partial artifact");
+        } else if (!resume_operation && document.contains("resume_artifact")) {
+            add(result, "/resume_artifact", "operation",
+                "resume_artifact is reserved for resume_download");
+        }
         validate_extensions(document, "", result);
     }
 
@@ -688,12 +761,23 @@ namespace {
         reject_unknown_fields(
             document, "",
             { "contract", "format_version", "artifact_id", "request_id",
-              "source_locator", "artifact", "transport", "response_metadata",
-              "acquired_at", "extensions" },
+              "door_id", "operation", "source_locator", "artifact", "transport",
+              "response_metadata", "acquired_at", "extensions" },
             result
         );
         require_stable_id(document, "artifact_id", "", result);
         require_stable_id(document, "request_id", "", result);
+        if (document.contains("door_id")) {
+            require_stable_id(document, "door_id", "", result);
+        }
+        if (document.contains("operation")) {
+            require_enum(
+                document, "operation", "",
+                { "bulk_snapshot", "incremental_harvest", "point_lookup",
+                  "resume_download", "backend_read", "external_write" },
+                result
+            );
+        }
         require_string(document, "source_locator", "", result);
         require_timestamp(document, "acquired_at", "", result);
         const json* transport
@@ -702,7 +786,9 @@ namespace {
         if (transport != nullptr) {
             reject_unknown_fields(
                 *transport, "/transport",
-                { "status", "attempts", "error_code", "error_message" }, result
+                { "status", "attempts", "delivery_mode", "retry_after_ms",
+                  "error_code", "error_message" },
+                result
             );
             const json* status
                 = require_string(*transport, "status", "/transport", result);
@@ -715,6 +801,19 @@ namespace {
             require_nonnegative_integer(
                 *transport, "attempts", "/transport", result
             );
+            if (transport->contains("delivery_mode")) {
+                require_enum(
+                    *transport, "delivery_mode", "/transport",
+                    { "fetched", "cache_validated", "stale", "resumed",
+                      "offline" },
+                    result
+                );
+            }
+            if (transport->contains("retry_after_ms")) {
+                require_nonnegative_integer(
+                    *transport, "retry_after_ms", "/transport", result
+                );
+            }
             optional_string(*transport, "error_code", "/transport", result);
             optional_string(*transport, "error_message", "/transport", result);
         }
@@ -727,7 +826,65 @@ namespace {
         if (artifact != nullptr) {
             validate_artifact(*artifact, "/artifact", result);
         }
-        optional_object(document, "response_metadata", "", result);
+        if (const json* response
+            = require_object(document, "response_metadata", "", result)) {
+            reject_unknown_fields(
+                *response, "/response_metadata",
+                { "status_code", "effective_url", "headers", "redirect_chain",
+                  "started_at", "completed_at" },
+                result
+            );
+            require_nonnegative_integer(
+                *response, "status_code", "/response_metadata", result
+            );
+            optional_bounded_integer(
+                *response, "status_code", "/response_metadata", 0, 999, result
+            );
+            optional_string(
+                *response, "effective_url", "/response_metadata", result
+            );
+            if (const json* headers = require_array(
+                    *response, "headers", "/response_metadata", result
+                )) {
+                if (headers->size() > 1'024U) {
+                    add(result, "/response_metadata/headers", "max_items",
+                        "response metadata has too many headers");
+                }
+                for (std::size_t index = 0; index < headers->size(); ++index) {
+                    const std::string path
+                        = "/response_metadata/headers/" + std::to_string(index);
+                    const json& header = headers->at(index);
+                    if (!header.is_object()) {
+                        add(result, path, "type", "expected a header object");
+                        continue;
+                    }
+                    reject_unknown_fields(
+                        header, path, { "name", "value" }, result
+                    );
+                    require_string(header, "name", path, result);
+                    const json* value = field(header, "value", path, result);
+                    if (value != nullptr && !value->is_string()) {
+                        add(result, path + "/value", "type",
+                            "expected a JSON string");
+                    }
+                }
+            }
+            validate_string_array(
+                *response, "redirect_chain", "/response_metadata", false, result
+            );
+            if (const auto chain = response->find("redirect_chain");
+                chain != response->end() && chain->is_array()
+                && chain->size() > 20U) {
+                add(result, "/response_metadata/redirect_chain", "max_items",
+                    "response metadata has too many redirects");
+            }
+            require_timestamp(
+                *response, "started_at", "/response_metadata", result
+            );
+            require_timestamp(
+                *response, "completed_at", "/response_metadata", result
+            );
+        }
         validate_extensions(document, "", result);
     }
 
@@ -843,7 +1000,9 @@ namespace {
               "extensions" },
             result
         );
-        validate_string_array(document, "cocoon_ids", "", false, result);
+        if (document.contains("cocoon_ids")) {
+            validate_string_array(document, "cocoon_ids", "", false, result);
+        }
     }
 
     void validate_candidate_snapshot(

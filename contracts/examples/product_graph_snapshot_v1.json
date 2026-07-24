@@ -1,0 +1,38 @@
+{
+  "contract": "product_graph_snapshot_v1",
+  "format_version": 1,
+  "snapshot_id": "product-20260718-01",
+  "run_id": "product-run-20260718-01",
+  "graph_version": "2026.07.18.1",
+  "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "database": {
+    "storage_ref": "snapshots/product/product-20260718-01.sqlite3",
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "byte_length": 7340032,
+    "media_type": "application/vnd.sqlite3"
+  },
+  "exports": [
+    {
+      "kind": "product-jsonl",
+      "artifact": {
+        "storage_ref": "exports/product/product-20260718-01.jsonl",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "byte_length": 1048576,
+        "media_type": "application/x-ndjson"
+      }
+    }
+  ],
+  "cocoon_ids": [
+    "env-20260718-0001"
+  ],
+  "activated_at": "2026-07-18T03:30:00Z",
+  "structural_validation": {
+    "passed": true,
+    "report": {
+      "storage_ref": "reports/product-run-20260718-01.json",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "byte_length": 8192,
+      "media_type": "application/json"
+    }
+  }
+}

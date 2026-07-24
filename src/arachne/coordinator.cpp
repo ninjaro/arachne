@@ -536,8 +536,7 @@ bool can_transition(const cocoon_status from, const cocoon_status to) noexcept {
     switch (from) {
     case cocoon_status::received:
         return to == cocoon_status::needs_format_fix
-            || to == cocoon_status::waiting_approval
-            || to == cocoon_status::waiting_processing;
+            || to == cocoon_status::waiting_approval;
     case cocoon_status::needs_format_fix:
         return to == cocoon_status::superseded;
     case cocoon_status::waiting_approval:
@@ -676,11 +675,11 @@ envelope_record operational_ledger::intake(const intake_request& request) {
                     "registered inbox payload changed during validation"
                 );
             }
-            constexpr auto target = cocoon_status::waiting_processing;
+            constexpr auto target = cocoon_status::waiting_approval;
             try {
                 return transition(
                     envelope_id, target, "arachne:intake",
-                    "opaque payload received and queued"
+                    "opaque payload received and queued for explicit approval"
                 );
             } catch (const std::logic_error&) {
                 existing = get(envelope_id);
@@ -800,8 +799,8 @@ VALUES (?, 'received', NULL, ?)
     }
 
     return transition(
-        envelope_id, cocoon_status::waiting_processing, "arachne:intake",
-        "opaque payload received and queued"
+        envelope_id, cocoon_status::waiting_approval, "arachne:intake",
+        "opaque payload received and queued for explicit approval"
     );
 }
 
@@ -1300,8 +1299,7 @@ VALUES (?, 1, 'running', ?)
 }
 
 void operational_ledger::bind_product_run_inputs(
-    const std::string_view run_id,
-    const std::vector<std::string>& envelope_ids
+    const std::string_view run_id, const std::vector<std::string>& envelope_ids
 ) {
     if (!is_safe_identifier(run_id)) {
         throw std::invalid_argument("run_id must be a safe stable identifier");
@@ -1426,7 +1424,8 @@ WHERE i.run_id=? ORDER BY e.created_at, e.envelope_id
     bind_text(database, statement.get(), 1, run_id);
     std::vector<envelope_record> result;
     while (sqlite3_step(statement.get()) == SQLITE_ROW) {
-        if (column_text(statement.get(), 2) != column_text(statement.get(), 10)) {
+        if (column_text(statement.get(), 2)
+            != column_text(statement.get(), 10)) {
             throw std::logic_error("bound product input hash changed");
         }
         result.emplace_back(read_envelope(statement.get(), path_));
@@ -1553,7 +1552,9 @@ WHERE run_id=? AND status='running'
         bind_text(database, run_update.get(), 3, run_id);
         step_done(database, run_update.get());
         if (sqlite3_changes(database) != 1) {
-            throw std::logic_error("running product run changed during completion");
+            throw std::logic_error(
+                "running product run changed during completion"
+            );
         }
         auto attempt = prepare(database, R"SQL(
 UPDATE run_attempts SET status='succeeded', manifest_ref=?, finished_at=?

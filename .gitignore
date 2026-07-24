@@ -48,6 +48,9 @@ assets/skip/
 # Local operational state and generated configuration
 .arachne/
 config/arachne.local.json
+__pycache__/
+.*.import-lock/
+.*.import-staging*/
 
 CMakeLists.txt.user
 CMakeLists.txt.user.*

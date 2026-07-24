@@ -3,34 +3,20 @@ name: Publish Arachne viewer
 on:
   workflow_dispatch:
     inputs:
-      product_export:
-        description: Product export path inside the state repository
+      product_snapshot_control:
+        description: Product snapshot control path inside the state repository
         required: true
         type: string
-      product_snapshot_id:
-        description: Product snapshot identifier
-        required: true
-        type: string
-      candidate_export:
-        description: Optional candidate export path inside the state repository
-        required: false
-        type: string
-      candidate_snapshot_id:
-        description: Required when candidate_export is supplied
+      candidate_snapshot_control:
+        description: Optional candidate snapshot control path inside the state repository
         required: false
         type: string
   workflow_call:
     inputs:
-      product_export:
+      product_snapshot_control:
         required: true
         type: string
-      product_snapshot_id:
-        required: true
-        type: string
-      candidate_export:
-        required: false
-        type: string
-      candidate_snapshot_id:
+      candidate_snapshot_control:
         required: false
         type: string
 
@@ -81,10 +67,10 @@ jobs:
           ARACHNE_BUILD_TESTS: "OFF"
           ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
-      - name: Materialize config and resolve reviewed exports
+      - name: Materialize config and resolve reviewed snapshot controls
         env:
-          PRODUCT_EXPORT_INPUT: ${{ inputs.product_export }}
-          CANDIDATE_EXPORT_INPUT: ${{ inputs.candidate_export }}
+          PRODUCT_SNAPSHOT_INPUT: ${{ inputs.product_snapshot_control }}
+          CANDIDATE_SNAPSHOT_INPUT: ${{ inputs.candidate_snapshot_control }}
         run: |
           python3 scripts/materialize_ci_config.py \
             --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
@@ -93,33 +79,26 @@ jobs:
             --runner-temp "${RUNNER_TEMP}" \
             --output "${RUNNER_TEMP}/arachne-config.json"
           python3 -c 'import json,os; config=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json")); print("ARACHNE_SITE=" + config["paths"]["site_output"])' >> "${GITHUB_ENV}"
-          python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["PRODUCT_EXPORT_INPUT"]).resolve(strict=True); value.relative_to(root); print("PRODUCT_EXPORT_PATH=" + str(value))' >> "${GITHUB_ENV}"
-          if [[ -n "${CANDIDATE_EXPORT_INPUT}" ]]; then
-            python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["CANDIDATE_EXPORT_INPUT"]).resolve(strict=True); value.relative_to(root); print("CANDIDATE_EXPORT_PATH=" + str(value))' >> "${GITHUB_ENV}"
+          python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["PRODUCT_SNAPSHOT_INPUT"]).resolve(strict=True); value.relative_to(root); print("PRODUCT_SNAPSHOT_PATH=" + str(value))' >> "${GITHUB_ENV}"
+          if [[ -n "${CANDIDATE_SNAPSHOT_INPUT}" ]]; then
+            python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["CANDIDATE_SNAPSHOT_INPUT"]).resolve(strict=True); value.relative_to(root); print("CANDIDATE_SNAPSHOT_PATH=" + str(value))' >> "${GITHUB_ENV}"
           fi
       - name: Build versioned static viewer
         id: viewer
         continue-on-error: true
         env:
-          PRODUCT_SNAPSHOT_ID: ${{ inputs.product_snapshot_id }}
-          CANDIDATE_SNAPSHOT_ID: ${{ inputs.candidate_snapshot_id }}
-          CANDIDATE_EXPORT_INPUT: ${{ inputs.candidate_export }}
+          CANDIDATE_SNAPSHOT_INPUT: ${{ inputs.candidate_snapshot_control }}
         run: |
           arguments=(
             --config "${RUNNER_TEMP}/arachne-config.json"
             --binary "${GITHUB_WORKSPACE}/build/arachne"
             viewer-build
-            --product-export "${PRODUCT_EXPORT_PATH}"
-            --product-snapshot-id "${PRODUCT_SNAPSHOT_ID}"
+            --product-snapshot "${PRODUCT_SNAPSHOT_PATH}"
           )
-          if [[ -n "${CANDIDATE_EXPORT_INPUT}" ]]; then
-            test -n "${CANDIDATE_SNAPSHOT_ID}"
+          if [[ -n "${CANDIDATE_SNAPSHOT_INPUT}" ]]; then
             arguments+=(
-              --candidate-export "${CANDIDATE_EXPORT_PATH}"
-              --candidate-snapshot-id "${CANDIDATE_SNAPSHOT_ID}"
+              --candidate-snapshot "${CANDIDATE_SNAPSHOT_PATH}"
             )
-          else
-            test -z "${CANDIDATE_SNAPSHOT_ID}"
           fi
           python3 scripts/arachne_ops.py "${arguments[@]}"
       - name: Stop after viewer failure

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/product_graph_snapshot_v1.schema.json",
+  "title": "Versioned product graph snapshot v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "snapshot_id",
+    "run_id",
+    "graph_version",
+    "content_sha256",
+    "database",
+    "exports",
+    "activated_at",
+    "structural_validation"
+  ],
+  "properties": {
+    "contract": {
+      "const": "product_graph_snapshot_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "snapshot_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "run_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "graph_version": {
+      "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+    },
+    "content_sha256": {
+      "$ref": "common_v1.schema.json#/$defs/sha256"
+    },
+    "database": {
+      "$ref": "common_v1.schema.json#/$defs/artifact"
+    },
+    "exports": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "common_v1.schema.json#/$defs/export"
+      }
+    },
+    "cocoon_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common_v1.schema.json#/$defs/stable_id"
+      }
+    },
+    "activated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "structural_validation": {
+      "$ref": "common_v1.schema.json#/$defs/structural_validation"
+    },
+    "extensions": {
+      "$ref": "common_v1.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

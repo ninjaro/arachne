@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/mining_batch_v1.schema.json",
+  "title": "Legacy mining-batch compatibility marker (not an Arachne manifest)",
+  "description": "Opaque human-authored JSON accepted for corpus discovery. No fields are mandatory: the future Arachne manifest and transfer criteria are explicitly deferred by the normative addendum. Observed legacy fields may be present but are not an intake gate.",
+  "type": "object",
+  "properties": {
+    "contract": {
+      "const": "mining_batch_v1"
+    },
+    "format_version": {
+      "const": 1
+    }
+  },
+  "additionalProperties": true
+}

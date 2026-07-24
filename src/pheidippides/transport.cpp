@@ -27,6 +27,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 
@@ -34,13 +35,26 @@ namespace arachne::pheidippides {
 namespace {
 
     constexpr std::size_t maximum_header_bytes = 1024U * 1024U;
+    constexpr std::size_t maximum_response_headers = 1'024U;
     constexpr std::size_t maximum_redirects = 20U;
     constexpr std::size_t maximum_transport_attempts = 20U;
     constexpr std::size_t maximum_url_bytes = 64U * 1024U;
     constexpr std::size_t maximum_request_id_bytes = 128U;
 
     std::once_flag curl_global_once;
+    std::recursive_mutex curl_share_mutex;
+    CURLSH* curl_connection_share = nullptr;
     std::atomic<std::uint64_t> stage_sequence { 0 };
+
+    void curl_share_lock(
+        CURL*, const curl_lock_data, const curl_lock_access, void*
+    ) noexcept {
+        curl_share_mutex.lock();
+    }
+
+    void curl_share_unlock(CURL*, const curl_lock_data, void*) noexcept {
+        curl_share_mutex.unlock();
+    }
 
     struct curl_easy_deleter {
         void operator()(CURL* handle) const noexcept {
@@ -69,6 +83,28 @@ namespace {
             const CURLcode result = curl_global_init(CURL_GLOBAL_DEFAULT);
             if (result != CURLE_OK) {
                 throw std::runtime_error("curl_global_init failed");
+            }
+            curl_connection_share = curl_share_init();
+            if (curl_connection_share == nullptr
+                || curl_share_setopt(
+                       curl_connection_share, CURLSHOPT_LOCKFUNC,
+                       curl_share_lock
+                   ) != CURLSHE_OK
+                || curl_share_setopt(
+                       curl_connection_share, CURLSHOPT_UNLOCKFUNC,
+                       curl_share_unlock
+                   ) != CURLSHE_OK
+                || curl_share_setopt(
+                       curl_connection_share, CURLSHOPT_SHARE,
+                       CURL_LOCK_DATA_DNS
+                   ) != CURLSHE_OK
+                || curl_share_setopt(
+                       curl_connection_share, CURLSHOPT_SHARE,
+                       CURL_LOCK_DATA_CONNECT
+                   ) != CURLSHE_OK) {
+                throw std::runtime_error(
+                    "cannot initialize the Pheidippides connection pool"
+                );
             }
         });
     }
@@ -751,6 +787,60 @@ namespace {
         }
     };
 
+    struct progress_context {
+        std::chrono::milliseconds read_timeout;
+        std::chrono::milliseconds write_timeout;
+        bool upload_expected = false;
+        bool read_timed_out = false;
+        bool write_timed_out = false;
+        curl_off_t downloaded = 0;
+        curl_off_t uploaded = 0;
+        std::chrono::steady_clock::time_point last_download_progress {};
+        std::chrono::steady_clock::time_point last_upload_progress {};
+
+        void reset() noexcept {
+            const auto now = std::chrono::steady_clock::now();
+            read_timed_out = false;
+            write_timed_out = false;
+            downloaded = 0;
+            uploaded = 0;
+            last_download_progress = now;
+            last_upload_progress = now;
+        }
+    };
+
+    int transfer_progress_callback(
+        void* user_data, const curl_off_t download_total,
+        const curl_off_t download_now, const curl_off_t upload_total,
+        const curl_off_t upload_now
+    ) noexcept {
+        auto& progress = *static_cast<progress_context*>(user_data);
+        const auto now = std::chrono::steady_clock::now();
+        if (download_now != progress.downloaded) {
+            progress.downloaded = download_now;
+            progress.last_download_progress = now;
+        }
+        if (upload_now != progress.uploaded) {
+            progress.uploaded = upload_now;
+            progress.last_upload_progress = now;
+        }
+        const bool download_complete
+            = download_total > 0 && download_now >= download_total;
+        const bool upload_complete = !progress.upload_expected
+            || (upload_total > 0 && upload_now >= upload_total);
+        if (upload_complete && !download_complete
+            && now - progress.last_download_progress > progress.read_timeout) {
+            progress.read_timed_out = true;
+            return 1;
+        }
+        if (!upload_complete
+            && now - progress.last_upload_progress > progress.write_timeout) {
+            progress.write_timed_out = true;
+            return 1;
+        }
+        return 0;
+    }
+
     [[nodiscard]] bool write_all(
         const int descriptor, const char* data, std::size_t size,
         std::string& error
@@ -853,10 +943,15 @@ namespace {
             .name = std::string(line.substr(0, colon)),
             .value = std::string(trim_header_value(line.substr(colon + 1U))),
         };
+        if (!valid_header_name(header.name)) {
+            return total;
+        }
         if (ascii_lower(header.name) == "location") {
             context.location = header.value;
         }
-        context.headers.emplace_back(std::move(header));
+        if (context.headers.size() < maximum_response_headers) {
+            context.headers.emplace_back(std::move(header));
+        }
         return total;
     }
 
@@ -873,6 +968,98 @@ namespace {
         default:
             return false;
         }
+    }
+
+    [[nodiscard]] bool is_retryable_status(const long status) noexcept {
+        return status == 408 || status == 425 || status == 429 || status == 500
+            || status == 502 || status == 503 || status == 504;
+    }
+
+    [[nodiscard]] bool
+    is_retryable_curl_status(const CURLcode status) noexcept {
+        switch (status) {
+        case CURLE_COULDNT_RESOLVE_PROXY:
+        case CURLE_COULDNT_RESOLVE_HOST:
+        case CURLE_COULDNT_CONNECT:
+        case CURLE_PARTIAL_FILE:
+        case CURLE_HTTP2:
+        case CURLE_WRITE_ERROR:
+        case CURLE_UPLOAD_FAILED:
+        case CURLE_READ_ERROR:
+        case CURLE_OPERATION_TIMEDOUT:
+        case CURLE_ABORTED_BY_CALLBACK:
+        case CURLE_HTTP_POST_ERROR:
+        case CURLE_RECV_ERROR:
+        case CURLE_SEND_ERROR:
+        case CURLE_GOT_NOTHING:
+        case CURLE_AGAIN:
+#ifdef CURLE_HTTP3
+        case CURLE_HTTP3:
+#endif
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    [[nodiscard]] std::optional<std::chrono::milliseconds>
+    retry_after_delay(const std::vector<http_header>& headers) {
+        for (const auto& header : headers) {
+            if (ascii_lower(header.name) != "retry-after") {
+                continue;
+            }
+            std::uint64_t seconds = 0;
+            const char* begin = header.value.data();
+            const char* end = begin + header.value.size();
+            const auto parsed = std::from_chars(begin, end, seconds);
+            if (parsed.ec == std::errc {} && parsed.ptr == end) {
+                constexpr std::uint64_t maximum_seconds = 3'600U;
+                return std::chrono::milliseconds(
+                    std::min(seconds, maximum_seconds) * 1'000U
+                );
+            }
+            const std::time_t date
+                = curl_getdate(header.value.c_str(), nullptr);
+            if (date >= 0) {
+                const std::time_t now = std::time(nullptr);
+                const auto delay = std::max<std::time_t>(0, date - now);
+                return std::chrono::milliseconds(
+                    std::min<std::time_t>(delay, 3'600) * 1'000
+                );
+            }
+            return std::nullopt;
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::chrono::milliseconds retry_delay(
+        const fetch_request_v1& request, const std::size_t attempt,
+        const std::vector<http_header>& headers
+    ) {
+        if (request.respect_retry_after) {
+            if (const auto provided = retry_after_delay(headers)) {
+                return std::min(*provided, request.maximum_retry_delay);
+            }
+        }
+        std::int64_t delay = request.initial_retry_delay.count();
+        for (std::size_t power = 1; power < attempt; ++power) {
+            if (delay >= request.maximum_retry_delay.count() / 2) {
+                delay = request.maximum_retry_delay.count();
+                break;
+            }
+            delay *= 2;
+        }
+        delay = std::min(delay, request.maximum_retry_delay.count());
+        const std::string jitter_seed
+            = request.request_id + ":" + std::to_string(attempt);
+        const std::string digest = crypto::sha256(jitter_seed);
+        unsigned jitter_value = 0;
+        static_cast<void>(
+            std::from_chars(digest.data(), digest.data() + 4, jitter_value, 16)
+        );
+        const std::int64_t per_mille
+            = 800 + static_cast<std::int64_t>(jitter_value % 401U);
+        return std::chrono::milliseconds(delay * per_mille / 1'000);
     }
 
     [[nodiscard]] long timeout_milliseconds(
@@ -968,6 +1155,16 @@ namespace {
             return "storage_error";
         case transport_status::artifact_exists:
             return "artifact_exists";
+        case transport_status::door_policy_rejected:
+            return "door_policy_rejected";
+        case transport_status::cache_miss:
+            return "cache_miss";
+        case transport_status::checksum_mismatch:
+            return "checksum_mismatch";
+        case transport_status::retry_budget_exhausted:
+            return "retry_budget_exhausted";
+        case transport_status::admission_timeout:
+            return "admission_timeout";
         }
         return "unknown_transport_status";
     }
@@ -983,6 +1180,162 @@ namespace {
         return std::nullopt;
     }
 
+    [[nodiscard]] bool sensitive_header_name(const std::string_view name) {
+        const std::string lowered = ascii_lower(std::string(name));
+        return lowered == "authorization" || lowered == "proxy-authorization"
+            || lowered == "cookie" || lowered == "set-cookie"
+            || lowered == "x-api-key" || lowered == "api-key"
+            || lowered == "x-goog-api-key" || lowered == "x-auth-token"
+            || lowered == "x-access-token" || lowered == "private-token";
+    }
+
+    [[nodiscard]] int hexadecimal_value(const char character) noexcept {
+        if (character >= '0' && character <= '9') {
+            return character - '0';
+        }
+        if (character >= 'a' && character <= 'f') {
+            return character - 'a' + 10;
+        }
+        if (character >= 'A' && character <= 'F') {
+            return character - 'A' + 10;
+        }
+        return -1;
+    }
+
+    [[nodiscard]] std::string decode_query_name(const std::string_view name) {
+        std::string result;
+        result.reserve(name.size());
+        for (std::size_t index = 0; index < name.size(); ++index) {
+            if (name[index] == '%' && index + 2U < name.size()) {
+                const int high = hexadecimal_value(name[index + 1U]);
+                const int low = hexadecimal_value(name[index + 2U]);
+                if (high >= 0 && low >= 0) {
+                    result.push_back(static_cast<char>(high * 16 + low));
+                    index += 2U;
+                    continue;
+                }
+            }
+            result.push_back(name[index] == '+' ? ' ' : name[index]);
+        }
+        return result;
+    }
+
+    [[nodiscard]] bool sensitive_query_name(std::string name) {
+        name = ascii_lower(decode_query_name(name));
+        return name.contains("token") || name.contains("secret")
+            || name.contains("password") || name.contains("signature")
+            || name.contains("credential") || name.contains("api_key")
+            || name.contains("apikey") || name.contains("access_key")
+            || name == "key" || name == "auth" || name == "sig"
+            || name.starts_with("x-amz-");
+    }
+
+    [[nodiscard]] std::string redact_url_query(const std::string& url) {
+        const std::size_t question = url.find('?');
+        if (question == std::string::npos) {
+            return url;
+        }
+        const std::size_t fragment = url.find('#', question + 1U);
+        const std::size_t query_end
+            = fragment == std::string::npos ? url.size() : fragment;
+        std::string result = url.substr(0, question + 1U);
+        std::string_view query(
+            url.data() + question + 1U, query_end - question - 1U
+        );
+        bool first = true;
+        while (!query.empty()) {
+            const std::size_t ampersand = query.find('&');
+            const std::string_view parameter = query.substr(0, ampersand);
+            const std::size_t equals = parameter.find('=');
+            const std::string name(parameter.substr(0, equals));
+            if (!first) {
+                result.push_back('&');
+            }
+            first = false;
+            result += name;
+            if (equals != std::string_view::npos) {
+                result.push_back('=');
+                result += sensitive_query_name(name)
+                    ? "%5BREDACTED%5D"
+                    : std::string(parameter.substr(equals + 1U));
+            }
+            if (ampersand == std::string_view::npos) {
+                query = {};
+            } else {
+                query.remove_prefix(ampersand + 1U);
+            }
+        }
+        if (fragment != std::string::npos) {
+            result += url.substr(fragment);
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::string receipt_safe_text(const std::string_view value) {
+        constexpr std::string_view hexadecimal = "0123456789ABCDEF";
+        std::string result;
+        result.reserve(value.size());
+        for (const char raw_character : value) {
+            const auto character = static_cast<unsigned char>(raw_character);
+            if (character >= 0x20U && character <= 0x7eU) {
+                result.push_back(static_cast<char>(character));
+            } else {
+                result.push_back('%');
+                result.push_back(hexadecimal[character >> 4U]);
+                result.push_back(hexadecimal[character & 0x0fU]);
+            }
+        }
+        return result;
+    }
+
+}
+
+std::string_view to_string(const transport_operation value) noexcept {
+    switch (value) {
+    case transport_operation::bulk_snapshot:
+        return "bulk_snapshot";
+    case transport_operation::incremental_harvest:
+        return "incremental_harvest";
+    case transport_operation::point_lookup:
+        return "point_lookup";
+    case transport_operation::resume_download:
+        return "resume_download";
+    case transport_operation::backend_read:
+        return "backend_read";
+    case transport_operation::external_write:
+        return "external_write";
+    }
+    return "point_lookup";
+}
+
+std::string_view to_string(const freshness_policy value) noexcept {
+    switch (value) {
+    case freshness_policy::fresh_required:
+        return "fresh_required";
+    case freshness_policy::cache_allowed:
+        return "cache_allowed";
+    case freshness_policy::stale_allowed:
+        return "stale_allowed";
+    case freshness_policy::offline_only:
+        return "offline_only";
+    }
+    return "fresh_required";
+}
+
+std::string_view to_string(const delivery_mode value) noexcept {
+    switch (value) {
+    case delivery_mode::fetched:
+        return "fetched";
+    case delivery_mode::cache_validated:
+        return "cache_validated";
+    case delivery_mode::stale:
+        return "stale";
+    case delivery_mode::resumed:
+        return "resumed";
+    case delivery_mode::offline:
+        return "offline";
+    }
+    return "fetched";
 }
 
 fetch_request_v1 from_contract(const nlohmann::json& document) {
@@ -1000,6 +1353,32 @@ fetch_request_v1 from_contract(const nlohmann::json& document) {
         request.format_version
             = document.at("format_version").get<std::uint32_t>();
         request.request_id = document.at("request_id").get<std::string>();
+        request.door_id = document.value("door_id", std::string {});
+        request.endpoint_id = document.value("endpoint_id", std::string {});
+        const std::string operation
+            = document.value("operation", std::string("point_lookup"));
+        if (operation == "bulk_snapshot") {
+            request.operation = transport_operation::bulk_snapshot;
+        } else if (operation == "incremental_harvest") {
+            request.operation = transport_operation::incremental_harvest;
+        } else if (operation == "resume_download") {
+            request.operation = transport_operation::resume_download;
+        } else if (operation == "backend_read") {
+            request.operation = transport_operation::backend_read;
+        } else if (operation == "external_write") {
+            request.operation = transport_operation::external_write;
+        }
+        const std::string freshness
+            = document.value("freshness_policy", std::string("fresh_required"));
+        if (freshness == "cache_allowed") {
+            request.freshness = freshness_policy::cache_allowed;
+        } else if (freshness == "stale_allowed") {
+            request.freshness = freshness_policy::stale_allowed;
+        } else if (freshness == "offline_only") {
+            request.freshness = freshness_policy::offline_only;
+        }
+        request.idempotency_key
+            = document.value("idempotency_key", std::string {});
         request.url = document.at("locator").get<std::string>();
         request.target_artifact_ref
             = document.at("output_ref").get<std::string>();
@@ -1025,6 +1404,25 @@ fetch_request_v1 from_contract(const nlohmann::json& document) {
                 request.timeout
                     = std::chrono::milliseconds(timeout->get<std::int64_t>());
             }
+            if (const auto timeout = expected->find("connect_timeout_ms");
+                timeout != expected->end()) {
+                request.connect_timeout
+                    = std::chrono::milliseconds(timeout->get<std::int64_t>());
+            }
+            if (const auto timeout = expected->find("read_timeout_ms");
+                timeout != expected->end()) {
+                request.read_timeout
+                    = std::chrono::milliseconds(timeout->get<std::int64_t>());
+            }
+            if (const auto timeout = expected->find("write_timeout_ms");
+                timeout != expected->end()) {
+                request.write_timeout
+                    = std::chrono::milliseconds(timeout->get<std::int64_t>());
+            }
+            if (const auto checksum = expected->find("sha256");
+                checksum != expected->end()) {
+                request.expected_sha256 = checksum->get<std::string>();
+            }
         }
         if (const auto retry = document.find("retry");
             retry != document.end()) {
@@ -1032,6 +1430,23 @@ fetch_request_v1 from_contract(const nlohmann::json& document) {
                 attempts != retry->end()) {
                 request.maximum_attempts = attempts->get<std::size_t>();
             }
+            if (const auto delay = retry->find("initial_delay_ms");
+                delay != retry->end()) {
+                request.initial_retry_delay
+                    = std::chrono::milliseconds(delay->get<std::int64_t>());
+            }
+            if (const auto delay = retry->find("maximum_delay_ms");
+                delay != retry->end()) {
+                request.maximum_retry_delay
+                    = std::chrono::milliseconds(delay->get<std::int64_t>());
+            }
+            if (const auto budget = retry->find("total_delay_budget_ms");
+                budget != retry->end()) {
+                request.total_retry_delay_budget
+                    = std::chrono::milliseconds(budget->get<std::int64_t>());
+            }
+            request.respect_retry_after
+                = retry->value("respect_retry_after", true);
         }
         if (const auto policy = document.find("redirect_policy");
             policy != document.end()) {
@@ -1046,6 +1461,14 @@ fetch_request_v1 from_contract(const nlohmann::json& document) {
         if (const auto artifact = document.find("body_artifact");
             artifact != document.end()) {
             request.body_artifact = body_artifact_reference {
+                .storage_ref = artifact->at("storage_ref").get<std::string>(),
+                .sha256 = artifact->at("sha256").get<std::string>(),
+                .byte_length = artifact->at("byte_length").get<std::uint64_t>(),
+            };
+        }
+        if (const auto artifact = document.find("resume_artifact");
+            artifact != document.end()) {
+            request.resume_artifact = body_artifact_reference {
                 .storage_ref = artifact->at("storage_ref").get<std::string>(),
                 .sha256 = artifact->at("sha256").get<std::string>(),
                 .byte_length = artifact->at("byte_length").get<std::uint64_t>(),
@@ -1068,33 +1491,53 @@ nlohmann::ordered_json to_contract(const acquired_artifact_v1& artifact) {
         ? artifact_id_for(artifact.request_id)
         : artifact.artifact_id;
     document["request_id"] = artifact.request_id;
-    document["source_locator"] = artifact.source_url;
+    if (!artifact.door_id.empty()) {
+        document["door_id"] = artifact.door_id;
+    }
+    document["operation"] = std::string(to_string(artifact.operation));
+    document["source_locator"]
+        = receipt_safe_text(redact_url_query(artifact.source_url));
 
     ordered_json transport_metadata = ordered_json::object();
     transport_metadata["status"]
         = artifact.delivered() ? "delivered" : "failed";
     transport_metadata["attempts"] = artifact.attempts;
+    transport_metadata["delivery_mode"]
+        = std::string(to_string(artifact.delivered_via));
+    if (artifact.retry_after) {
+        transport_metadata["retry_after_ms"] = artifact.retry_after->count();
+    }
     if (!artifact.delivered()) {
         transport_metadata["error_code"]
             = std::string(status_name(artifact.status));
         transport_metadata["error_message"] = artifact.error_message.empty()
             ? "transport failed without additional detail"
-            : artifact.error_message;
+            : receipt_safe_text(artifact.error_message);
     }
     document["transport"] = std::move(transport_metadata);
 
     ordered_json response_metadata = ordered_json::object();
     response_metadata["status_code"] = artifact.http_status;
     if (!artifact.effective_url.empty()) {
-        response_metadata["effective_url"] = artifact.effective_url;
+        response_metadata["effective_url"]
+            = receipt_safe_text(redact_url_query(artifact.effective_url));
     }
     response_metadata["headers"] = ordered_json::array();
     for (const auto& header : artifact.response_headers) {
         response_metadata["headers"].push_back(
-            { { "name", header.name }, { "value", header.value } }
+            { { "name", receipt_safe_text(header.name) },
+              { "value",
+                sensitive_header_name(header.name)
+                    ? "[REDACTED]"
+                    : receipt_safe_text(header.value) } }
         );
     }
-    response_metadata["redirect_chain"] = artifact.redirect_chain;
+    response_metadata["redirect_chain"] = ordered_json::array();
+    for (const auto& redirect : artifact.redirect_chain) {
+        response_metadata["redirect_chain"].push_back(
+            receipt_safe_text(redact_url_query(redirect))
+        );
+    }
     response_metadata["started_at"] = rfc3339(artifact.started_at);
     response_metadata["completed_at"] = rfc3339(artifact.completed_at);
     document["response_metadata"] = std::move(response_metadata);
@@ -1106,7 +1549,7 @@ nlohmann::ordered_json to_contract(const acquired_artifact_v1& artifact) {
         artifact_reference["byte_length"] = artifact.byte_count;
         if (const auto content_type
             = response_content_type(artifact.response_headers)) {
-            artifact_reference["media_type"] = *content_type;
+            artifact_reference["media_type"] = receipt_safe_text(*content_type);
         }
         document["artifact"] = std::move(artifact_reference);
     }
@@ -1146,6 +1589,12 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
     acquired_artifact_v1 result;
     result.artifact_id = "artifact-invalid";
     result.request_id = request.request_id;
+    result.door_id = request.door_id;
+    result.operation = request.operation;
+    result.delivered_via
+        = request.operation == transport_operation::resume_download
+        ? delivery_mode::resumed
+        : delivery_mode::fetched;
     result.source_url = request.url;
     result.started_at = std::chrono::system_clock::now();
 
@@ -1163,10 +1612,21 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
         );
     }
     result.artifact_id = artifact_id_for(request.request_id);
-    if (request.timeout.count() <= 0 || request.max_bytes == 0U) {
+    if (request.timeout.count() <= 0 || request.connect_timeout.count() <= 0
+        || request.read_timeout.count() <= 0
+        || request.write_timeout.count() <= 0 || request.max_bytes == 0U) {
         return fail_result(
             std::move(result), transport_status::invalid_request,
-            "timeout and max_bytes must be positive"
+            "timeouts and max_bytes must be positive"
+        );
+    }
+    if (request.initial_retry_delay.count() < 0
+        || request.maximum_retry_delay.count() < 0
+        || request.total_retry_delay_budget.count() < 0
+        || request.initial_retry_delay > request.maximum_retry_delay) {
+        return fail_result(
+            std::move(result), transport_status::invalid_request,
+            "retry delays are negative or internally inconsistent"
         );
     }
     if (request.maximum_attempts == 0U
@@ -1195,6 +1655,24 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
         return fail_result(
             std::move(result), transport_status::invalid_request,
             "request cannot contain both inline and artifact body bytes"
+        );
+    }
+    if ((request.operation == transport_operation::resume_download)
+        != request.resume_artifact.has_value()) {
+        return fail_result(
+            std::move(result), transport_status::invalid_request,
+            "resume_download requires exactly one resume_artifact"
+        );
+    }
+    if (request.resume_artifact
+        && (request.method != http_method::get
+            || request.resume_artifact->byte_length == 0U
+            || request.resume_artifact->byte_length >= request.max_bytes
+            || request.resume_artifact->storage_ref
+                == request.target_artifact_ref)) {
+        return fail_result(
+            std::move(result), transport_status::invalid_request,
+            "resume artifact, method, target, or size is inconsistent"
         );
     }
     if (request.body.size()
@@ -1244,6 +1722,19 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
         if (!body_file) {
             return fail_result(
                 std::move(result), body_status, std::move(validation_error)
+            );
+        }
+    }
+    std::optional<verified_body_file> resume_file;
+    if (request.resume_artifact) {
+        transport_status resume_status = transport_status::storage_error;
+        resume_file = verified_body_file::open_and_verify(
+            artifact_root_, *request.resume_artifact, resume_status,
+            validation_error
+        );
+        if (!resume_file) {
+            return fail_result(
+                std::move(result), resume_status, std::move(validation_error)
             );
         }
     }
@@ -1301,14 +1792,35 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
     }
 
     receive_context received(staging->descriptor(), request.max_bytes);
+    progress_context progress {
+        .read_timeout = request.read_timeout,
+        .write_timeout = request.write_timeout,
+        .upload_expected = request.method == http_method::post
+            && (!request.body.empty()
+                || (body_file && body_file->length() != 0U)),
+    };
+    progress.reset();
     std::array<char, CURL_ERROR_SIZE> curl_error {};
     curl_easy_setopt(handle.get(), CURLOPT_ERRORBUFFER, curl_error.data());
     curl_easy_setopt(handle.get(), CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(handle.get(), CURLOPT_SHARE, curl_connection_share);
+    curl_easy_setopt(handle.get(), CURLOPT_MAXCONNECTS, 64L);
     curl_easy_setopt(handle.get(), CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(handle.get(), CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(
+        handle.get(), CURLOPT_XFERINFOFUNCTION, transfer_progress_callback
+    );
+    curl_easy_setopt(handle.get(), CURLOPT_XFERINFODATA, &progress);
     curl_easy_setopt(handle.get(), CURLOPT_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(handle.get(), CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(handle.get(), CURLOPT_HTTP_CONTENT_DECODING, 0L);
     curl_easy_setopt(handle.get(), CURLOPT_FAILONERROR, 0L);
+    curl_easy_setopt(
+        handle.get(), CURLOPT_CONNECTTIMEOUT_MS,
+        static_cast<long>(std::min<std::int64_t>(
+            request.connect_timeout.count(), std::numeric_limits<long>::max()
+        ))
+    );
     curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, body_callback);
     curl_easy_setopt(handle.get(), CURLOPT_WRITEDATA, &received);
     curl_easy_setopt(
@@ -1354,10 +1866,57 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
     } else {
         curl_easy_setopt(handle.get(), CURLOPT_HTTPGET, 1L);
     }
+    if (resume_file) {
+        curl_easy_setopt(
+            handle.get(), CURLOPT_RESUME_FROM_LARGE,
+            static_cast<curl_off_t>(resume_file->length())
+        );
+    }
 
     const auto deadline = std::chrono::steady_clock::now() + request.timeout;
     const parsed_url initial_url = *current;
     bool transfer_completed = false;
+    std::chrono::milliseconds retry_delay_spent { 0 };
+    auto prepare_staging = [&]() -> bool {
+        if (!staging->reset(validation_error)) {
+            return false;
+        }
+        received.reset();
+        if (!resume_file) {
+            return true;
+        }
+        if (!resume_file->rewind(validation_error)) {
+            return false;
+        }
+        std::array<char, 64U * 1024U> buffer {};
+        for (;;) {
+            const std::size_t count
+                = resume_file->read(buffer.data(), buffer.size());
+            if (resume_file->read_failed()) {
+                validation_error = resume_file->read_error();
+                return false;
+            }
+            if (count == 0U) {
+                break;
+            }
+            if (count > received.max_bytes
+                || received.byte_count > received.max_bytes - count
+                || !write_all(
+                    staging->descriptor(), buffer.data(), count,
+                    validation_error
+                )) {
+                if (validation_error.empty()) {
+                    validation_error = "resume artifact exceeds max_bytes";
+                }
+                return false;
+            }
+            received.hasher.update(
+                std::as_bytes(std::span(buffer.data(), count))
+            );
+            received.byte_count += static_cast<std::uint64_t>(count);
+        }
+        return true;
+    };
     for (std::size_t attempt = 1;
          attempt <= request.maximum_attempts && !transfer_completed;
          ++attempt) {
@@ -1365,15 +1924,11 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
         current = initial_url;
         result.redirect_chain.clear();
         std::size_t redirect_count = 0;
-        if (attempt != 1U) {
-            std::string reset_error;
-            if (!staging->reset(reset_error)) {
-                return fail_result(
-                    std::move(result), transport_status::storage_error,
-                    std::move(reset_error)
-                );
-            }
-            received.reset();
+        if (!prepare_staging()) {
+            return fail_result(
+                std::move(result), transport_status::storage_error,
+                std::move(validation_error)
+            );
         }
 
         for (;;) {
@@ -1397,6 +1952,7 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
             curl_easy_setopt(
                 handle.get(), CURLOPT_URL, current->normalized_url.c_str()
             );
+            progress.reset();
             curl_error.fill('\0');
             const CURLcode curl_status = curl_easy_perform(handle.get());
 
@@ -1440,14 +1996,37 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
             if (curl_status != CURLE_OK) {
                 const transport_status status
                     = curl_status == CURLE_OPERATION_TIMEDOUT
+                        || progress.read_timed_out || progress.write_timed_out
                     ? transport_status::timed_out
                     : transport_status::network_error;
-                const std::string message = curl_error.front() == '\0'
+                const std::string message = progress.read_timed_out
+                    ? "transport read-progress timeout expired"
+                    : progress.write_timed_out
+                    ? "transport write-progress timeout expired"
+                    : curl_error.front() == '\0'
                     ? curl_easy_strerror(curl_status)
                     : curl_error.data();
-                const bool may_retry = attempt < request.maximum_attempts
+                const bool may_retry = is_retryable_curl_status(curl_status)
+                    && attempt < request.maximum_attempts
                     && timeout_milliseconds(deadline) > 0;
                 if (may_retry) {
+                    const auto delay = retry_delay(request, attempt, {});
+                    if (retry_delay_spent + delay
+                        > request.total_retry_delay_budget) {
+                        return fail_result(
+                            std::move(result),
+                            transport_status::retry_budget_exhausted,
+                            "network retry delay budget was exhausted"
+                        );
+                    }
+                    if (delay.count() >= timeout_milliseconds(deadline)) {
+                        return fail_result(
+                            std::move(result), transport_status::timed_out,
+                            "transport deadline would expire during retry delay"
+                        );
+                    }
+                    retry_delay_spent += delay;
+                    std::this_thread::sleep_for(delay);
                     break;
                 }
                 return fail_result(std::move(result), status, message);
@@ -1502,15 +2081,42 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
                 result.redirect_chain.emplace_back(redirected->normalized_url);
                 current = std::move(redirected);
                 ++redirect_count;
-                std::string reset_error;
-                if (!staging->reset(reset_error)) {
+                if (!prepare_staging()) {
                     return fail_result(
                         std::move(result), transport_status::storage_error,
-                        std::move(reset_error)
+                        std::move(validation_error)
                     );
                 }
-                received.reset();
                 continue;
+            }
+            if (resume_file && result.http_status != 206) {
+                return fail_result(
+                    std::move(result), transport_status::network_error,
+                    "provider did not honor the resumable byte-range request"
+                );
+            }
+            result.retry_after = retry_after_delay(received.headers);
+            if (is_retryable_status(result.http_status)
+                && attempt < request.maximum_attempts) {
+                const auto delay
+                    = retry_delay(request, attempt, received.headers);
+                if (retry_delay_spent + delay
+                    > request.total_retry_delay_budget) {
+                    return fail_result(
+                        std::move(result),
+                        transport_status::retry_budget_exhausted,
+                        "HTTP retry delay budget was exhausted"
+                    );
+                }
+                if (delay.count() >= timeout_milliseconds(deadline)) {
+                    return fail_result(
+                        std::move(result), transport_status::timed_out,
+                        "transport deadline would expire during retry delay"
+                    );
+                }
+                retry_delay_spent += delay;
+                std::this_thread::sleep_for(delay);
+                break;
             }
             transfer_completed = true;
             break;
@@ -1525,6 +2131,12 @@ acquired_artifact_v1 transport::execute(const fetch_request_v1& request) const {
         );
     }
     const std::string digest = received.hasher.finish_hex();
+    if (request.expected_sha256 && digest != *request.expected_sha256) {
+        return fail_result(
+            std::move(result), transport_status::checksum_mismatch,
+            "delivered bytes do not match expected SHA-256"
+        );
+    }
     staging->close();
 
     ec.clear();

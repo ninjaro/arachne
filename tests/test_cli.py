@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -73,6 +74,76 @@ class OperationsCliTests(unittest.TestCase):
                 },
                 "lock_stale_seconds": 21600,
             },
+            "transport": {
+                "format_version": 1,
+                "defaults": {
+                    "timeouts": {
+                        "total_ms": 5000,
+                        "connect_ms": 1000,
+                        "pool_ms": 1000,
+                    },
+                    "retry": {
+                        "maximum_attempts": 2,
+                        "initial_delay_ms": 1,
+                        "maximum_delay_ms": 5,
+                        "total_delay_budget_ms": 10,
+                        "respect_retry_after": True,
+                    },
+                    "admission": {
+                        "maximum_concurrency": 2,
+                        "minimum_interval_ms": 0,
+                    },
+                    "cache": {"ttl_seconds": 60},
+                    "maximum_artifact_bytes": 1024 * 1024,
+                    "redirect_policy": {
+                        "follow": False,
+                        "maximum_redirects": 0,
+                        "allow_https_to_http": False,
+                    },
+                },
+                "doors": [
+                    {
+                        "door_id": "test-door",
+                        "endpoints": [
+                            {
+                                "endpoint_id": "public",
+                                "protocol": "rest",
+                                "base_url": "https://example.com/",
+                                "allowed_methods": ["GET"],
+                                "authentication": {"mode": "none"},
+                                "bulk_capable": False,
+                                "resumable_download": False,
+                                "write_enabled": False,
+                            }
+                        ],
+                    },
+                    {
+                        "door_id": "wikidata",
+                        "endpoints": [
+                            {
+                                "endpoint_id": "entity-api",
+                                "protocol": "rest",
+                                "base_url": "https://www.wikidata.org/w/api.php",
+                                "allowed_methods": ["POST"],
+                                "authentication": {"mode": "none"},
+                                "bulk_capable": False,
+                                "resumable_download": False,
+                                "write_enabled": False,
+                            },
+                            {
+                                "endpoint_id": "official-dumps",
+                                "protocol": "http_file",
+                                "base_url": "https://dumps.wikimedia.org/wikidatawiki/entities/",
+                                "allowed_methods": ["GET"],
+                                "authentication": {"mode": "none"},
+                                "bulk_capable": True,
+                                "resumable_download": True,
+                                "write_enabled": False,
+                            },
+                        ],
+                    },
+                ],
+            },
             "security": {"submission_max_bytes": 1024 * 1024},
             "publication": {
                 "require_reviewed_change": True,
@@ -121,6 +192,21 @@ class OperationsCliTests(unittest.TestCase):
                     "batch_id": name,
                     "batch_type": "mining",
                     "scope": {"label": "CLI integration test"},
+                    "works": [
+                        {
+                            "local_id": f"work-{name}",
+                            "titles": [
+                                {
+                                    "value": "Covered Work",
+                                    "language": "en",
+                                    "type": "english",
+                                    "preferred": True,
+                                }
+                            ],
+                            "medium": "film",
+                            "external_ids": {"wikidata": "Q1"},
+                        }
+                    ],
                 }
             ),
             encoding="utf-8",
@@ -140,6 +226,32 @@ class OperationsCliTests(unittest.TestCase):
             "CLI test batch",
         )
 
+    def approve(self, batch: Path) -> subprocess.CompletedProcess[str]:
+        submission_ref = f"local:{batch.stem}"
+        payload_sha256 = hashlib.sha256(batch.read_bytes()).hexdigest()
+        envelope_id = "env_" + hashlib.sha256(
+            (
+                "batch_envelope_v1\n"
+                + payload_sha256
+                + "\n"
+                + submission_ref
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        return self.run_cli(
+            "cocoon",
+            "transition",
+            "--config",
+            str(self.config_path),
+            "--envelope-id",
+            envelope_id,
+            "--to",
+            "accepted",
+            "--actor-ref",
+            "maintainer:test",
+            "--reason",
+            "explicit test approval",
+        )
+
     def test_capabilities_advertise_complete_operations_surface(self) -> None:
         result = self.run_cli("--capabilities-json")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -150,16 +262,76 @@ class OperationsCliTests(unittest.TestCase):
             {
                 "contract-validate",
                 "fetch",
+                "fetch-plan-translate",
                 "intake",
                 "cocoon-transition",
                 "inbox-baseline",
                 "inbox-verify",
                 "product-integrate",
+                "product-import-normalized",
                 "candidate-plan",
                 "candidate-rebuild",
                 "viewer-build",
             },
         )
+
+    def test_direct_normalized_product_import_needs_no_config_or_hashes(self) -> None:
+        manifest = self.root / "normalized.json"
+        database = self.root / "database" / "art-islands.sqlite"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "contract": "normalized_product_import_v1",
+                    "format_version": 1,
+                    "works": [
+                        {
+                            "local_id": "work-1",
+                            "canonical_id": "work_example_1954",
+                            "titles": [
+                                {
+                                    "value": "Covered Work",
+                                    "language": "en",
+                                    "type": "english",
+                                    "preferred": True,
+                                }
+                            ],
+                            "medium": "film",
+                            "external_ids": {"wikidata": "Q1"},
+                        }
+                    ],
+                    "creators": [],
+                    "credits": [],
+                    "tags": [],
+                    "references": [],
+                    "assertions": [],
+                    "manifestations": [],
+                    "concept_relations": [],
+                    "measurements": [],
+                    "financial_facts": [],
+                    "parent_guide_assertions": [],
+                    "remote_assets": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_cli(
+            "product",
+            "import-normalized",
+            "--manifest",
+            str(manifest),
+            "--database",
+            str(database),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        document = self.document(result)
+        self.assertEqual(document["command"], "product-import-normalized")
+        self.assertEqual(document["entity_count"], 1)
+        self.assertEqual(document["work_count"], 1)
+        self.assertEqual(document["assertion_count"], 0)
+        self.assertEqual(Path(document["database_path"]), database)
+        self.assertTrue(database.is_file())
 
     def test_contract_validate_reports_valid_and_invalid_documents(self) -> None:
         batch = self.valid_batch()
@@ -203,6 +375,12 @@ class OperationsCliTests(unittest.TestCase):
         queued = list(self.queue.iterdir())
         self.assertEqual(len(queued), 1)
         self.assertEqual(queued[0].read_bytes(), before)
+
+        approval = self.approve(batch)
+        self.assertEqual(approval.returncode, 0, approval.stderr)
+        approved = self.document(approval)["envelope"]
+        self.assertEqual(approved["status"], "accepted")
+        self.assertEqual(approved["accepted_by"], "maintainer:test")
 
         failed = self.intake(self.root / "missing.json")
         self.assertNotEqual(failed.returncode, 0)
@@ -342,6 +520,10 @@ class OperationsCliTests(unittest.TestCase):
                     "contract": "fetch_request_v1",
                     "format_version": 1,
                     "request_id": "unsafe-fetch",
+                    "door_id": "test-door",
+                    "endpoint_id": "public",
+                    "operation": "point_lookup",
+                    "freshness_policy": "fresh_required",
                     "locator": "https://example.com/data",
                     "method": "GET",
                     "redirect_policy": {
@@ -396,6 +578,105 @@ class OperationsCliTests(unittest.TestCase):
             invalid_document,
         )
 
+    def test_fetch_plan_translation_consumes_selectors_and_chunks_entities(self) -> None:
+        plan = self.root / "fetch-plan.json"
+        plan.write_text(
+            json.dumps(
+                {
+                    "contract": "fetch_plan_v1",
+                    "format_version": 1,
+                    "plan_id": "profile-enrichment-plan",
+                    "source": "wikidata",
+                    "requests": [
+                        {
+                            "request_id": "profiles",
+                            "locator": "https://www.wikidata.org/w/api.php",
+                            "purpose": "bounded profile enrichment",
+                            "entities": [f"Q{index}" for index in range(1, 56)],
+                            "fields": ["labels", "gender", "occupation"],
+                            "follow_up": True,
+                        }
+                    ],
+                    "created_at": "2026-07-20T03:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        controls = self.root / "fetch-controls"
+        result = self.run_cli(
+            "fetch",
+            "plan",
+            "--config",
+            str(self.config_path),
+            "--plan",
+            str(plan),
+            "--output-directory",
+            str(controls),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        document = self.document(result)
+        self.assertEqual(document["request_count"], 2)
+        self.assertEqual(len(list(controls.glob("*.json"))), 2)
+        bodies = sorted((self.root / "artifacts" / "fetch-bodies").rglob("*.form"))
+        self.assertEqual(len(bodies), 2)
+        first_body = bodies[0].read_text(encoding="utf-8")
+        self.assertIn("action=wbgetentities", first_body)
+        self.assertIn("props=claims%7Cdescriptions%7Clabels", first_body)
+        self.assertEqual(first_body.count("Q"), 50)
+        for control in document["controls"]:
+            request = control["request"]
+            self.assertEqual(request["door_id"], "wikidata")
+            self.assertEqual(request["endpoint_id"], "entity-api")
+            self.assertEqual(request["freshness_policy"], "fresh_required")
+            body_ref = request["body_artifact"]["storage_ref"]
+            body_path = self.root / "artifacts" / body_ref
+            self.assertEqual(
+                hashlib.sha256(body_path.read_bytes()).hexdigest(),
+                request["body_artifact"]["sha256"],
+            )
+
+    def test_bulk_fetch_translation_preserves_decompression_encoding(self) -> None:
+        plan = self.root / "bulk-fetch-plan.json"
+        plan.write_text(
+            json.dumps(
+                {
+                    "contract": "fetch_plan_v1",
+                    "format_version": 1,
+                    "plan_id": "wikidata-bulk-plan",
+                    "source": "wikidata",
+                    "requests": [
+                        {
+                            "request_id": "wikidata-official-dump",
+                            "locator": "https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.bz2",
+                            "purpose": "complete snapshot refresh",
+                            "follow_up": False,
+                        }
+                    ],
+                    "created_at": "2026-07-20T03:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        controls = self.root / "bulk-fetch-controls"
+
+        result = self.run_cli(
+            "fetch",
+            "plan",
+            "--config",
+            str(self.config_path),
+            "--plan",
+            str(plan),
+            "--output-directory",
+            str(controls),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = self.document(result)["controls"][0]["request"]
+        self.assertEqual(request["operation"], "bulk_snapshot")
+        self.assertEqual(request["endpoint_id"], "official-dumps")
+        self.assertTrue(request["output_ref"].endswith(".json.bz2"))
+
     def test_product_threshold_is_noop_and_force_processes_queue(self) -> None:
         batch = self.valid_batch("force-batch")
         intake = self.intake(batch)
@@ -417,7 +698,38 @@ class OperationsCliTests(unittest.TestCase):
         waiting_document = self.document(waiting)
         self.assertFalse(waiting_document["processed"])
         self.assertEqual(waiting_document["reason"], "queued_batch_threshold_not_met")
+        self.assertEqual(waiting_document["queued"], 0)
         self.assertTrue(queued[0].is_file())
+
+        unapproved = self.run_cli(
+            "product",
+            "integrate",
+            "--config",
+            str(self.config_path),
+            "--logical-date",
+            "2026-07-18",
+            "--run-id",
+            "unapproved-force",
+            "--force",
+        )
+        self.assertEqual(unapproved.returncode, 0, unapproved.stderr)
+        self.assertEqual(self.document(unapproved)["reason"], "queue_empty")
+        self.assertTrue(queued[0].is_file())
+
+        approval = self.approve(batch)
+        self.assertEqual(approval.returncode, 0, approval.stderr)
+        eligible_waiting = self.run_cli(
+            "product",
+            "integrate",
+            "--config",
+            str(self.config_path),
+            "--logical-date",
+            "2026-07-18",
+            "--run-id",
+            "eligible-threshold-noop",
+        )
+        self.assertEqual(eligible_waiting.returncode, 0, eligible_waiting.stderr)
+        self.assertEqual(self.document(eligible_waiting)["queued"], 1)
 
         forced = self.run_cli(
             "product",
@@ -435,13 +747,42 @@ class OperationsCliTests(unittest.TestCase):
         self.assertTrue(forced_document["processed"])
         self.assertTrue(forced_document["forced"])
         self.assertEqual(forced_document["aggregate"]["successful"], 1)
+        manifest_path = Path(forced_document["run_manifest_path"])
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest, forced_document["run_manifest"])
+        self.assertEqual(manifest["run_id"], "forced-run")
+        self.assertEqual(manifest["graph_domain"], "product_graph")
+        self.assertTrue(manifest["inputs"])
+        self.assertTrue(manifest["outputs"])
+        self.assertTrue(manifest["structural_validation"]["passed"])
         self.assertFalse(queued[0].exists())
         self.assertEqual(list(self.legacy.iterdir()), [])
+
+        relocated = json.loads(self.config_path.read_text(encoding="utf-8"))
+        relocated["paths"]["lock_root"] = str(self.root / "retry-locks")
+        relocated["paths"]["site_output"] = str(self.root / "retry-site")
+        self.config_path.write_text(json.dumps(relocated), encoding="utf-8")
+        retry = self.run_cli(
+            "product",
+            "integrate",
+            "--config",
+            str(self.config_path),
+            "--logical-date",
+            "2026-07-19",
+            "--run-id",
+            "forced-run",
+            "--force",
+        )
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(self.document(retry)["reason"], "run_already_succeeded")
 
     def test_candidate_plan_rebuild_and_viewer_build_end_to_end(self) -> None:
         batch = self.valid_batch("pipeline-batch")
         intake = self.intake(batch)
         self.assertEqual(intake.returncode, 0, intake.stderr)
+        approval = self.approve(batch)
+        self.assertEqual(approval.returncode, 0, approval.stderr)
         product = self.run_cli(
             "product",
             "integrate",
@@ -456,6 +797,11 @@ class OperationsCliTests(unittest.TestCase):
         self.assertEqual(product.returncode, 0, product.stderr)
         product_snapshot = self.document(product)["snapshot"]
 
+        source_snapshot = self.root / "artifacts" / "sources" / "source-1.json"
+        source_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        source_bytes = b"immutable external source snapshot\n"
+        source_snapshot.write_bytes(source_bytes)
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
         external_graph = self.root / "external-graph.json"
         external_graph.write_text(
             json.dumps(
@@ -465,7 +811,7 @@ class OperationsCliTests(unittest.TestCase):
                     "source_snapshot": {
                         "snapshot_id": "source-1",
                         "storage_ref": "sources/source-1.json",
-                        "sha256": "a" * 64,
+                        "sha256": source_sha256,
                     },
                     "works": [
                         {"id": "Q1", "label": "One", "covered": True},
@@ -529,21 +875,26 @@ class OperationsCliTests(unittest.TestCase):
             "pipeline-candidate",
         )
         self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
-        candidate_snapshot = self.document(rebuilt)["snapshot"]
+        rebuilt_document = self.document(rebuilt)
+        candidate_snapshot = rebuilt_document["snapshot"]
+        candidate_manifest_path = Path(rebuilt_document["run_manifest_path"])
+        self.assertTrue(candidate_manifest_path.is_file())
+        candidate_manifest = json.loads(
+            candidate_manifest_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(candidate_manifest, rebuilt_document["run_manifest"])
+        self.assertEqual(candidate_manifest["graph_domain"], "research_candidate_graph")
+        self.assertEqual(len(candidate_manifest["inputs"]), 4)
 
         viewer = self.run_cli(
             "viewer",
             "build",
             "--config",
             str(self.config_path),
-            "--product-export",
-            product_snapshot["export_path"],
-            "--product-snapshot-id",
-            product_snapshot["snapshot_id"],
-            "--candidate-export",
-            candidate_snapshot["export_path"],
-            "--candidate-snapshot-id",
-            candidate_snapshot["snapshot_id"],
+            "--product-snapshot",
+            product_snapshot["metadata_path"],
+            "--candidate-snapshot",
+            candidate_snapshot["metadata_path"],
         )
         self.assertEqual(viewer.returncode, 0, viewer.stderr)
         viewer_document = self.document(viewer)

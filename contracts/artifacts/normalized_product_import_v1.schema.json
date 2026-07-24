@@ -1,0 +1,1062 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/normalized_product_import_v1.schema.json",
+  "title": "Corpus-normalized product import v1",
+  "description": "Closed, corpus-derived transfer artifact consumed by Penelope after legacy batch discovery and reconciliation. This is not a public miner intake contract.",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "creators",
+    "works",
+    "tags",
+    "manifestations",
+    "measurements",
+    "financial_facts",
+    "remote_assets",
+    "credits",
+    "references",
+    "assertions",
+    "concept_relations",
+    "parent_guide_assertions"
+  ],
+  "properties": {
+    "contract": {
+      "const": "normalized_product_import_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "creators": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/creator"
+      }
+    },
+    "works": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/work"
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/concept"
+      }
+    },
+    "manifestations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/manifestation"
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/measurement"
+      }
+    },
+    "financial_facts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/financial_fact"
+      }
+    },
+    "remote_assets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/remote_asset"
+      }
+    },
+    "credits": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/credit"
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reference"
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/work_concept_assertion"
+      }
+    },
+    "concept_relations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/concept_relation"
+      }
+    },
+    "parent_guide_assertions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/parent_guide_assertion"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "canonical_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "year": {
+      "type": "integer",
+      "minimum": -9999,
+      "maximum": 9999
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "external_ids": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/non_empty_string"
+              },
+              "canonical_url": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "name": {
+      "type": "object",
+      "required": [
+        "type",
+        "value",
+        "preferred"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "original",
+            "english",
+            "transliteration",
+            "translation",
+            "alias",
+            "credited"
+          ]
+        },
+        "language": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "preferred": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "creator": {
+      "type": "object",
+      "required": [
+        "local_id",
+        "canonical_id",
+        "entity_type"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "canonical_id": {
+          "$ref": "#/$defs/canonical_id"
+        },
+        "external_ids": {
+          "$ref": "#/$defs/external_ids"
+        },
+        "entity_type": {
+          "enum": [
+            "person",
+            "organization",
+            "group"
+          ]
+        },
+        "birth_year": {
+          "$ref": "#/$defs/year"
+        },
+        "death_year": {
+          "$ref": "#/$defs/year"
+        },
+        "name": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "name"
+          ]
+        },
+        {
+          "required": [
+            "names"
+          ],
+          "properties": {
+            "names": {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "preferred"
+                ],
+                "properties": {
+                  "preferred": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "date_text": {
+      "type": "string",
+      "pattern": "^-?[0-9]{1,4}(-[0-9]{2}-[0-9]{2})?$"
+    },
+    "date": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/date_text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/date_text"
+            },
+            "to": {
+              "$ref": "#/$defs/date_text"
+            },
+            "qualifier": {
+              "type": "string"
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "from"
+              ]
+            },
+            {
+              "required": [
+                "to"
+              ]
+            }
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "production_terms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/non_empty_string"
+      }
+    },
+    "production_info": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "materials": {
+          "$ref": "#/$defs/production_terms"
+        },
+        "instruments": {
+          "$ref": "#/$defs/production_terms"
+        },
+        "tools": {
+          "$ref": "#/$defs/production_terms"
+        },
+        "supports": {
+          "$ref": "#/$defs/production_terms"
+        },
+        "processes": {
+          "$ref": "#/$defs/production_terms"
+        },
+        "formats": {
+          "$ref": "#/$defs/production_terms"
+        }
+      },
+      "additionalProperties": false
+    },
+    "work": {
+      "type": "object",
+      "required": [
+        "local_id",
+        "canonical_id",
+        "titles",
+        "medium"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "canonical_id": {
+          "$ref": "#/$defs/canonical_id"
+        },
+        "external_ids": {
+          "$ref": "#/$defs/external_ids"
+        },
+        "titles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/name"
+          },
+          "contains": {
+            "type": "object",
+            "required": [
+              "preferred"
+            ],
+            "properties": {
+              "preferred": {
+                "const": true
+              }
+            }
+          }
+        },
+        "medium": {
+          "enum": [
+            "film",
+            "short_film",
+            "television",
+            "novel",
+            "novella",
+            "short_story",
+            "poetry",
+            "play",
+            "essay",
+            "album",
+            "single",
+            "composition",
+            "painting",
+            "print",
+            "engraving",
+            "drawing",
+            "sculpture",
+            "installation",
+            "photography",
+            "mixed_media"
+          ]
+        },
+        "date": {
+          "$ref": "#/$defs/date"
+        },
+        "production_info": {
+          "$ref": "#/$defs/production_info"
+        },
+        "language_code": {
+          "type": "string"
+        },
+        "country_code": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "concept": {
+      "type": "object",
+      "required": [
+        "local_id",
+        "name",
+        "type",
+        "slug"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "external_ids": {
+          "$ref": "#/$defs/external_ids"
+        },
+        "name": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "type": {
+          "enum": [
+            "genre",
+            "style",
+            "theme",
+            "keyword",
+            "motif",
+            "trope",
+            "phobia",
+            "taboo",
+            "technique",
+            "movement",
+            "setting",
+            "mood",
+            "content_warning"
+          ]
+        },
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "manifestation": {
+      "type": "object",
+      "required": [
+        "local_id",
+        "canonical_id",
+        "work",
+        "type",
+        "label"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "canonical_id": {
+          "$ref": "#/$defs/canonical_id"
+        },
+        "external_ids": {
+          "$ref": "#/$defs/external_ids"
+        },
+        "work": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "type": {
+          "enum": [
+            "edition",
+            "translation",
+            "release",
+            "pressing",
+            "cut",
+            "restoration",
+            "reissue"
+          ]
+        },
+        "release_year": {
+          "$ref": "#/$defs/year"
+        },
+        "region_code": {
+          "type": "string"
+        },
+        "language_code": {
+          "type": "string"
+        },
+        "label": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "measurement": {
+      "type": "object",
+      "required": [
+        "entity",
+        "type",
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "type": {
+          "enum": [
+            "duration",
+            "height",
+            "width",
+            "depth",
+            "pages"
+          ]
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unit": {
+          "enum": [
+            "seconds",
+            "millimetres",
+            "pages"
+          ]
+        },
+        "qualifier": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "amount_range": {
+      "type": "object",
+      "required": [
+        "min"
+      ],
+      "properties": {
+        "min": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "financial_fact": {
+      "type": "object",
+      "required": [
+        "work",
+        "type",
+        "amount",
+        "currency",
+        "estimated"
+      ],
+      "properties": {
+        "work": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "type": {
+          "const": "budget"
+        },
+        "amount": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "$ref": "#/$defs/amount_range"
+            }
+          ]
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 3
+        },
+        "value_year": {
+          "type": "integer"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "estimated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "remote_asset": {
+      "type": "object",
+      "required": [
+        "entity",
+        "provider"
+      ],
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "provider": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "remote_key": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "direct_url": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "resolver_rule": {
+          "type": "string"
+        },
+        "rights_note": {
+          "type": "string"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "remote_key"
+          ]
+        },
+        {
+          "required": [
+            "direct_url"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "credit": {
+      "type": "object",
+      "required": [
+        "work",
+        "creator",
+        "role",
+        "importance"
+      ],
+      "properties": {
+        "work": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "creator": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "role": {
+          "enum": [
+            "author",
+            "director",
+            "screenwriter",
+            "producer",
+            "actor",
+            "composer",
+            "performer",
+            "artist",
+            "engraver",
+            "sculptor",
+            "photographer",
+            "editor",
+            "cinematographer",
+            "production_company",
+            "publisher",
+            "record_label",
+            "band"
+          ]
+        },
+        "importance": {
+          "enum": [
+            "primary",
+            "key",
+            "supporting"
+          ]
+        },
+        "credit_order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "credited_as": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "archive": {
+      "type": "object",
+      "required": [
+        "storage_ref",
+        "sha256",
+        "scope"
+      ],
+      "properties": {
+        "storage_ref": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{64}$"
+        },
+        "media_type": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "format": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "scope": {
+          "enum": [
+            "full",
+            "article_text",
+            "excerpt_bundle"
+          ]
+        },
+        "rights_note": {
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "media_type"
+          ]
+        },
+        {
+          "required": [
+            "format"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "reference": {
+      "type": "object",
+      "required": [
+        "ref_id",
+        "source_type"
+      ],
+      "properties": {
+        "ref_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "source_type": {
+          "enum": [
+            "book",
+            "article",
+            "catalogue",
+            "web_page",
+            "interview",
+            "database",
+            "video",
+            "audio",
+            "PDF"
+          ]
+        },
+        "title": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "bibliography": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "publisher": {
+          "type": "string"
+        },
+        "publication_date": {
+          "type": "string"
+        },
+        "url": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "doi": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "isbn": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "archive": {
+          "$ref": "#/$defs/archive"
+        }
+      },
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": [
+                "doi"
+              ]
+            },
+            {
+              "required": [
+                "isbn"
+              ]
+            },
+            {
+              "required": [
+                "url"
+              ]
+            },
+            {
+              "required": [
+                "bibliography"
+              ]
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "required": [
+                "title"
+              ]
+            },
+            {
+              "required": [
+                "bibliography"
+              ]
+            },
+            {
+              "required": [
+                "url"
+              ]
+            }
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "ref_id",
+        "quote",
+        "stance"
+      ],
+      "properties": {
+        "ref_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "quote": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "locator": {
+          "type": "object"
+        },
+        "language": {
+          "type": "string"
+        },
+        "translation": {
+          "type": "string"
+        },
+        "stance": {
+          "enum": [
+            "supports",
+            "contradicts",
+            "contextualizes"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "work_concept_assertion": {
+      "type": "object",
+      "required": [
+        "work",
+        "tag",
+        "relation",
+        "weight",
+        "evidence"
+      ],
+      "properties": {
+        "work": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "tag": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "relation": {
+          "enum": [
+            "exemplifies",
+            "contains",
+            "anticipates",
+            "influenced_by",
+            "influences",
+            "revives",
+            "parodies",
+            "deconstructs",
+            "associated_with"
+          ]
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "historical_role": {
+          "enum": [
+            "formative",
+            "canonical",
+            "transitional",
+            "hybrid",
+            "revival",
+            "late_derivative",
+            "peripheral",
+            "precursor"
+          ]
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "concept_relation": {
+      "type": "object",
+      "required": [
+        "subject",
+        "object",
+        "relation",
+        "evidence"
+      ],
+      "properties": {
+        "subject": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "object": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "relation": {
+          "enum": [
+            "broader_than",
+            "narrower_than",
+            "derived_from",
+            "precursor_of",
+            "hybrid_of",
+            "revival_of",
+            "regional_variant_of",
+            "influenced_by",
+            "opposes",
+            "alias_of"
+          ]
+        },
+        "strength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "from_year": {
+          "$ref": "#/$defs/year"
+        },
+        "to_year": {
+          "$ref": "#/$defs/year"
+        },
+        "region_code": {
+          "type": "string"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "parent_guide_assertion": {
+      "type": "object",
+      "required": [
+        "work",
+        "tag",
+        "category",
+        "intensity",
+        "explicitness",
+        "frequency",
+        "centrality",
+        "realism",
+        "spoiler_level",
+        "evidence"
+      ],
+      "properties": {
+        "work": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "tag": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "category": {
+          "enum": [
+            "violence",
+            "sex_nudity",
+            "language",
+            "drugs",
+            "frightening",
+            "self_harm",
+            "discrimination",
+            "abuse",
+            "taboo"
+          ]
+        },
+        "intensity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "explicitness": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "frequency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "centrality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "realism": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "spoiler_level": {
+          "enum": [
+            "none",
+            "mild",
+            "major"
+          ]
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

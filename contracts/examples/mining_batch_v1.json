@@ -1,0 +1,120 @@
+{
+  "format_version": 1,
+  "batch_id": "film-atomic-monsters-001",
+  "batch_type": "mining",
+  "scope": {
+    "label": "Japanese atomic-monster cinema",
+    "notes": "A compact example with assertion-specific evidence."
+  },
+  "creators": [
+    {
+      "local_id": "creator-1",
+      "name": "Example Director",
+      "entity_type": "person",
+      "external_ids": {
+        "wikidata": "Q123"
+      }
+    }
+  ],
+  "works": [
+    {
+      "local_id": "work-1",
+      "titles": [
+        {
+          "value": "Example Film",
+          "language": "en",
+          "type": "english",
+          "preferred": true
+        }
+      ],
+      "medium": "film",
+      "date": "1954",
+      "external_ids": {
+        "wikidata": "Q456"
+      }
+    }
+  ],
+  "credits": [
+    {
+      "work": "work-1",
+      "creator": "creator-1",
+      "role": "director",
+      "importance": "primary"
+    }
+  ],
+  "tags": [
+    {
+      "local_id": "tag-1",
+      "name": "atomic monster film",
+      "type": "genre"
+    },
+    {
+      "local_id": "tag-2",
+      "name": "nuclear anxiety",
+      "type": "theme"
+    }
+  ],
+  "references": [
+    {
+      "ref_id": "ref-1",
+      "bibliography": "Example Author. Example Article.",
+      "url": "https://example.org/article",
+      "archive": {
+        "storage_ref": "archives/ref-1.html",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "format": "text/html"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "work": "work-1",
+      "tag": "tag-1",
+      "relation": "exemplifies",
+      "weight": 95,
+      "historical_role": "canonical",
+      "confidence": 0.95,
+      "evidence": [
+        {
+          "ref_id": "ref-1",
+          "quote": "A short verbatim passage supporting the assertion.",
+          "locator": {
+            "section": "Example section",
+            "paragraph": 4
+          }
+        }
+      ]
+    }
+  ],
+  "manifestations": [
+    {
+      "local_id": "manifestation-1",
+      "work": "work-1",
+      "label": "Original theatrical release"
+    }
+  ],
+  "concept_relations": [
+    {
+      "source": "tag-1",
+      "target": "tag-2",
+      "relation": "historically_precedes"
+    }
+  ],
+  "measurements": [
+    {
+      "work": "work-1",
+      "kind": "running_time",
+      "value": 96,
+      "unit": "minutes"
+    }
+  ],
+  "review_notes": [
+    "Verify the original-release manifestation against the archive."
+  ],
+  "follow_up_candidates": [
+    {
+      "label": "Related sequel",
+      "reason": "Shared creator and concept lineage"
+    }
+  ]
+}

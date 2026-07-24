@@ -14,7 +14,13 @@ from urllib.parse import urlsplit
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
-SUPPORTED_SUFFIXES = {".json", ".zip"}
+SUPPORTED_SUFFIXES = {".json"}
+ENDPOINT_BY_HOST = {
+    "github.com": "github",
+    "user-images.githubusercontent.com": "user-images",
+    "objects.githubusercontent.com": "objects",
+    "github-production-user-asset-6210df.s3.amazonaws.com": "user-assets",
+}
 
 
 class RequestError(RuntimeError):
@@ -46,12 +52,13 @@ def main() -> int:
             or parsed.username
             or parsed.password
             or parsed.hostname.lower() not in allowed_hosts
+            or parsed.hostname.lower() not in ENDPOINT_BY_HOST
         ):
             raise RequestError("attachment URL violates the configured HTTPS host policy")
         filename = SAFE_NAME.sub("_", str(issue["attachment_name"])).strip("._")
         suffix = Path(filename).suffix.lower()
         if not filename or suffix not in SUPPORTED_SUFFIXES:
-            raise RequestError("attachment filename must end in .json or .zip")
+            raise RequestError("the provisional GitHub attachment must end in .json")
 
         identity = f"{issue['submission_ref']}\0{url}".encode("utf-8")
         digest = hashlib.sha256(identity).hexdigest()
@@ -60,6 +67,10 @@ def main() -> int:
             "contract": "fetch_request_v1",
             "format_version": 1,
             "request_id": request_id,
+            "door_id": "github-attachments",
+            "endpoint_id": ENDPOINT_BY_HOST[parsed.hostname.lower()],
+            "operation": "point_lookup",
+            "freshness_policy": "fresh_required",
             "locator": url,
             "method": "GET",
             "pagination": {"mode": "none"},

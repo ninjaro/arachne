@@ -1,0 +1,17 @@
+{
+  "contract": "site_bundle_v1",
+  "format_version": 1,
+  "bundle_id": "site-20260718-01",
+  "projection_id": "projection-20260718-01",
+  "product_snapshot_id": "product-20260718-01",
+  "candidate_snapshot_id": "candidate-20260718-01",
+  "viewer_version": "ariadne-viewer-1.0.0",
+  "entrypoint": "index.html",
+  "bundle": {
+    "storage_ref": "site/site-20260718-01.tar.zst",
+    "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+    "byte_length": 3145728,
+    "media_type": "application/zstd"
+  },
+  "generated_at": "2026-07-18T05:45:00Z"
+}

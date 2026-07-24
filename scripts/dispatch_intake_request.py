@@ -8,7 +8,7 @@ import hashlib
 import json
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def parser() -> argparse.ArgumentParser:
@@ -46,10 +46,28 @@ def main() -> int:
         ):
             raise ValueError("acquired artifact does not belong to the intake request")
 
-        artifact_root = Path(config["paths"]["artifact_store"]).resolve(strict=True)
-        unresolved_payload = artifact_root / acquired["artifact"]["storage_ref"]
-        if unresolved_payload.is_symlink():
-            raise ValueError("acquired payload must not be a symbolic link")
+        configured_root = Path(config["paths"]["artifact_store"])
+        if configured_root.is_symlink():
+            raise ValueError("artifact store root must not be a symbolic link")
+        artifact_root = configured_root.resolve(strict=True)
+        storage_ref = acquired["artifact"]["storage_ref"]
+        if (
+            not isinstance(storage_ref, str)
+            or not storage_ref
+            or "\\" in storage_ref
+            or ":" in storage_ref
+            or PurePosixPath(storage_ref).is_absolute()
+            or any(
+                part in {"", ".", ".."}
+                for part in PurePosixPath(storage_ref).parts
+            )
+        ):
+            raise ValueError("acquired payload has an unsafe storage reference")
+        unresolved_payload = artifact_root
+        for part in PurePosixPath(storage_ref).parts:
+            unresolved_payload /= part
+            if unresolved_payload.is_symlink():
+                raise ValueError("acquired payload traverses a symbolic link")
         payload = unresolved_payload.resolve(strict=True)
         payload.relative_to(artifact_root)
         if not payload.is_file():

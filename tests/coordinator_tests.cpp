@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -88,6 +89,21 @@ sqlite_integer(const std::filesystem::path& path, const char* sql) {
     return value;
 }
 
+arachne::coordination::envelope_record approve_for_processing(
+    arachne::coordination::operational_ledger& ledger,
+    const arachne::coordination::envelope_record& envelope
+) {
+    const auto accepted = ledger.transition(
+        envelope.envelope_id, arachne::coordination::cocoon_status::accepted,
+        "maintainer:test", "explicit test approval"
+    );
+    return ledger.transition(
+        accepted.envelope_id,
+        arachne::coordination::cocoon_status::waiting_processing,
+        "workflow:test", "approved cocoon entered processing queue"
+    );
+}
+
 } // namespace
 
 TEST(Coordinator, IntakePreservesBytesAndRecordsAuditableLifecycle) {
@@ -115,8 +131,7 @@ TEST(Coordinator, IntakePreservesBytesAndRecordsAuditableLifecycle) {
         }
     );
     EXPECT_EQ(
-        envelope.status,
-        arachne::coordination::cocoon_status::waiting_processing
+        envelope.status, arachne::coordination::cocoon_status::waiting_approval
     );
     EXPECT_TRUE(
         arachne::coordination::path_is_within(envelope.payload_ref, inbox)
@@ -126,6 +141,21 @@ TEST(Coordinator, IntakePreservesBytesAndRecordsAuditableLifecycle) {
     EXPECT_EQ(envelope.payload_sha256.size(), 64U);
     ASSERT_EQ(ledger.history(envelope.envelope_id).size(), 1U);
 
+    const auto accepted = ledger.transition(
+        envelope.envelope_id, arachne::coordination::cocoon_status::accepted,
+        "maintainer:reviewer", "reviewed and approved"
+    );
+    EXPECT_EQ(accepted.status, arachne::coordination::cocoon_status::accepted);
+    EXPECT_EQ(accepted.accepted_by, "maintainer:reviewer");
+    const auto waiting = ledger.transition(
+        envelope.envelope_id,
+        arachne::coordination::cocoon_status::waiting_processing,
+        "workflow:run-1"
+    );
+    EXPECT_EQ(
+        waiting.status, arachne::coordination::cocoon_status::waiting_processing
+    );
+
     const auto processing = ledger.transition(
         envelope.envelope_id, arachne::coordination::cocoon_status::processing,
         "workflow:run-1"
@@ -133,7 +163,7 @@ TEST(Coordinator, IntakePreservesBytesAndRecordsAuditableLifecycle) {
     EXPECT_EQ(
         processing.status, arachne::coordination::cocoon_status::processing
     );
-    EXPECT_EQ(ledger.history(envelope.envelope_id).size(), 2U);
+    EXPECT_EQ(ledger.history(envelope.envelope_id).size(), 4U);
     EXPECT_TRUE(ledger.history(envelope.envelope_id).back().reason.empty());
 }
 
@@ -154,8 +184,7 @@ TEST(Coordinator, OpaquePayloadIsQueuedWithoutSpeculativeValidation) {
         }
     );
     EXPECT_EQ(
-        envelope.status,
-        arachne::coordination::cocoon_status::waiting_processing
+        envelope.status, arachne::coordination::cocoon_status::waiting_approval
     );
     EXPECT_TRUE(std::filesystem::is_regular_file(envelope.payload_ref));
     EXPECT_EQ(read(envelope.payload_ref), "{not-json");
@@ -241,10 +270,14 @@ TEST(Coordinator, AccumulationAndLogicalDateGuardsAreDeterministic) {
         }
     );
     EXPECT_EQ(
-        envelope.status,
-        arachne::coordination::cocoon_status::waiting_processing
+        envelope.status, arachne::coordination::cocoon_status::waiting_approval
     );
     EXPECT_FALSE(ledger.should_integrate({}));
+    const auto accepted = ledger.transition(
+        envelope.envelope_id, arachne::coordination::cocoon_status::accepted,
+        "maintainer:test", "explicit test approval"
+    );
+    EXPECT_EQ(accepted.status, arachne::coordination::cocoon_status::accepted);
     EXPECT_TRUE(ledger.should_integrate({ .accepted_count = 1 }));
     EXPECT_FALSE(ledger.should_integrate({ .accepted_count = 2 }));
 
@@ -317,23 +350,22 @@ TEST(Coordinator, ProductActivationReconciliationIsAtomicAndIdempotent) {
     arachne::coordination::operational_ledger ledger(ledger_path);
     std::vector<std::string> envelope_ids;
     for (int index = 0; index < 2; ++index) {
-        const auto source
-            = temporary.path() / ("reconcile-" + std::to_string(index) + ".bin");
+        const auto source = temporary.path()
+            / ("reconcile-" + std::to_string(index) + ".bin");
         write(source, "reconciliation payload " + std::to_string(index));
-        envelope_ids.push_back(
-            ledger
-                .intake(
-                    {
-                        .source_path = source,
-                        .inbox_root = queue,
-                        .submission_ref
-                        = "reconcile:" + std::to_string(index),
-                        .title = "Reconciliation payload",
-                        .supersedes = std::nullopt,
-                    }
-                )
-                .envelope_id
+        const auto envelope = approve_for_processing(
+            ledger,
+            ledger.intake(
+                {
+                    .source_path = source,
+                    .inbox_root = queue,
+                    .submission_ref = "reconcile:" + std::to_string(index),
+                    .title = "Reconciliation payload",
+                    .supersedes = std::nullopt,
+                }
+            )
         );
+        envelope_ids.push_back(envelope.envelope_id);
     }
     const std::string hash(64, 'd');
     ASSERT_TRUE(ledger.claim_logical_run(
@@ -351,8 +383,7 @@ TEST(Coordinator, ProductActivationReconciliationIsAtomicAndIdempotent) {
         ));
     }
     static_cast<void>(ledger.transition(
-        envelope_ids.front(),
-        arachne::coordination::cocoon_status::integrated,
+        envelope_ids.front(), arachne::coordination::cocoon_status::integrated,
         "workflow:legacy-partial-finish"
     ));
 
@@ -395,19 +426,19 @@ TEST(Coordinator, InterruptedProductRunCanResumeAndCleanupConverges) {
         const auto source
             = temporary.path() / ("resume-" + std::to_string(index) + ".bin");
         write(source, "resume payload " + std::to_string(index));
-        envelope_ids.push_back(
-            ledger
-                .intake(
-                    {
-                        .source_path = source,
-                        .inbox_root = queue,
-                        .submission_ref = "resume:" + std::to_string(index),
-                        .title = "Resume payload",
-                        .supersedes = std::nullopt,
-                    }
-                )
-                .envelope_id
+        const auto envelope = approve_for_processing(
+            ledger,
+            ledger.intake(
+                {
+                    .source_path = source,
+                    .inbox_root = queue,
+                    .submission_ref = "resume:" + std::to_string(index),
+                    .title = "Resume payload",
+                    .supersedes = std::nullopt,
+                }
+            )
         );
+        envelope_ids.push_back(envelope.envelope_id);
     }
     const std::string hash(64, 'e');
     ASSERT_TRUE(ledger.claim_logical_run(
@@ -465,12 +496,9 @@ TEST(Coordinator, InterruptedProductRunCanResumeAndCleanupConverges) {
         envelope_ids.back(), arachne::coordination::cocoon_status::processing,
         "workflow:resume"
     ));
-    ledger.finish_integrated_product_run(
-        "run-resume", "runs/run-resume.json"
-    );
-    for (const auto& envelope : ledger.list(
-             arachne::coordination::cocoon_status::integrated
-         )) {
+    ledger.finish_integrated_product_run("run-resume", "runs/run-resume.json");
+    for (const auto& envelope :
+         ledger.list(arachne::coordination::cocoon_status::integrated)) {
         EXPECT_TRUE(ledger.retire_queued_payload(envelope.envelope_id, queue));
     }
     for (const auto& envelope : ledger.product_run_inputs("run-resume")) {
@@ -492,14 +520,17 @@ TEST(Coordinator, FailedQueuedPayloadsStillReachTheRetryThreshold) {
         const auto source
             = temporary.path() / ("failed-" + std::to_string(index) + ".bin");
         write(source, "opaque payload " + std::to_string(index));
-        const auto envelope = ledger.intake(
-            {
-                .source_path = source,
-                .inbox_root = queue,
-                .submission_ref = "retry:" + std::to_string(index),
-                .title = "Retry payload",
-                .supersedes = std::nullopt,
-            }
+        const auto envelope = approve_for_processing(
+            ledger,
+            ledger.intake(
+                {
+                    .source_path = source,
+                    .inbox_root = queue,
+                    .submission_ref = "retry:" + std::to_string(index),
+                    .title = "Retry payload",
+                    .supersedes = std::nullopt,
+                }
+            )
         );
         static_cast<void>(ledger.transition(
             envelope.envelope_id,
@@ -554,7 +585,8 @@ TEST(Coordinator, IntegratedInternalPayloadCanRetireWithoutTouchingLegacy) {
         .title = "Legacy opaque batch",
         .supersedes = std::nullopt,
     };
-    const auto envelope = ledger.intake(request);
+    const auto envelope
+        = approve_for_processing(ledger, ledger.intake(request));
     ASSERT_TRUE(std::filesystem::is_regular_file(envelope.payload_ref));
     EXPECT_THROW(
         static_cast<void>(

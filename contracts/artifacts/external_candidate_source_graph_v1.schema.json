@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/external_candidate_source_graph_v1.schema.json",
+  "title": "Compact external candidate source graph v1",
+  "description": "Untrusted, non-canonical source adjacency prepared for Ariadne from an immutable acquired source snapshot.",
+  "type": "object",
+  "required": ["artifact_type", "format_version", "source_snapshot", "works", "agents", "edges"],
+  "properties": {
+    "artifact_type": {"const": "external_candidate_source_graph_v1"},
+    "format_version": {"const": 1},
+    "source_snapshot": {
+      "type": "object",
+      "required": ["snapshot_id", "storage_ref", "sha256"],
+      "properties": {
+        "snapshot_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "storage_ref": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+        "sha256": {"$ref": "../schemas/common_v1.schema.json#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "works": {"type": "array", "items": {"$ref": "#/$defs/work"}},
+    "agents": {"type": "array", "items": {"$ref": "#/$defs/agent"}},
+    "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "work": {
+      "type": "object",
+      "required": ["id", "label", "covered"],
+      "properties": {
+        "id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "label": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+        "covered": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "required": ["id", "label", "profile"],
+      "properties": {
+        "id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "label": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+        "profile": {"type": "object", "description": "Untrusted algorithm-input features; never product data."}
+      },
+      "additionalProperties": false
+    },
+    "edge": {
+      "type": "object",
+      "required": ["work_id", "agent_id"],
+      "properties": {
+        "work_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "agent_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

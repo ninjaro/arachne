@@ -1,0 +1,34 @@
+{
+  "contract": "acquired_artifact_v1",
+  "format_version": 1,
+  "artifact_id": "artifact-wikidata-page-001",
+  "request_id": "wikidata-page-001",
+  "door_id": "wikidata",
+  "operation": "point_lookup",
+  "source_locator": "https://www.wikidata.org/w/api.php",
+  "artifact": {
+    "storage_ref": "acquired/fetch-plan-20260718-01/wikidata-page-001.json",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "byte_length": 4096,
+    "media_type": "application/json"
+  },
+  "transport": {
+    "status": "delivered",
+    "attempts": 1,
+    "delivery_mode": "fetched"
+  },
+  "response_metadata": {
+    "status_code": 200,
+    "effective_url": "https://www.wikidata.org/w/api.php",
+    "headers": [
+      {
+        "name": "Content-Type",
+        "value": "application/json"
+      }
+    ],
+    "redirect_chain": [],
+    "started_at": "2026-07-18T03:00:59Z",
+    "completed_at": "2026-07-18T03:01:00Z"
+  },
+  "acquired_at": "2026-07-18T03:01:00Z"
+}

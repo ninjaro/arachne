@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlsplit
 
 
 URL = re.compile(r"https://[^\s<>()\]]+")
+MARKDOWN_LINK = re.compile(r"!?\[([^\]]+)\]\((https://[^\s<>()\]]+)\)")
 DEFAULT_HOSTS = {"github.com", "user-images.githubusercontent.com"}
 
 
@@ -32,6 +33,16 @@ def attachment_urls(body: str, allowed_hosts: set[str]) -> list[str]:
             continue
         result.append(value)
     return list(dict.fromkeys(result))
+
+
+def attachment_name(body: str, url: str) -> str:
+    path_name = Path(unquote(urlsplit(url).path)).name
+    if Path(path_name).suffix:
+        return path_name
+    for label, linked_url in MARKDOWN_LINK.findall(body):
+        if linked_url.rstrip(".,;:'\"") == url:
+            return Path(unquote(label.strip())).name
+    return path_name
 
 
 def parser() -> argparse.ArgumentParser:
@@ -60,10 +71,10 @@ def main() -> int:
             raise InvalidSubmission(
                 f"expected exactly one supported attachment URL, found {len(urls)}"
             )
-        attachment_name = Path(unquote(urlsplit(urls[0]).path)).name
-        if Path(attachment_name).suffix.lower() not in {".json", ".zip"}:
+        submitted_name = attachment_name(body, urls[0])
+        if Path(submitted_name).suffix.lower() != ".json":
             raise InvalidSubmission(
-                "the attachment URL must identify a .json or .zip filename"
+                "the provisional GitHub attachment must identify a .json filename"
             )
         request = {
             "format_version": 1,
@@ -71,7 +82,7 @@ def main() -> int:
             "title": title,
             "attachment_url": urls[0],
             "attachment_host": urlsplit(urls[0]).hostname,
-            "attachment_name": attachment_name,
+            "attachment_name": submitted_name,
         }
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         with arguments.output.open("x", encoding="utf-8") as stream:

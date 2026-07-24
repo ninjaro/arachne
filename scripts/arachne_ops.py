@@ -18,6 +18,7 @@ REQUIRED_CAPABILITIES = frozenset(
     {
         "contract-validate",
         "fetch",
+        "fetch-plan-translate",
         "intake",
         "cocoon-transition",
         "inbox-baseline",
@@ -177,6 +178,16 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
             "--output-control",
             str(arguments.output_control.resolve(strict=False)),
         ]
+    if command == "fetch-plan-translate":
+        return command, [
+            "fetch",
+            "plan",
+            *common,
+            "--plan",
+            str(arguments.plan.resolve(strict=True)),
+            "--output-directory",
+            str(arguments.output_directory.resolve(strict=False)),
+        ]
     if command == "intake":
         result = [
             "intake",
@@ -248,26 +259,18 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
             str(arguments.output_control.resolve(strict=False)),
         ]
     if command == "viewer-build":
-        if bool(arguments.candidate_export) != bool(arguments.candidate_snapshot_id):
-            raise OperationsError(
-                "--candidate-export and --candidate-snapshot-id must be supplied together"
-            )
         result = [
             "viewer",
             "build",
             *common,
-            "--product-export",
-            str(arguments.product_export.resolve(strict=True)),
-            "--product-snapshot-id",
-            arguments.product_snapshot_id,
+            "--product-snapshot",
+            str(arguments.product_snapshot.resolve(strict=True)),
         ]
-        if arguments.candidate_export:
+        if arguments.candidate_snapshot:
             result.extend(
                 (
-                    "--candidate-export",
-                    str(arguments.candidate_export.resolve(strict=True)),
-                    "--candidate-snapshot-id",
-                    arguments.candidate_snapshot_id,
+                    "--candidate-snapshot",
+                    str(arguments.candidate_snapshot.resolve(strict=True)),
                 )
             )
         return command, result
@@ -282,6 +285,10 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     fetch = subparsers.add_parser("fetch")
     fetch.add_argument("--request", type=Path, required=True)
     fetch.add_argument("--output-control", type=Path, required=True)
+
+    fetch_plan = subparsers.add_parser("fetch-plan-translate")
+    fetch_plan.add_argument("--plan", type=Path, required=True)
+    fetch_plan.add_argument("--output-directory", type=Path, required=True)
 
     intake = subparsers.add_parser("intake")
     intake.add_argument("--payload", type=Path, required=True)
@@ -314,10 +321,8 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     candidate_plan.add_argument("--output-control", type=Path, required=True)
 
     viewer = subparsers.add_parser("viewer-build")
-    viewer.add_argument("--product-export", type=Path, required=True)
-    viewer.add_argument("--product-snapshot-id", required=True)
-    viewer.add_argument("--candidate-export", type=Path)
-    viewer.add_argument("--candidate-snapshot-id")
+    viewer.add_argument("--product-snapshot", type=Path, required=True)
+    viewer.add_argument("--candidate-snapshot", type=Path)
 
 
 def parser() -> argparse.ArgumentParser:

@@ -34,6 +34,7 @@ WORKFLOWS = (
     "intake.yml",
     "product-integration.yml",
     "candidate-rebuild.yml",
+    "source-refresh.yml",
     "publication.yml",
     "manual-dispatch.yml",
 )
@@ -133,6 +134,19 @@ def check_configuration(root: Path) -> None:
             f"{path}: gray_bonus_basis_points must default to 2000")
     require(wikidata.get("quality_weight") == 0.65,
             f"{path}: quality_weight must default to 0.65")
+    require(wikidata.get("refresh_days") == 60,
+            f"{path}: Wikidata refresh_days must default to 60")
+    transport = config.get("transport")
+    require(isinstance(transport, dict) and transport.get("format_version") == 1,
+            f"{path}: transport registry version 1 is required")
+    doors = transport.get("doors")
+    require(isinstance(doors, list) and doors,
+            f"{path}: transport registry requires doors")
+    door_ids = {
+        door.get("door_id") for door in doors if isinstance(door, dict)
+    }
+    require({"github-attachments", "wikidata"} <= door_ids,
+            f"{path}: required initial doors are missing")
 
 
 def check_repository_surface(root: Path) -> None:
@@ -145,10 +159,14 @@ def check_repository_surface(root: Path) -> None:
     required_scripts = {
         "corpus analysis tool": "analyze_legacy_corpus.py",
         "publication bundle resolver": "resolve_site_bundle.py",
+        "source refresh cadence gate": "source_refresh_gate.py",
+        "Wikidata bulk plan adapter": "wikidata_bulk_fetch_plan.py",
     }
     for label, name in required_scripts.items():
         path = root / "scripts" / name
         require(path.is_file(), f"missing {label}: {path}")
+    worker = root / "hpc" / "wikidata" / "build_external_graph.py"
+    require(worker.is_file(), f"missing streaming HPC worker: {worker}")
 
 
 def parser() -> argparse.ArgumentParser:

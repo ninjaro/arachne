@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/batch_envelope_v1.schema.json",
+  "title": "Immutable batch cocoon identity v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "envelope_id",
+    "payload_ref",
+    "payload_sha256",
+    "submission_ref",
+    "status"
+  ],
+  "properties": {
+    "contract": {
+      "const": "batch_envelope_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "envelope_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "payload_ref": {
+      "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+    },
+    "payload_sha256": {
+      "$ref": "common_v1.schema.json#/$defs/sha256"
+    },
+    "submission_ref": {
+      "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+    },
+    "status": {
+      "enum": [
+        "received",
+        "needs_format_fix",
+        "waiting_approval",
+        "accepted",
+        "waiting_processing",
+        "processing",
+        "integrated",
+        "failed",
+        "rejected",
+        "superseded"
+      ]
+    },
+    "accepted_by": {
+      "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+    },
+    "supersedes": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "extensions": {
+      "$ref": "common_v1.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}
