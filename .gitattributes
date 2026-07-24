@@ -3,4 +3,4 @@
 *.db filter=lfs diff=lfs merge=lfs -text
 corpus-import/*.json filter=lfs diff=lfs merge=lfs -text
 corpus-import/*.jsonl filter=lfs diff=lfs merge=lfs -text
-viewer/data/*.json ilter=lfs diff=lfs merge=lfs -text
+viewer/public/data/*.json ilter=lfs diff=lfs merge=lfs -text
