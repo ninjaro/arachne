@@ -2360,6 +2360,10 @@ int command_viewer_build(const options& arguments) {
         product_snapshot.control.at("snapshot_id").get<std::string>(),
         candidate_id
     );
+    const ordered_json catalog = arachne::ariadne::viewer_builder::catalog(
+        product,
+        product_snapshot.control.at("snapshot_id").get<std::string>()
+    );
     const std::string projection_id
         = projection.at("projection_id").get<std::string>();
     const fs::path projection_directory = config.site_output / "projections";
@@ -2386,7 +2390,7 @@ int command_viewer_build(const options& arguments) {
     );
     const ordered_json site_bundle
         = arachne::ariadne::viewer_builder::build_site(
-            projection, config.viewer_templates, config.site_output,
+            projection, catalog, config.viewer_templates, config.site_output,
             generated_at
         );
     emit(

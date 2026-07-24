@@ -1,0 +1,165 @@
+nlohmann::ordered_json viewer_builder::build_site(
+    const nlohmann::json& projection, const nlohmann::json& catalog_data,
+    const std::filesystem::path& template_root,
+    const std::filesystem::path& site_root, std::string generated_at
+) {
+    validate_site_root(site_root);
+    if (!projection.is_object()
+        || projection.value("artifact_type", "") != "viewer_projection_data_v1"
+        || projection.value("format_version", 0) != 1) {
+        throw std::invalid_argument(
+            "site build requires viewer_projection_data_v1"
+        );
+    }
+    if (!catalog_data.is_object()
+        || catalog_data.value("formatVersion", 0) != 1
+        || !catalog_data.contains("works")
+        || !catalog_data.at("works").is_array()) {
+        throw std::invalid_argument("site build requires viewer catalog v1");
+    }
+
+    const auto asset_root = template_root / "dist";
+    if (!std::filesystem::is_directory(asset_root)) {
+        throw std::runtime_error(
+            "compiled viewer assets are missing; run npm ci && npm run build in "
+            + template_root.string()
+        );
+    }
+
+    std::map<std::string, std::string, std::less<>> content;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(asset_root)) {
+        if (entry.is_symlink()
+            || (!entry.is_directory() && !entry.is_regular_file())) {
+            throw std::runtime_error(
+                "compiled viewer contains an unsafe entry: "
+                + entry.path().string()
+            );
+        }
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const auto relative
+            = std::filesystem::relative(entry.path(), asset_root)
+                  .generic_string();
+        if (relative.empty() || relative == "data/catalog.json") {
+            continue;
+        }
+        content.emplace(relative, read_file(entry.path()));
+    }
+    if (!content.contains("index.html")) {
+        throw std::runtime_error("compiled viewer has no index.html");
+    }
+
+    content["data/catalog.json"] = catalog_data.dump() + "\n";
+    const nlohmann::ordered_json build_info {
+        { "artifact_format", "site_build_info_v1" },
+        { "format_version", 1 },
+        { "product_snapshot_id", projection.at("product_snapshot_id") },
+        { "candidate_snapshot_id", projection.at("candidate_snapshot_id") },
+        { "projection_version", projection.at("projection_version") },
+        { "projection_id", projection.at("projection_id") },
+    };
+    content["build-info.json"] = build_info.dump(2) + "\n";
+
+    std::string digest_input;
+    for (const auto& [path, bytes] : content) {
+        digest_input += path + "\n" + crypto::sha256(bytes) + "\n";
+    }
+    const auto bundle_hash = crypto::sha256(digest_input);
+    const auto bundle_id = "site_" + bundle_hash.substr(0, 32);
+    const auto staging_root = site_root / (".staging-" + bundle_id);
+    const auto bundles_root = site_root / "bundles";
+    const auto bundle_root = bundles_root / bundle_id;
+    std::filesystem::create_directories(bundles_root);
+    if (!std::filesystem::exists(bundle_root)) {
+        if (std::filesystem::exists(staging_root)) {
+            std::filesystem::remove_all(staging_root);
+        }
+        try {
+            for (const auto& [relative, bytes] : content) {
+                write_file(staging_root / relative, bytes);
+            }
+            std::filesystem::rename(staging_root, bundle_root);
+        } catch (...) {
+            std::error_code ignored;
+            std::filesystem::remove_all(staging_root, ignored);
+            throw;
+        }
+    } else {
+        if (!std::filesystem::is_directory(bundle_root)) {
+            throw std::runtime_error(
+                "viewer bundle identity is not a directory"
+            );
+        }
+        std::set<std::string, std::less<>> observed;
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(bundle_root)) {
+            if (entry.is_symlink()
+                || (!entry.is_directory() && !entry.is_regular_file())) {
+                throw std::runtime_error(
+                    "existing viewer bundle contains an unsafe entry"
+                );
+            }
+            if (entry.is_regular_file()) {
+                const auto relative
+                    = std::filesystem::relative(entry.path(), bundle_root)
+                          .generic_string();
+                if (!content.contains(relative)) {
+                    throw std::runtime_error(
+                        "existing viewer bundle contains an unexpected file"
+                    );
+                }
+                observed.insert(relative);
+            }
+        }
+        if (observed.size() != content.size()) {
+            throw std::runtime_error("existing viewer bundle is incomplete");
+        }
+        for (const auto& [relative, bytes] : content) {
+            const auto path = bundle_root / relative;
+            if (!std::filesystem::is_regular_file(path)
+                || std::filesystem::file_size(path) != bytes.size()
+                || crypto::sha256_file(path) != crypto::sha256(bytes)) {
+                throw std::runtime_error(
+                    "existing viewer bundle does not match its content identity"
+                );
+            }
+        }
+    }
+
+    nlohmann::ordered_json manifest {
+        { "contract", "site_bundle_v1" },
+        { "format_version", 1 },
+        { "bundle_id", bundle_id },
+        { "projection_id", projection.at("projection_id") },
+        { "product_snapshot_id", projection.at("product_snapshot_id") },
+        { "candidate_snapshot_id", projection.at("candidate_snapshot_id") },
+        { "viewer_version", "ariadne-react-viewer-2.0.0" },
+        { "entrypoint", "index.html" },
+        { "bundle",
+          { { "storage_ref",
+              (std::filesystem::path("bundles") / bundle_id).generic_string() },
+            { "sha256", bundle_hash },
+            { "byte_length", 0 },
+            { "media_type", "application/vnd.arachne.static-site" } } },
+        { "generated_at", std::move(generated_at) },
+    };
+    std::uintmax_t total_bytes = 0;
+    for (const auto& [relative, bytes] : content) {
+        static_cast<void>(relative);
+        total_bytes += bytes.size();
+    }
+    manifest["bundle"]["byte_length"] = total_bytes;
+    const auto validation = arachnespace::contracts::validate(
+        arachnespace::contracts::contract_name::site_bundle, manifest
+    );
+    if (!validation.valid()) {
+        throw std::invalid_argument(
+            "generated site_bundle_v1 contract is invalid"
+        );
+    }
+    const auto pointer = site_root / "active.json";
+    write_file(pointer, manifest.dump(2) + "\n");
+    return manifest;
+}

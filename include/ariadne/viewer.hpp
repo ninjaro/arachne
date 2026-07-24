@@ -17,6 +17,11 @@ public:
         std::string candidate_snapshot_id = "none"
     );
 
+    [[nodiscard]] static nlohmann::ordered_json catalog(
+        const nlohmann::json& product_export,
+        std::string product_snapshot_id
+    );
+
     [[nodiscard]] static nlohmann::ordered_json write_projection(
         const nlohmann::json& projection_data,
         const std::filesystem::path& destination,
@@ -26,6 +31,7 @@ public:
 
     [[nodiscard]] static nlohmann::ordered_json build_site(
         const nlohmann::json& projection,
+        const nlohmann::json& catalog_data,
         const std::filesystem::path& template_root,
         const std::filesystem::path& site_root, std::string generated_at
     );

@@ -230,64 +230,63 @@ TEST(AriadneViewer, SimilarityProjectionIsOrderIndependentAndUsesNoHeuristics) {
 
 TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     temporary_directory temporary;
+    const auto product = product_export();
     const auto projection = arachne::ariadne::viewer_builder::project(
-        product_export(), candidate_export(), "product-1", "candidate-1"
+        product, candidate_export(), "product-1", "candidate-1"
     );
-    const auto template_root
-        = std::filesystem::path(__FILE__).parent_path().parent_path()
-        / "viewer";
+    const auto catalog
+        = arachne::ariadne::viewer_builder::catalog(product, "product-1");
+    EXPECT_EQ(catalog.at("formatVersion"), 1);
+    EXPECT_EQ(catalog.at("productSnapshotId"), "product-1");
+    EXPECT_EQ(catalog.at("works").size(), 2U);
+
+    const auto template_root = temporary.path() / "templates";
+    const auto dist = template_root / "dist";
+    std::filesystem::create_directories(dist / "assets");
+    {
+        std::ofstream(dist / "index.html") << "<div id=\"root\"></div>\n";
+        std::ofstream(dist / "assets" / "app.js")
+            << "console.log('viewer');\n";
+        std::ofstream(dist / "assets" / "app.css")
+            << ".app { display: block; }\n";
+    }
+
     const auto first = arachne::ariadne::viewer_builder::build_site(
-        projection, template_root, temporary.path() / "site",
+        projection, catalog, template_root, temporary.path() / "site",
         "2026-07-18T05:45:00Z"
     );
     const auto second = arachne::ariadne::viewer_builder::build_site(
-        projection, template_root, temporary.path() / "site",
+        projection, catalog, template_root, temporary.path() / "site",
         "2026-07-18T05:45:00Z"
     );
     EXPECT_EQ(first, second);
     EXPECT_EQ(first.at("product_snapshot_id"), "product-1");
     EXPECT_EQ(first.at("candidate_snapshot_id"), "candidate-1");
+
     const auto bundle = temporary.path() / "site"
         / first.at("bundle").at("storage_ref").get<std::string>();
     EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "index.html"));
-    EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "app.js"));
-    EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "styles.css"));
     EXPECT_TRUE(
-        std::filesystem::is_regular_file(bundle / "data" / "projection.json")
+        std::filesystem::is_regular_file(bundle / "assets" / "app.js")
+    );
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(bundle / "assets" / "app.css")
+    );
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(bundle / "data" / "catalog.json")
+    );
+    EXPECT_FALSE(
+        std::filesystem::exists(bundle / "data" / "projection.json")
     );
     EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "build-info.json"));
-    EXPECT_TRUE(
-        std::filesystem::is_regular_file(
-            temporary.path() / "site" / "active.json"
-        )
-    );
-    const auto read_bundle_file = [&](const std::string& filename) {
-        std::ifstream input(bundle / filename, std::ios::binary);
-        return std::string(
-            std::istreambuf_iterator<char>(input),
-            std::istreambuf_iterator<char>()
-        );
-    };
-    const auto index = read_bundle_file("index.html");
-    const auto application = read_bundle_file("app.js");
-    const auto styles = read_bundle_file("styles.css");
-    EXPECT_NE(index.find("id=\"graph-canvas\""), std::string::npos);
-    EXPECT_NE(index.find("value=\"chronology\""), std::string::npos);
-    EXPECT_NE(index.find("value=\"similarity\""), std::string::npos);
-    EXPECT_NE(index.find("id=\"relation-list\""), std::string::npos);
-    EXPECT_NE(application.find("derived_similarity"), std::string::npos);
-    EXPECT_NE(
-        application.find("addEventListener(\"wheel\""), std::string::npos
-    );
-    EXPECT_NE(application.find("chronologyLayout"), std::string::npos);
-    EXPECT_NE(styles.find(".graph-edge.similarity"), std::string::npos);
+
     {
-        std::ofstream tamper(bundle / "app.js", std::ios::app);
+        std::ofstream tamper(bundle / "assets" / "app.js", std::ios::app);
         tamper << "\n// tampered\n";
     }
     EXPECT_THROW(
         static_cast<void>(arachne::ariadne::viewer_builder::build_site(
-            projection, template_root, temporary.path() / "site",
+            projection, catalog, template_root, temporary.path() / "site",
             "2026-07-18T05:45:00Z"
         )),
         std::runtime_error
