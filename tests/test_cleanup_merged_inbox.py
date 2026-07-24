@@ -122,6 +122,15 @@ def activated_manifest() -> dict:
     }
 
 
+def activated_manifest_v2() -> dict:
+    value = activated_manifest()
+    value["contract"] = "normalized_product_import_v2"
+    value["format_version"] = 2
+    value["entity_redirects"] = []
+    value["source_redirects"] = []
+    return value
+
+
 def audited_problem_batch() -> dict:
     value = sample_batch()
     value["creators"][0]["external_ids"]["isni"] = {
@@ -354,10 +363,34 @@ sys.exit(0)
         self.binary.write_text(source, encoding="utf-8")
         self.binary.chmod(0o755)
 
+    def write_mutating_importer(
+        self, source_path: Path, replacement: dict
+    ) -> None:
+        replacement_text = json.dumps(replacement)
+        source = f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+arguments = sys.argv[1:]
+pathlib.Path({str(self.import_log)!r}).write_text(json.dumps(arguments), encoding='utf-8')
+pathlib.Path({str(source_path)!r}).write_text({replacement_text!r}, encoding='utf-8')
+database = pathlib.Path(arguments[arguments.index('--database') + 1])
+database.parent.mkdir(parents=True, exist_ok=True)
+database.write_text('activated before inbox mutation was detected', encoding='utf-8')
+print(json.dumps({{'activated': str(database)}}))
+"""
+        self.binary.write_text(source, encoding="utf-8")
+        self.binary.chmod(0o755)
+
     def write_json_batch(self, name: str = "batch.json") -> Path:
         destination = self.inbox / name
         destination.write_text(json.dumps(sample_batch()), encoding="utf-8")
         return destination
+
+    def write_activated_v2(self, value: dict) -> None:
+        self.manifest.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
 
     def write_zip_batch(self) -> Path:
         destination = self.inbox / "opaque.zip"
@@ -424,9 +457,14 @@ sys.exit(0)
 
         arguments = json.loads(self.import_log.read_text(encoding="utf-8"))
         self.assertEqual(arguments[0:2], ["product", "import-normalized"])
-        self.assertEqual(
-            Path(arguments[arguments.index("--manifest") + 1]), self.manifest
+        imported_manifest = Path(
+            arguments[arguments.index("--manifest") + 1]
         )
+        self.assertEqual(imported_manifest.parent, self.manifest.parent)
+        self.assertTrue(
+            imported_manifest.name.startswith(f".{self.manifest.name}.")
+        )
+        self.assertFalse(imported_manifest.exists())
         lines = [
             json.loads(line)
             for line in self.issues.read_text(encoding="utf-8").splitlines()
@@ -469,6 +507,89 @@ sys.exit(0)
         self.assertTrue(source.is_file())
         self.assertFalse((self.root / ".inbox.cleanup-staging").exists())
         self.assertFalse(self.database.exists())
+
+    def test_failed_v2_import_preserves_prior_canonical_artifacts(self) -> None:
+        source = self.write_json_batch()
+        prior = activated_manifest_v2()
+        self.write_activated_v2(prior)
+        self.issues.write_text(
+            json.dumps(
+                {
+                    "record_type": "quarantine",
+                    "format_version": 1,
+                    "category": "prior",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self.database.write_text("prior database", encoding="utf-8")
+        manifest_before = self.manifest.read_bytes()
+        issues_before = self.issues.read_bytes()
+        database_before = self.database.read_bytes()
+        self.write_importer(exit_code=9)
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("normalized import failed", result.stderr)
+        self.assertTrue(source.is_file())
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.issues.read_bytes(), issues_before)
+        self.assertEqual(self.database.read_bytes(), database_before)
+
+    def test_inbox_mutation_during_successful_import_withholds_artifacts(
+        self,
+    ) -> None:
+        source = self.write_json_batch()
+        prior = activated_manifest_v2()
+        self.write_activated_v2(prior)
+        self.issues.write_text(
+            json.dumps(
+                {
+                    "record_type": "quarantine",
+                    "format_version": 1,
+                    "category": "prior",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self.database.write_text("prior database", encoding="utf-8")
+        manifest_before = self.manifest.read_bytes()
+        issues_before = self.issues.read_bytes()
+        self.write_mutating_importer(source, distinct_batch())
+
+        raced = self.run_cleanup("--apply")
+
+        self.assertEqual(raced.returncode, 2)
+        self.assertIn("inbox changed after analysis", raced.stderr)
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.issues.read_bytes(), issues_before)
+        self.assertTrue(source.is_file())
+        self.assertEqual(
+            json.loads(source.read_text(encoding="utf-8")),
+            distinct_batch(),
+        )
+        self.assertEqual(
+            self.database.read_text(encoding="utf-8"),
+            "activated before inbox mutation was detected",
+        )
+
+        self.write_importer(exit_code=0)
+        converged = self.run_cleanup("--apply")
+
+        self.assertEqual(converged.returncode, 0, converged.stderr)
+        self.assertFalse(source.exists())
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        titles = {
+            title["value"]
+            for work in merged["works"]
+            for title in work.get("titles", [])
+        }
+        self.assertEqual(titles, {"Second Work"})
 
     def test_zero_exit_importer_must_activate_a_regular_database(self) -> None:
         source = self.write_json_batch()
@@ -581,6 +702,277 @@ sys.exit(0)
             summary["canonical_id_stability"]["canonical_id_additions"]
         )
         self.assertEqual(list(self.inbox.iterdir()), [])
+
+    def test_v2_manifest_retains_redirects_and_assigns_new_v2_ids(self) -> None:
+        prior = activated_manifest_v2()
+        prior["creators"] = [
+            {
+                "local_id": "agent-900001",
+                "canonical_id": "agent-900001",
+                "entity_type": "person",
+                "name": "Retained Person",
+            }
+        ]
+        prior["entity_redirects"] = [
+            {
+                "alias_id": "agent-899999",
+                "canonical_id": "agent-900001",
+                "entity_type": "person",
+            }
+        ]
+        prior_source_id = "src_" + "d" * 64
+        prior_source_alias = "src_" + "e" * 64
+        prior["references"] = [
+            {
+                "ref_id": "source-900001",
+                "canonical_id": prior_source_id,
+                "source_type": "web_page",
+                "title": "Retained source",
+                "url": "https://example.test/retained-source",
+                "alternate_urls": [],
+            }
+        ]
+        prior["source_redirects"] = [
+            {
+                "alias_id": prior_source_alias,
+                "canonical_id": prior_source_id,
+            }
+        ]
+        self.write_activated_v2(prior)
+        self.write_json_batch()
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(merged["contract"], "normalized_product_import_v2")
+        self.assertEqual(merged["format_version"], 2)
+        self.assertEqual(merged["entity_redirects"], prior["entity_redirects"])
+        self.assertEqual(merged["source_redirects"], prior["source_redirects"])
+
+        concept = next(
+            value for value in merged["tags"] if value["name"] == "Dream logic"
+        )
+        self.assertRegex(concept["canonical_id"], r"^con_[0-9a-f]{64}$")
+        self.assertNotEqual(concept["local_id"], concept["canonical_id"])
+        self.assertEqual(concept["names"], [])
+        self.assertEqual(concept["slug_aliases"], [])
+
+        source = next(
+            value for value in merged["references"]
+            if value.get("doi") == "10.1234/cleanup"
+        )
+        self.assertRegex(source["canonical_id"], r"^src_[0-9a-f]{64}$")
+        self.assertNotEqual(source["ref_id"], source["canonical_id"])
+        self.assertEqual(source["alternate_urls"], [])
+
+    def test_v2_primary_concept_slug_reuses_prior_local_and_canonical_ids(
+        self,
+    ) -> None:
+        prior = activated_manifest_v2()
+        canonical_id = "con_" + "a" * 64
+        prior["tags"] = [
+            {
+                "local_id": "concept-900001",
+                "canonical_id": canonical_id,
+                "name": "Dream logic",
+                "names": [],
+                "type": "theme",
+                "slug": "dream-logic",
+                "slug_aliases": ["oneiric-logic"],
+            }
+        ]
+        self.write_activated_v2(prior)
+        self.write_json_batch()
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(len(merged["tags"]), 1)
+        self.assertEqual(merged["tags"][0]["local_id"], "concept-900001")
+        self.assertEqual(merged["tags"][0]["canonical_id"], canonical_id)
+        self.assertEqual(
+            merged["tags"][0]["slug_aliases"], ["oneiric-logic"]
+        )
+        self.assertEqual(merged["assertions"][0]["tag"], "concept-900001")
+        self.assertNotEqual(merged["assertions"][0]["tag"], canonical_id)
+
+    def test_v2_concept_slug_alias_reuses_live_concept_endpoint(self) -> None:
+        prior = activated_manifest_v2()
+        canonical_id = "con_" + "b" * 64
+        prior["tags"] = [
+            {
+                "local_id": "concept-900002",
+                "canonical_id": canonical_id,
+                "name": "Dream logic",
+                "names": [],
+                "type": "theme",
+                "slug": "dream-logic",
+                "slug_aliases": ["oneiric-logic"],
+            }
+        ]
+        batch = sample_batch()
+        batch["tags"][0]["name"] = "Oneiric logic"
+        self.write_activated_v2(prior)
+        (self.inbox / "batch.json").write_text(
+            json.dumps(batch), encoding="utf-8"
+        )
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(len(merged["tags"]), 1)
+        concept = merged["tags"][0]
+        self.assertEqual(concept["local_id"], "concept-900002")
+        self.assertEqual(concept["canonical_id"], canonical_id)
+        self.assertEqual(concept["slug"], "dream-logic")
+        self.assertIn("oneiric-logic", concept["slug_aliases"])
+        self.assertEqual(merged["assertions"][0]["tag"], "concept-900002")
+        aliases = {
+            name["value"]
+            for name in concept.get("names", [])
+            if name.get("preferred") is False
+        }
+        self.assertIn("Oneiric logic", aliases)
+
+    def test_v2_source_alternate_url_reuses_live_source_endpoint(self) -> None:
+        prior = activated_manifest_v2()
+        canonical_id = "src_" + "c" * 64
+        alternate_url = "https://example.test/source-without-slash"
+        prior["references"] = [
+            {
+                "ref_id": "source-900001",
+                "canonical_id": canonical_id,
+                "source_type": "article",
+                "title": "A source",
+                "url": "https://example.test/source/",
+                "alternate_urls": [alternate_url],
+            }
+        ]
+        batch = sample_batch()
+        batch["references"][0].pop("doi")
+        batch["references"][0]["url"] = alternate_url
+        self.write_activated_v2(prior)
+        (self.inbox / "batch.json").write_text(
+            json.dumps(batch), encoding="utf-8"
+        )
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(len(merged["references"]), 1)
+        source = merged["references"][0]
+        self.assertEqual(source["ref_id"], "source-900001")
+        self.assertEqual(source["canonical_id"], canonical_id)
+        self.assertEqual(source["url"], "https://example.test/source/")
+        self.assertEqual(source["alternate_urls"], [alternate_url])
+        self.assertEqual(
+            merged["assertions"][0]["evidence"][0]["ref_id"],
+            "source-900001",
+        )
+
+    def test_v2_work_never_matches_on_title_date_and_medium_alone(
+        self,
+    ) -> None:
+        prior = activated_manifest_v2()
+        prior["works"] = [
+            {
+                "local_id": "work-900001",
+                "canonical_id": "work-900001",
+                "titles": [
+                    {
+                        "value": "Example Work",
+                        "type": "original",
+                        "preferred": True,
+                    }
+                ],
+                "medium": "film",
+                "date": "2001",
+            }
+        ]
+        value = sample_batch()
+        value["works"][0].pop("external_ids")
+        self.write_activated_v2(prior)
+        (self.inbox / "batch.json").write_text(
+            json.dumps(value), encoding="utf-8"
+        )
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(len(merged["works"]), 2)
+        self.assertIn(
+            "work-900001", {work["local_id"] for work in merged["works"]}
+        )
+
+    def test_v2_ambiguous_creator_and_dependent_credit_are_quarantined(
+        self,
+    ) -> None:
+        prior = activated_manifest_v2()
+        prior["creators"] = [
+            {
+                "local_id": "agent-900001",
+                "canonical_id": "agent-900001",
+                "entity_type": "person",
+                "name": "Example Artist",
+            },
+            {
+                "local_id": "agent-900002",
+                "canonical_id": "agent-900002",
+                "entity_type": "person",
+                "name": "Example Artist",
+            },
+        ]
+        batch = sample_batch()
+        batch["creators"][0].pop("external_ids")
+        self.write_activated_v2(prior)
+        (self.inbox / "batch.json").write_text(
+            json.dumps(batch), encoding="utf-8"
+        )
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {creator["local_id"] for creator in merged["creators"]},
+            {"agent-900001", "agent-900002"},
+        )
+        self.assertFalse(merged["credits"])
+        lines = [
+            json.loads(line)
+            for line in self.issues.read_text(encoding="utf-8").splitlines()
+        ]
+        ambiguity = [
+            line
+            for line in lines
+            if "ambig" in str(line.get("category", "")).casefold()
+            and "identity" in str(line.get("category", "")).casefold()
+        ]
+        self.assertTrue(ambiguity, lines)
+        encoded = json.dumps(ambiguity, ensure_ascii=False, sort_keys=True)
+        self.assertIn("Example Artist", encoded)
+        self.assertIn("agent-900001", encoded)
+        self.assertIn("agent-900002", encoded)
+        quarantined_credit = [
+            line
+            for line in lines
+            if "quarant" in json.dumps(line, ensure_ascii=False).casefold()
+            and '"role": "director"' in json.dumps(
+                line, ensure_ascii=False, sort_keys=True
+            )
+        ]
+        self.assertTrue(quarantined_credit, lines)
+        self.assertIn(
+            "Example Work",
+            json.dumps(
+                quarantined_credit, ensure_ascii=False, sort_keys=True
+            ),
+        )
 
     def test_staged_new_bytes_are_merged_and_transactionally_reimported(self) -> None:
         self.write_json_batch("first.json")
@@ -1147,6 +1539,24 @@ sys.exit(0)
         self.assertEqual(
             consolidated["canonical_id_removals"], ["agent-duplicate"]
         )
+
+    def test_v2_source_canonical_id_stability_fails_closed(self) -> None:
+        previous = activated_manifest_v2()
+        previous["references"] = [
+            {
+                "ref_id": "source-1",
+                "canonical_id": "src_" + "a" * 64,
+                "source_type": "web_page",
+                "title": "Stable source",
+                "url": "https://example.test/stable-source",
+                "alternate_urls": [],
+            }
+        ]
+        current = json.loads(json.dumps(previous))
+        current["references"][0]["canonical_id"] = "src_" + "b" * 64
+
+        with self.assertRaises(CleanupError):
+            canonical_id_stability_report(previous, current)
 
     def test_cleanup_implementation_never_opens_sqlite(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8").lower()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -269,6 +270,7 @@ class OperationsCliTests(unittest.TestCase):
                 "inbox-verify",
                 "product-integrate",
                 "product-import-normalized",
+                "product-migrate-database",
                 "candidate-plan",
                 "candidate-rebuild",
                 "viewer-build",
@@ -332,6 +334,52 @@ class OperationsCliTests(unittest.TestCase):
         self.assertEqual(document["assertion_count"], 0)
         self.assertEqual(Path(document["database_path"]), database)
         self.assertTrue(database.is_file())
+
+    def test_product_database_migration_activates_schema_v3(self) -> None:
+        database = self.root / "database" / "art-islands.sqlite"
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as connection:
+            connection.executescript(
+                (ROOT / "schema" / "product_v2.sql").read_text(encoding="utf-8")
+            )
+
+        result = self.run_cli(
+            "product",
+            "migrate-database",
+            "--database",
+            str(database),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        document = self.document(result)
+        self.assertEqual(document["command"], "product-migrate-database")
+        self.assertEqual(document["previous_schema_version"], 2)
+        self.assertEqual(document["schema_version"], 3)
+        self.assertTrue(document["changed"])
+        self.assertEqual(Path(document["database_path"]), database)
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone(), (3,)
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT count(*) FROM sqlite_schema
+                    WHERE type='table' AND name IN (
+                      'entity_redirects',
+                      'source_redirects',
+                      'concept_slug_aliases'
+                    )
+                    """
+                ).fetchone(),
+                (0,),
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA integrity_check").fetchone(), ("ok",)
+            )
 
     def test_contract_validate_reports_valid_and_invalid_documents(self) -> None:
         batch = self.valid_batch()

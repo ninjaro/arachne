@@ -94,6 +94,39 @@ std::string read_file(const fs::path& path) {
     );
 }
 
+void execute_sql(const fs::path& database_path, std::string_view sql) {
+    sqlite3* raw = nullptr;
+    if (sqlite3_open_v2(
+            database_path.c_str(), &raw,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr
+        )
+        != SQLITE_OK) {
+        const std::string message = raw == nullptr
+            ? "cannot open test database"
+            : std::string("cannot open test database: ") + sqlite3_errmsg(raw);
+        if (raw != nullptr) {
+            sqlite3_close(raw);
+        }
+        throw std::runtime_error(message);
+    }
+
+    struct closer {
+        void operator()(sqlite3* value) const { sqlite3_close(value); }
+    };
+    std::unique_ptr<sqlite3, closer> database(raw);
+    char* raw_error = nullptr;
+    if (sqlite3_exec(
+            raw, std::string(sql).c_str(), nullptr, nullptr, &raw_error
+        )
+        != SQLITE_OK) {
+        const std::string message = raw_error == nullptr
+            ? std::string("cannot execute test SQL")
+            : std::string(raw_error);
+        sqlite3_free(raw_error);
+        throw std::runtime_error(message);
+    }
+}
+
 json mining_batch(std::string suffix = "1", int weight = 95) {
     const std::string work_local = "work-" + suffix;
     const std::string tag_local = "tag-" + suffix;
@@ -292,6 +325,28 @@ json normalized_product_manifest() {
     return result;
 }
 
+json normalized_product_manifest_v2() {
+    json result = normalized_product_manifest();
+    result["contract"] = "normalized_product_import_v2";
+    result["format_version"] = 2;
+    result["entity_redirects"] = json::array();
+    result["source_redirects"] = json::array();
+    result["tags"][0]["canonical_id"] = "concept_test_concept_1";
+    result["tags"][1]["canonical_id"] = "concept_secondary_concept";
+    result["tags"][0]["names"] = json::array(
+        { { { "type", "alias" },
+            { "language", "en" },
+            { "value", "Test concept one" },
+            { "preferred", false } } }
+    );
+    result["tags"][0]["slug_aliases"]
+        = json::array({ "test-concept-one", "example-test-concept" });
+    result["references"][0]["canonical_id"] = "source_example_article";
+    result["references"][0]["alternate_urls"]
+        = json::array({ "https://example.test/source/1?view=full" });
+    return result;
+}
+
 accepted_batch_descriptor write_batch(
     const fs::path& directory, std::string envelope, const json& batch
 ) {
@@ -390,6 +445,31 @@ void expect_no_sqlite_sidecars(const fs::path& database_path) {
         sidecar += suffix;
         EXPECT_FALSE(fs::exists(sidecar)) << sidecar;
     }
+}
+
+std::string without_legacy_compatibility_rows(std::string_view export_bytes) {
+    std::string result;
+    std::size_t offset = 0;
+    while (offset < export_bytes.size()) {
+        const std::size_t newline = export_bytes.find('\n', offset);
+        const std::size_t length = newline == std::string_view::npos
+            ? export_bytes.size() - offset
+            : newline - offset;
+        const std::string_view line = export_bytes.substr(offset, length);
+        if (!line.contains("\"table\":\"entity_redirects\"")
+            && !line.contains("\"table\":\"source_redirects\"")
+            && !line.contains("\"table\":\"concept_slug_aliases\"")) {
+            result.append(line);
+            if (newline != std::string_view::npos) {
+                result.push_back('\n');
+            }
+        }
+        if (newline == std::string_view::npos) {
+            break;
+        }
+        offset = newline + 1U;
+    }
+    return result;
 }
 
 json candidate_payload(
@@ -564,6 +644,465 @@ TEST(PenelopeStore, DirectNormalizedImportNeedsNoHashesOrOperationalMetadata) {
     EXPECT_EQ(static_cast<unsigned char>(database_bytes[19]), 2U);
     EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
     EXPECT_FALSE(fs::exists(tree.path / "store"));
+    expect_no_sqlite_sidecars(database_path);
+}
+
+TEST(
+    PenelopeStore,
+    DirectNormalizedV2MaterializesFinalOnlyProductV3Deterministically
+) {
+    temporary_tree tree;
+    json manifest = normalized_product_manifest_v2();
+    manifest["entity_redirects"] = json::array(
+        { { { "alias_id", "legacy_work_example" },
+            { "canonical_id", "work_example_1954" },
+            { "entity_type", "work" } },
+          { { "alias_id", "legacy_test_concept" },
+            { "canonical_id", "concept_test_concept_1" },
+            { "entity_type", "concept" } } }
+    );
+    manifest["source_redirects"] = json::array(
+        { { { "alias_id", "legacy_source_example" },
+            { "canonical_id", "source_example_article" } } }
+    );
+    manifest["references"].push_back(
+        { { "ref_id", "origin-without-slash" },
+          { "canonical_id", "source_origin_without_slash" },
+          { "source_type", "web_page" },
+          { "title", "Origin spelling" },
+          { "url", "https://origin.example.test" } }
+    );
+    manifest["references"].push_back(
+        { { "ref_id", "origin-with-slash" },
+          { "canonical_id", "source_origin_with_slash" },
+          { "source_type", "web_page" },
+          { "title", "Origin spelling" },
+          { "url", "https://origin.example.test/" } }
+    );
+
+    const fs::path manifest_path = tree.path / "v2.json";
+    const fs::path database_path = tree.path / "canonical-v3.sqlite";
+    write_file(manifest_path, manifest.dump());
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = manifest_path, .database_path = database_path }
+    ));
+
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA user_version"), "3");
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN "
+            "('entity_redirects','source_redirects','concept_slug_aliases')"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE sql LIKE "
+            "'%entity_redirects%' OR sql LIKE '%source_redirects%' OR "
+            "sql LIKE '%concept_slug_aliases%'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM pragma_index_list('entities') "
+            "WHERE origin='u'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE type='index' AND "
+            "name='sources_url_unique'"
+        ),
+        "1"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path, "SELECT source_id FROM source_urls WHERE url=?1",
+            "https://example.test/source/1?view=full"
+        ),
+        "source_example_article"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sources WHERE url IN "
+            "('https://origin.example.test','https://origin.example.test/')"
+        ),
+        "2"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM names WHERE entity_id=?1 AND "
+            "name_type='alias'",
+            "concept_test_concept_1"
+        ),
+        "1"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM entities WHERE id LIKE 'legacy_%'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sources WHERE id LIKE 'legacy_%'"
+        ),
+        "0"
+    );
+    EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA integrity_check"), "ok");
+
+    store persistence(tree.path / "store");
+    const fs::path first_export = tree.path / "v3-first.jsonl";
+    static_cast<void>(persistence.export_jsonl(
+        graph_domain::product, database_path, first_export
+    ));
+    const std::string exported = read_file(first_export);
+    EXPECT_EQ(
+        exported.find("\"table\":\"entity_redirects\""), std::string::npos
+    );
+    EXPECT_EQ(
+        exported.find("\"table\":\"concept_slug_aliases\""), std::string::npos
+    );
+    EXPECT_EQ(
+        exported.find("\"table\":\"source_redirects\""), std::string::npos
+    );
+    EXPECT_NE(exported.find("\"table\":\"source_urls\""), std::string::npos);
+
+    std::ranges::reverse(manifest["tags"]);
+    std::ranges::reverse(manifest["references"]);
+    std::ranges::reverse(manifest["entity_redirects"]);
+    std::ranges::reverse(manifest["source_redirects"]);
+    for (auto& tag : manifest["tags"]) {
+        if (tag.contains("slug_aliases")) {
+            std::ranges::reverse(tag["slug_aliases"]);
+        }
+    }
+    write_file(manifest_path, manifest.dump());
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = manifest_path, .database_path = database_path }
+    ));
+    const fs::path reordered_export = tree.path / "v2-reordered.jsonl";
+    static_cast<void>(persistence.export_jsonl(
+        graph_domain::product, database_path, reordered_export
+    ));
+    EXPECT_EQ(read_file(first_export), read_file(reordered_export));
+    EXPECT_TRUE(
+        persistence.integrity_check(graph_domain::product, database_path).ok
+    );
+    expect_no_sqlite_sidecars(database_path);
+}
+
+TEST(
+    PenelopeStore,
+    ProductV2ToV3MigrationDropsOnlyLegacyCompatibilityMetadata
+) {
+    temporary_tree tree;
+    const fs::path database_path = tree.path / "product-v2.sqlite";
+    const fs::path schema_path
+        = fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v2.sql";
+    std::string fixture_sql = "PRAGMA foreign_keys=ON;\n";
+    fixture_sql += read_file(schema_path);
+    fixture_sql += R"SQL(
+INSERT INTO entities(id,entity_type) VALUES
+ ('agent_live','person'),
+ ('work_live','work'),
+ ('concept_live','concept');
+INSERT INTO agents(entity_id,agent_type) VALUES ('agent_live','person');
+INSERT INTO works(entity_id,medium) VALUES ('work_live','film');
+INSERT INTO concepts(entity_id,concept_type,slug)
+ VALUES ('concept_live','theme','canonical-concept');
+INSERT INTO names(id,entity_id,name_type,language_code,value,is_preferred)
+ VALUES
+ ('name_agent','agent_live','original','en','Live Agent',1),
+ ('name_agent_alias','agent_live','alias','en','Research Name Alias',0),
+ ('name_work','work_live','english','en','Live Work',1),
+ ('name_concept','concept_live','english','en','Canonical Concept',1);
+INSERT INTO credits(id,work_id,agent_id,role,importance)
+ VALUES ('credit_live','work_live','agent_live','director','primary');
+INSERT INTO sources(id,source_type,title,url)
+ VALUES (
+  'source_live','article','Canonical source',
+  'https://example.test/canonical'
+ );
+INSERT INTO source_urls(id,source_id,url)
+ VALUES (
+  'url_live','source_live','https://example.test/canonical?view=full'
+ );
+INSERT INTO entity_redirects(alias_id,canonical_id,entity_type)
+ VALUES ('legacy_work','work_live','work');
+INSERT INTO source_redirects(alias_id,canonical_id)
+ VALUES ('legacy_source','source_live');
+INSERT INTO concept_slug_aliases(slug,concept_id)
+ VALUES ('legacy-concept','concept_live');
+WITH RECURSIVE sequence(value) AS (
+ VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<512
+)
+INSERT INTO entity_redirects(alias_id,canonical_id,entity_type)
+ SELECT printf('legacy_entity_%04d',value),'work_live','work' FROM sequence;
+WITH RECURSIVE sequence(value) AS (
+ VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<512
+)
+INSERT INTO source_redirects(alias_id,canonical_id)
+ SELECT printf('legacy_source_%04d',value),'source_live' FROM sequence;
+WITH RECURSIVE sequence(value) AS (
+ VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<512
+)
+INSERT INTO concept_slug_aliases(slug,concept_id)
+ SELECT printf('legacy-concept-%04d',value),'concept_live' FROM sequence;
+)SQL";
+    execute_sql(database_path, fixture_sql);
+
+    store persistence(tree.path / "store");
+    const fs::path before_export = tree.path / "before.jsonl";
+    static_cast<void>(persistence.export_jsonl(
+        graph_domain::product, database_path, before_export
+    ));
+    const std::string expected_surviving_rows
+        = without_legacy_compatibility_rows(read_file(before_export));
+
+    static_cast<void>(store::migrate_product_database(database_path));
+
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA user_version"), "3");
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN "
+            "('entity_redirects','source_redirects','concept_slug_aliases')"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE sql LIKE "
+            "'%entity_redirects%' OR sql LIKE '%source_redirects%' OR "
+            "sql LIKE '%concept_slug_aliases%'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM pragma_index_list('entities') "
+            "WHERE origin='u'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE type='index' AND "
+            "name='sources_url_unique'"
+        ),
+        "1"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT value FROM names WHERE id='name_agent_alias'"
+        ),
+        "Research Name Alias"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT source_id FROM source_urls WHERE id='url_live'"
+        ),
+        "source_live"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT work_id||'|'||agent_id FROM credits "
+            "WHERE id='credit_live'"
+        ),
+        "work_live|agent_live"
+    );
+    EXPECT_THROW(
+        execute_sql(
+            database_path,
+            "INSERT INTO sources(id,source_type,title,url) VALUES"
+            "('source_duplicate_url','article','Duplicate URL',"
+            "'https://example.test/canonical')"
+        ),
+        std::runtime_error
+    );
+    EXPECT_EQ(scalar_text(database_path, "SELECT count(*) FROM sources"), "1");
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA freelist_count"), "0");
+    EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA integrity_check"), "ok");
+
+    const fs::path after_export = tree.path / "after.jsonl";
+    static_cast<void>(persistence.export_jsonl(
+        graph_domain::product, database_path, after_export
+    ));
+    EXPECT_EQ(read_file(after_export), expected_surviving_rows);
+    EXPECT_TRUE(
+        persistence.integrity_check(graph_domain::product, database_path).ok
+    );
+    expect_no_sqlite_sidecars(database_path);
+}
+
+TEST(PenelopeStore, DirectNormalizedV2RejectsUnsafeAliasesAndRedirects) {
+    temporary_tree tree;
+    std::vector<std::pair<std::string, json>> invalid;
+    const auto add = [&](std::string name, const auto& mutate) {
+        json manifest = normalized_product_manifest_v2();
+        mutate(manifest);
+        invalid.emplace_back(std::move(name), std::move(manifest));
+    };
+    add("missing-redirect-array",
+        [](json& value) { value.erase("entity_redirects"); });
+    add("missing-concept-id",
+        [](json& value) { value["tags"][0].erase("canonical_id"); });
+    add("missing-source-id",
+        [](json& value) { value["references"][0].erase("canonical_id"); });
+    add("live-slug-alias", [](json& value) {
+        value["tags"][0]["slug_aliases"].push_back("secondary-concept");
+    });
+    add("primary-as-alternate-url", [](json& value) {
+        value["references"][0]["alternate_urls"].push_back(
+            value["references"][0]["url"]
+        );
+    });
+    add("entity-self", [](json& value) {
+        value["entity_redirects"].push_back(
+            { { "alias_id", "work_example_1954" },
+              { "canonical_id", "work_example_1954" },
+              { "entity_type", "work" } }
+        );
+    });
+    add("entity-duplicate-alias", [](json& value) {
+        value["entity_redirects"] = json::array(
+            { { { "alias_id", "duplicate_entity" },
+                { "canonical_id", "work_example_1954" },
+                { "entity_type", "work" } },
+              { { "alias_id", "duplicate_entity" },
+                { "canonical_id", "agent_example_creator" },
+                { "entity_type", "person" } } }
+        );
+    });
+    add("entity-cycle", [](json& value) {
+        value["entity_redirects"] = json::array(
+            { { { "alias_id", "old_entity_a" },
+                { "canonical_id", "old_entity_b" },
+                { "entity_type", "work" } },
+              { { "alias_id", "old_entity_b" },
+                { "canonical_id", "old_entity_a" },
+                { "entity_type", "work" } } }
+        );
+    });
+    add("entity-chain", [](json& value) {
+        value["entity_redirects"] = json::array(
+            { { { "alias_id", "old_entity_a" },
+                { "canonical_id", "old_entity_b" },
+                { "entity_type", "work" } },
+              { { "alias_id", "old_entity_b" },
+                { "canonical_id", "work_example_1954" },
+                { "entity_type", "work" } } }
+        );
+    });
+    add("entity-live-alias", [](json& value) {
+        value["entity_redirects"].push_back(
+            { { "alias_id", "work_example_1954" },
+              { "canonical_id", "agent_example_creator" },
+              { "entity_type", "person" } }
+        );
+    });
+    add("entity-type-mismatch", [](json& value) {
+        value["entity_redirects"].push_back(
+            { { "alias_id", "legacy_mistyped_entity" },
+              { "canonical_id", "work_example_1954" },
+              { "entity_type", "concept" } }
+        );
+    });
+    add("entity-unknown-target", [](json& value) {
+        value["entity_redirects"].push_back(
+            { { "alias_id", "legacy_unknown_entity" },
+              { "canonical_id", "missing_entity" },
+              { "entity_type", "work" } }
+        );
+    });
+    add("source-self", [](json& value) {
+        value["source_redirects"].push_back(
+            { { "alias_id", "source_example_article" },
+              { "canonical_id", "source_example_article" } }
+        );
+    });
+    add("source-cycle", [](json& value) {
+        value["source_redirects"] = json::array(
+            { { { "alias_id", "old_source_a" },
+                { "canonical_id", "old_source_b" } },
+              { { "alias_id", "old_source_b" },
+                { "canonical_id", "old_source_a" } } }
+        );
+    });
+    add("source-live-alias", [](json& value) {
+        json second = value["references"][0];
+        second["ref_id"] = "second-source";
+        second["canonical_id"] = "source_second_article";
+        second["url"] = "https://example.test/source/second";
+        second["alternate_urls"] = json::array();
+        value["references"].push_back(std::move(second));
+        value["source_redirects"].push_back(
+            { { "alias_id", "source_example_article" },
+              { "canonical_id", "source_second_article" } }
+        );
+    });
+    add("source-unknown-target", [](json& value) {
+        value["source_redirects"].push_back(
+            { { "alias_id", "legacy_unknown_source" },
+              { "canonical_id", "missing_source" } }
+        );
+    });
+
+    for (const auto& [name, manifest] : invalid) {
+        const fs::path manifest_path = tree.path / (name + ".json");
+        const fs::path database_path = tree.path / (name + ".sqlite");
+        write_file(manifest_path, manifest.dump());
+        EXPECT_THROW(
+            static_cast<void>(store::import_normalized_product(
+                { .manifest_path = manifest_path,
+                  .database_path = database_path }
+            )),
+            arachne::penelope::store_error
+        ) << name;
+        EXPECT_FALSE(fs::exists(database_path)) << name;
+        expect_no_sqlite_sidecars(database_path);
+    }
+
+    const fs::path manifest_path = tree.path / "replacement.json";
+    const fs::path database_path = tree.path / "replacement.sqlite";
+    write_file(manifest_path, normalized_product_manifest_v2().dump());
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = manifest_path, .database_path = database_path }
+    ));
+    const std::string before = read_file(database_path);
+    json live_alias = normalized_product_manifest_v2();
+    live_alias["entity_redirects"].push_back(
+        { { "alias_id", "work_example_1954" },
+          { "canonical_id", "agent_example_creator" },
+          { "entity_type", "person" } }
+    );
+    write_file(manifest_path, live_alias.dump());
+    EXPECT_THROW(
+        static_cast<void>(store::import_normalized_product(
+            { .manifest_path = manifest_path, .database_path = database_path }
+        )),
+        arachne::penelope::store_error
+    );
+    EXPECT_EQ(read_file(database_path), before);
     expect_no_sqlite_sidecars(database_path);
 }
 

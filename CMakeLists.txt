@@ -239,6 +239,11 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_source_refresh -v
     )
     add_test(
+        NAME canonical_consolidation_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_consolidate_canonical_manifest -v
+    )
+    add_test(
         NAME operations_cli_tests
         COMMAND ${CMAKE_COMMAND} -E env
             ARACHNE_TEST_BINARY=$<TARGET_FILE:arachne_app>
@@ -249,7 +254,8 @@ if(BUILD_TESTS)
         legacy_corpus_normalization_tests merged_inbox_cleanup_tests
         legacy_inbox_manifest_tests
         intake_adapter_tests workflow_yaml_tests publication_adapter_tests
-        wikidata_hpc_worker_tests source_refresh_tests operations_cli_tests
+        wikidata_hpc_worker_tests source_refresh_tests
+        canonical_consolidation_tests operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 

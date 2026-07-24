@@ -44,6 +44,14 @@ struct normalized_product_import_result final {
     std::size_t assertion_count { 0 };
 };
 
+/** Result of bringing one canonical product database to the current schema. */
+struct product_database_migration_result final {
+    std::filesystem::path database_path;
+    int previous_schema_version { 0 };
+    int schema_version { 0 };
+    bool changed { false };
+};
+
 /** A complete research_candidate_graph_plan_v1 artifact. */
 struct candidate_plan_descriptor final {
     /** Validated research_candidate_graph_plan_v1 control contract. */
@@ -115,6 +123,14 @@ public:
      */
     [[nodiscard]] static normalized_product_import_result
     import_normalized_product(const normalized_product_import_request& request);
+
+    /**
+     * Atomically migrate a standalone canonical product database to the current
+     * schema. The source is never modified before a migrated, vacuumed sibling
+     * staging copy passes all integrity checks.
+     */
+    [[nodiscard]] static product_database_migration_result
+    migrate_product_database(const std::filesystem::path& database_path);
 
     [[nodiscard]] snapshot_result
     replace_candidate_snapshot(const candidate_snapshot_request& request);

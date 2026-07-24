@@ -1320,6 +1320,25 @@ int command_product_import_normalized(const options& arguments) {
     return 0;
 }
 
+int command_product_migrate_database(const options& arguments) {
+    const fs::path database = resolved_path(
+        fs::path(arguments.require("--database")), repository_root()
+    );
+    const auto result
+        = arachne::penelope::store::migrate_product_database(database);
+    emit(
+        ordered_json {
+            { "status", "ok" },
+            { "command", "product-migrate-database" },
+            { "database_path", result.database_path.generic_string() },
+            { "previous_schema_version", result.previous_schema_version },
+            { "schema_version", result.schema_version },
+            { "changed", result.changed },
+        }
+    );
+    return 0;
+}
+
 [[nodiscard]] std::vector<arachne::coordination::envelope_record>
 product_pending(arachne::coordination::operational_ledger& ledger) {
     std::vector<arachne::coordination::envelope_record> result
@@ -2388,7 +2407,8 @@ int command_viewer_build(const options& arguments) {
           { "candidate-plan", "candidate-rebuild", "cocoon-transition",
             "contract-validate", "fetch", "fetch-plan-translate",
             "inbox-baseline", "inbox-verify", "intake", "product-integrate",
-            "product-import-normalized", "viewer-build" } },
+            "product-import-normalized", "product-migrate-database",
+            "viewer-build" } },
     };
 }
 
@@ -2440,6 +2460,12 @@ int dispatch(const std::vector<std::string>& arguments) {
         && arguments[2] == "import-normalized") {
         return command_product_import_normalized(
             options(arguments, 3U, { "--manifest", "--database" })
+        );
+    }
+    if (arguments[1] == "product" && arguments.size() >= 3U
+        && arguments[2] == "migrate-database") {
+        return command_product_migrate_database(
+            options(arguments, 3U, { "--database" })
         );
     }
     if (arguments[1] == "candidate" && arguments.size() >= 3U

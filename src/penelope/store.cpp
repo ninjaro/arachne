@@ -39,10 +39,13 @@ namespace {
     namespace fs = std::filesystem;
 
     constexpr std::string_view product_contract = "product_graph_snapshot_v1";
-    constexpr std::string_view normalized_product_import_contract
+    constexpr std::string_view normalized_product_import_v1_contract
         = "normalized_product_import_v1";
+    constexpr std::string_view normalized_product_import_v2_contract
+        = "normalized_product_import_v2";
     constexpr std::string_view candidate_contract
         = "research_candidate_graph_snapshot_v1";
+    constexpr int current_product_schema_version = 3;
     constexpr std::uintmax_t maximum_normalized_manifest_bytes
         = 1024ULL * 1024ULL * 1024ULL;
 
@@ -701,6 +704,14 @@ namespace {
                                  };
     }
 
+    int product_schema_version(sqlite3* db) {
+        statement version(db, "PRAGMA user_version");
+        if (!version.row()) {
+            fail("cannot read product database schema version");
+        }
+        return sqlite3_column_int(version.get(), 0);
+    }
+
     void configure_connection(const database& db) {
         db.exec("PRAGMA foreign_keys = ON");
         db.exec("PRAGMA journal_mode = WAL");
@@ -725,15 +736,32 @@ namespace {
         fail("cannot locate schema file " + std::string(filename));
     }
 
-    void create_schema(const database& db, graph_domain domain) {
+    void create_schema(
+        const database& db, graph_domain domain,
+        const int product_schema_version = 1
+    ) {
+        if (domain == graph_domain::product && product_schema_version != 1
+            && product_schema_version != 2 && product_schema_version != 3) {
+            fail(
+                "unsupported product schema version "
+                + std::to_string(product_schema_version)
+            );
+        }
         const fs::path path = schema_path(
-            domain == graph_domain::product ? "product_v1.sql"
-                                            : "candidate_v1.sql"
+            domain == graph_domain::product
+                ? (product_schema_version == 3
+                       ? "product_v3.sql"
+                       : (product_schema_version == 2 ? "product_v2.sql"
+                                                      : "product_v1.sql"))
+                : "candidate_v1.sql"
         );
         db.exec(read_bytes(path));
     }
 
-    void normalize_obvious_product_values(const database& db) {
+    void normalize_obvious_product_values(
+        const database& db,
+        const bool allow_implicit_source_identity_coalescing = true
+    ) {
         struct external_identifier_row final {
             std::string id;
             std::string entity_id;
@@ -912,6 +940,12 @@ namespace {
             "UPDATE sources SET url=replace(url,' ','%20') "
             "WHERE instr(url,' ')>0"
         );
+        if (!allow_implicit_source_identity_coalescing) {
+            db.exec(
+                "UPDATE source_urls SET url=replace(url,' ','%20') "
+                "WHERE instr(url,' ')>0"
+            );
+        }
 
         // ISBN punctuation is presentation, not identifier content. Compact
         // only checksum-valid ISBN-10/13 values; malformed or ambiguous
@@ -1334,6 +1368,10 @@ namespace {
             "WHERE measurement_type='duration' AND "
             "qualifier='Average episode duration'"
         );
+
+        if (!allow_implicit_source_identity_coalescing) {
+            return;
+        }
 
         // Only an HTTP(S) origin and its explicit root-path spelling are
         // interchangeable without making assumptions about server routing.
@@ -2357,7 +2395,8 @@ namespace {
         if (require_canonical_id && !supplied_id) {
             fail(
                 std::string(context)
-                + ".canonical_id is required by normalized_product_import_v1"
+                + ".canonical_id is required by the normalized product "
+                  "import contract"
             );
         }
         if (supplied_id && resolved && *supplied_id != *resolved) {
@@ -2503,6 +2542,8 @@ namespace {
         sqlite3* db {};
         std::string payload_hash;
         bool require_canonical_ids { false };
+        int normalized_version { 0 };
+        int product_schema_version { 1 };
         std::unordered_map<std::string, std::string> creators;
         std::unordered_map<std::string, std::string> works;
         std::unordered_map<std::string, std::string> concepts;
@@ -2663,17 +2704,19 @@ namespace {
             std::string slug = concept_value.value("slug", make_slug(name));
             validate_slug(slug, where);
             json identity = concept_value;
-            if (const auto existing = query_text(
-                    context.db, "SELECT entity_id FROM concepts WHERE slug=?1",
-                    slug
-                )) {
-                identity["canonical_id"] = *existing;
-            } else {
-                identity["canonical_id"] = stable_id("con_", slug);
+            if (context.normalized_version < 2) {
+                if (const auto existing = query_text(
+                        context.db,
+                        "SELECT entity_id FROM concepts WHERE slug=?1", slug
+                    )) {
+                    identity["canonical_id"] = *existing;
+                } else {
+                    identity["canonical_id"] = stable_id("con_", slug);
+                }
             }
             const std::string entity_id = resolve_entity(
                 context.db, identity, "concept", context.payload_hash,
-                "concept", local_id, where
+                "concept", local_id, where, context.normalized_version >= 2
             );
             statement insert(
                 context.db,
@@ -2702,6 +2745,34 @@ namespace {
             insert_name(
                 context.db, entity_id, "english", "en", std::nullopt, name, true
             );
+            std::size_t name_index = 0;
+            for (const auto& alternate :
+                 array_or_empty(concept_value, "names", where)) {
+                const std::string name_where
+                    = where + ".names[" + std::to_string(name_index++) + "]";
+                const bool preferred = alternate.value("preferred", false);
+                insert_name(
+                    context.db, entity_id,
+                    require_string(alternate, "type", name_where),
+                    optional_string(alternate, "language", name_where),
+                    optional_string(alternate, "script", name_where),
+                    require_string(alternate, "value", name_where), preferred
+                );
+            }
+            if (context.product_schema_version < 3) {
+                for (const auto& alias :
+                     array_or_empty(concept_value, "slug_aliases", where)) {
+                    const std::string alias_slug = alias.get<std::string>();
+                    statement insert_alias(
+                        context.db,
+                        "INSERT INTO concept_slug_aliases(slug,concept_id) "
+                        "VALUES(?1,?2)"
+                    );
+                    insert_alias.text(1, alias_slug);
+                    insert_alias.text(2, entity_id);
+                    insert_alias.done();
+                }
+            }
             context.concepts.emplace(local_id, entity_id);
         }
     }
@@ -3559,33 +3630,59 @@ namespace {
         }
     }
 
-    void validate_batch_transfer_surface(
+    std::string validate_safe_stable_id(
+        const json& value, std::string_view key, std::string_view context
+    ) {
+        const std::string id = require_string(value, key, context);
+        if (id.size() > 128 || !std::ranges::all_of(id, [](unsigned char c) {
+                return std::isalnum(c) != 0 || c == '_' || c == '-';
+            })) {
+            fail(
+                std::string(context) + "." + std::string(key)
+                + " is not a safe stable ID"
+            );
+        }
+        return id;
+    }
+
+    int validate_batch_transfer_surface(
         const json& batch, const bool normalized_manifest = false
     ) {
+        int normalized_version = 0;
         if (normalized_manifest) {
             if (!batch.is_object()) {
                 fail("normalized product manifest must be a JSON object");
             }
             const auto contract = batch.find("contract");
+            const auto version = batch.find("format_version");
             if (contract == batch.end() || !contract->is_string()
-                || contract->get_ref<const std::string&>()
-                    != normalized_product_import_contract) {
+                || version == batch.end() || !version->is_number_integer()) {
                 fail(
-                    "normalized product manifest contract must be '"
-                    + std::string(normalized_product_import_contract) + "'"
+                    "normalized product manifest requires a supported "
+                    "contract and integer format_version"
                 );
             }
-            const auto version = batch.find("format_version");
-            if (version == batch.end() || !version->is_number_integer()
-                || version->get<int>() != 1) {
+            const std::string& contract_name
+                = contract->get_ref<const std::string&>();
+            normalized_version = version->get<int>();
+            const bool v1
+                = contract_name == normalized_product_import_v1_contract
+                && normalized_version == 1;
+            const bool v2
+                = contract_name == normalized_product_import_v2_contract
+                && normalized_version == 2;
+            if (!v1 && !v2) {
                 fail(
-                    "normalized product manifest format_version must be "
-                    "integer 1"
+                    "normalized product manifest contract/format_version "
+                    "must be normalized_product_import_v1/1 or "
+                    "normalized_product_import_v2/2"
                 );
             }
         } else {
             validate_batch_header(batch);
         }
+        const bool normalized_v2
+            = normalized_manifest && normalized_version == 2;
         static const std::set<std::string_view> legacy_top_level {
             "contract",
             "format_version",
@@ -3621,8 +3718,27 @@ namespace {
             "parent_guide_assertions",
             "remote_assets"
         };
-        const auto& transferred_top_level
-            = normalized_manifest ? normalized_top_level : legacy_top_level;
+        static const std::set<std::string_view> normalized_v2_top_level {
+            "contract",
+            "format_version",
+            "creators",
+            "works",
+            "credits",
+            "tags",
+            "references",
+            "assertions",
+            "manifestations",
+            "concept_relations",
+            "measurements",
+            "financial_facts",
+            "parent_guide_assertions",
+            "remote_assets",
+            "entity_redirects",
+            "source_redirects"
+        };
+        const auto& transferred_top_level = normalized_v2
+            ? normalized_v2_top_level
+            : (normalized_manifest ? normalized_top_level : legacy_top_level);
         for (const auto& [key, value] : batch.items()) {
             if (!transferred_top_level.contains(key)
                 && (normalized_manifest || has_transfer_content(value))) {
@@ -3631,14 +3747,15 @@ namespace {
                                          : "MINER legacy-v1 field '")
                     + key
                     + (normalized_manifest
-                           ? "' is outside normalized_product_import_v1"
+                           ? "' is outside the normalized product import "
+                             "contract"
                            : "' has no lossless product-database adapter; "
                              "retain it as a problematic remainder")
                 );
             }
         }
         if (normalized_manifest) {
-            for (const std::string_view key : normalized_top_level) {
+            for (const std::string_view key : transferred_top_level) {
                 if (key == "contract" || key == "format_version") {
                     continue;
                 }
@@ -3739,6 +3856,19 @@ namespace {
         };
         static const std::set<std::string_view> spoiler_levels { "none", "mild",
                                                                  "major" };
+        static const std::set<std::string_view> entity_types {
+            "work",         "manifestation", "person",
+            "organization", "group",         "concept"
+        };
+
+        std::set<std::string, std::less<>> concept_slugs;
+        std::set<std::string, std::less<>> concept_slug_aliases;
+        std::set<std::string, std::less<>> primary_source_urls;
+        std::set<std::string, std::less<>> alternate_source_urls;
+        std::set<std::string, std::less<>> entity_redirect_aliases;
+        std::set<std::string, std::less<>> entity_redirect_targets;
+        std::set<std::string, std::less<>> source_redirect_aliases;
+        std::set<std::string, std::less<>> source_redirect_targets;
 
         const auto records = [&](std::string_view key, const auto& validate) {
             std::size_t index = 0;
@@ -3885,18 +4015,81 @@ namespace {
             }
         });
         records("tags", [&](const json& value, const std::string& where) {
-            require_only_fields(
-                value, { "local_id", "external_ids", "name", "type", "slug" },
-                where
-            );
+            if (normalized_v2) {
+                require_only_fields(
+                    value,
+                    { "local_id", "canonical_id", "external_ids", "name",
+                      "names", "type", "slug", "slug_aliases" },
+                    where
+                );
+            } else {
+                require_only_fields(
+                    value,
+                    { "local_id", "external_ids", "name", "type", "slug" },
+                    where
+                );
+            }
             validate_external_ids(value, where);
             validate_controlled_value(
                 value, "type", concept_types, where, true
             );
             if (normalized_manifest) {
-                validate_slug(require_string(value, "slug", where), where);
+                const std::string slug = require_string(value, "slug", where);
+                validate_slug(slug, where);
+                if (normalized_v2 && !concept_slugs.insert(slug).second) {
+                    fail(where + ".slug duplicates another canonical slug");
+                }
+            }
+            if (normalized_v2) {
+                validate_normalized_canonical_id(value, where);
+                std::size_t name_index = 0;
+                for (const auto& name : array_or_empty(value, "names", where)) {
+                    const std::string name_where = where + ".names["
+                        + std::to_string(name_index++) + "]";
+                    if (!name.is_object()) {
+                        fail(name_where + " must be an object");
+                    }
+                    require_only_fields(
+                        name,
+                        { "type", "language", "script", "value", "preferred" },
+                        name_where
+                    );
+                    validate_controlled_value(
+                        name, "type", name_types, name_where, true
+                    );
+                    if (!name.contains("preferred")
+                        || !name.at("preferred").is_boolean()) {
+                        fail(name_where + ".preferred must be boolean");
+                    }
+                    (void)require_string(name, "value", name_where);
+                }
+                std::size_t alias_index = 0;
+                for (const auto& alias :
+                     array_or_empty(value, "slug_aliases", where)) {
+                    const std::string alias_where = where + ".slug_aliases["
+                        + std::to_string(alias_index++) + "]";
+                    if (!alias.is_string()
+                        || alias.get_ref<const std::string&>().empty()) {
+                        fail(alias_where + " must be a non-empty string");
+                    }
+                    const std::string alias_slug = alias.get<std::string>();
+                    validate_slug(alias_slug, alias_where);
+                    if (!concept_slug_aliases.insert(alias_slug).second) {
+                        fail(alias_where + " duplicates another slug alias");
+                    }
+                }
             }
         });
+        if (normalized_v2) {
+            for (const auto& alias : concept_slug_aliases) {
+                if (concept_slugs.contains(alias)) {
+                    fail(
+                        "concept slug alias '" + alias
+                        + "' is also a live canonical slug"
+                    );
+                }
+            }
+        }
         records(
             "manifestations", [&](const json& value, const std::string& where) {
                 require_only_fields(
@@ -3972,13 +4165,48 @@ namespace {
             }
         );
         records("references", [&](const json& value, const std::string& where) {
-            require_only_fields(
-                value,
-                { "ref_id", "source_type", "title", "bibliography", "author",
-                  "publisher", "publication_date", "url", "doi", "isbn",
-                  "language", "archive" },
-                where
-            );
+            if (normalized_v2) {
+                require_only_fields(
+                    value,
+                    { "ref_id", "canonical_id", "source_type", "title",
+                      "bibliography", "author", "publisher", "publication_date",
+                      "url", "alternate_urls", "doi", "isbn", "language",
+                      "archive" },
+                    where
+                );
+                validate_normalized_canonical_id(value, where);
+            } else {
+                require_only_fields(
+                    value,
+                    { "ref_id", "source_type", "title", "bibliography",
+                      "author", "publisher", "publication_date", "url", "doi",
+                      "isbn", "language", "archive" },
+                    where
+                );
+            }
+            if (normalized_v2) {
+                if (const auto primary = optional_string(value, "url", where)) {
+                    primary_source_urls.insert(*primary);
+                }
+                std::size_t alternate_index = 0;
+                for (const auto& alternate :
+                     array_or_empty(value, "alternate_urls", where)) {
+                    const std::string alternate_where = where
+                        + ".alternate_urls[" + std::to_string(alternate_index++)
+                        + "]";
+                    if (!alternate.is_string()
+                        || alternate.get_ref<const std::string&>().empty()) {
+                        fail(alternate_where + " must be a non-empty string");
+                    }
+                    const std::string url = alternate.get<std::string>();
+                    if (!alternate_source_urls.insert(url).second) {
+                        fail(
+                            alternate_where
+                            + " duplicates another alternate source URL"
+                        );
+                    }
+                }
+            }
             if (const auto archive = value.find("archive");
                 archive != value.end() && archive->is_object()) {
                 require_only_fields(
@@ -4014,6 +4242,16 @@ namespace {
                 value, "source_type", source_types, where, normalized_manifest
             );
         });
+        if (normalized_v2) {
+            for (const auto& alternate : alternate_source_urls) {
+                if (primary_source_urls.contains(alternate)) {
+                    fail(
+                        "alternate source URL is also a primary source URL: "
+                        + alternate
+                    );
+                }
+            }
+        }
         records("assertions", [&](const json& value, const std::string& where) {
             require_only_fields(
                 value,
@@ -4073,17 +4311,165 @@ namespace {
                 );
             }
         );
+        if (normalized_v2) {
+            records(
+                "entity_redirects",
+                [&](const json& value, const std::string& where) {
+                    require_only_fields(
+                        value, { "alias_id", "canonical_id", "entity_type" },
+                        where
+                    );
+                    const std::string alias
+                        = validate_safe_stable_id(value, "alias_id", where);
+                    const std::string target
+                        = validate_safe_stable_id(value, "canonical_id", where);
+                    validate_controlled_value(
+                        value, "entity_type", entity_types, where, true
+                    );
+                    if (alias == target) {
+                        fail(where + " must not redirect an ID to itself");
+                    }
+                    if (!entity_redirect_aliases.insert(alias).second) {
+                        fail(
+                            where + " duplicates entity redirect alias " + alias
+                        );
+                    }
+                    entity_redirect_targets.insert(target);
+                }
+            );
+            records(
+                "source_redirects",
+                [&](const json& value, const std::string& where) {
+                    require_only_fields(
+                        value, { "alias_id", "canonical_id" }, where
+                    );
+                    const std::string alias
+                        = validate_safe_stable_id(value, "alias_id", where);
+                    const std::string target
+                        = validate_safe_stable_id(value, "canonical_id", where);
+                    if (alias == target) {
+                        fail(where + " must not redirect an ID to itself");
+                    }
+                    if (!source_redirect_aliases.insert(alias).second) {
+                        fail(
+                            where + " duplicates source redirect alias " + alias
+                        );
+                    }
+                    source_redirect_targets.insert(target);
+                }
+            );
+            for (const auto& alias : entity_redirect_aliases) {
+                if (entity_redirect_targets.contains(alias)) {
+                    fail(
+                        "entity redirects must point directly to live "
+                        "canonical entities; alias appears as a target: "
+                        + alias
+                    );
+                }
+            }
+            for (const auto& alias : source_redirect_aliases) {
+                if (source_redirect_targets.contains(alias)) {
+                    fail(
+                        "source redirects must point directly to live "
+                        "canonical sources; alias appears as a target: "
+                        + alias
+                    );
+                }
+            }
+        }
+        return normalized_version;
+    }
+
+    void import_redirects(batch_context& context, const json& batch) {
+        std::size_t index = 0;
+        for (const auto& redirect :
+             array_or_empty(batch, "entity_redirects", "batch")) {
+            const std::string where
+                = "entity_redirects[" + std::to_string(index++) + "]";
+            const std::string alias
+                = require_string(redirect, "alias_id", where);
+            const std::string canonical
+                = require_string(redirect, "canonical_id", where);
+            const std::string entity_type
+                = require_string(redirect, "entity_type", where);
+            const auto target_type = query_text(
+                context.db, "SELECT entity_type FROM entities WHERE id=?1",
+                canonical
+            );
+            if (!target_type) {
+                fail(where + " targets an unknown canonical entity");
+            }
+            if (*target_type != entity_type) {
+                fail(
+                    where
+                    + ".entity_type is incompatible with its canonical target"
+                );
+            }
+            if (table_has_row(
+                    context.db, "SELECT 1 FROM entities WHERE id=?1 LIMIT 1",
+                    alias
+                )) {
+                fail(where + ".alias_id is still a live entity");
+            }
+            if (context.product_schema_version < 3) {
+                statement insert(
+                    context.db,
+                    "INSERT INTO entity_redirects"
+                    "(alias_id,canonical_id,entity_type) VALUES(?1,?2,?3)"
+                );
+                insert.text(1, alias);
+                insert.text(2, canonical);
+                insert.text(3, entity_type);
+                insert.done();
+            }
+        }
+
+        index = 0;
+        for (const auto& redirect :
+             array_or_empty(batch, "source_redirects", "batch")) {
+            const std::string where
+                = "source_redirects[" + std::to_string(index++) + "]";
+            const std::string alias
+                = require_string(redirect, "alias_id", where);
+            const std::string canonical
+                = require_string(redirect, "canonical_id", where);
+            if (!table_has_row(
+                    context.db, "SELECT 1 FROM sources WHERE id=?1 LIMIT 1",
+                    canonical
+                )) {
+                fail(where + " targets an unknown canonical source");
+            }
+            if (table_has_row(
+                    context.db, "SELECT 1 FROM sources WHERE id=?1 LIMIT 1",
+                    alias
+                )) {
+                fail(where + ".alias_id is still a live source");
+            }
+            if (context.product_schema_version < 3) {
+                statement insert(
+                    context.db,
+                    "INSERT INTO source_redirects(alias_id,canonical_id) "
+                    "VALUES(?1,?2)"
+                );
+                insert.text(1, alias);
+                insert.text(2, canonical);
+                insert.done();
+            }
+        }
     }
 
     void import_batch(
         sqlite3* db, const json& batch, std::string payload_hash,
         const bool normalized_manifest = false
     ) {
-        validate_batch_transfer_surface(batch, normalized_manifest);
+        const int normalized_version
+            = validate_batch_transfer_surface(batch, normalized_manifest);
         batch_context context;
         context.db = db;
         context.payload_hash = std::move(payload_hash);
         context.require_canonical_ids = normalized_manifest;
+        context.normalized_version = normalized_version;
+        context.product_schema_version = product_schema_version(db);
         import_creators(context, batch);
         import_concepts(context, batch);
         import_works(context, batch);
@@ -4096,6 +4482,9 @@ namespace {
         import_assertions(context, batch);
         import_concept_relations(context, batch);
         import_parent_guides(context, batch);
+        if (normalized_version >= 2) {
+            import_redirects(context, batch);
+        }
     }
 
     std::string lookup_local(
@@ -4194,7 +4583,9 @@ namespace {
                 = require_string(source, "ref_id", where);
             require_unique_local_id(context.sources, local_id, where);
             const std::string identity = source_identity(source, where);
-            const std::string source_id = stable_id("src_", identity);
+            const std::string source_id = context.normalized_version >= 2
+                ? require_string(source, "canonical_id", where)
+                : stable_id("src_", identity);
             const std::string source_type = source.value(
                 "source_type",
                 source.contains("url") ? std::string("web_page")
@@ -4265,6 +4656,22 @@ namespace {
             );
             require_matching_row(verify_source, where);
             context.sources.emplace(local_id, source_id);
+
+            for (const auto& alternate :
+                 array_or_empty(source, "alternate_urls", where)) {
+                const std::string url = alternate.get<std::string>();
+                const std::string url_id
+                    = stable_id("url_", source_id + "|" + url);
+                statement insert_url(
+                    context.db,
+                    "INSERT INTO source_urls(id,source_id,url) "
+                    "VALUES(?1,?2,?3)"
+                );
+                insert_url.text(1, url_id);
+                insert_url.text(2, source_id);
+                insert_url.text(3, url);
+                insert_url.done();
+            }
 
             const auto archive = source.find("archive");
             if (archive != source.end() && !archive->is_null()) {
@@ -4402,6 +4809,14 @@ namespace {
             }
 
             if (domain == graph_domain::product) {
+                const int schema_version = product_schema_version(db.get());
+                if (schema_version != 1 && schema_version != 2
+                    && schema_version != current_product_schema_version) {
+                    report.problems.push_back(
+                        "unsupported product database schema version "
+                        + std::to_string(schema_version)
+                    );
+                }
                 add_problem_if(
                     report, db.get(),
                     "SELECT 1 FROM works w WHERE NOT EXISTS"
@@ -4495,6 +4910,80 @@ namespace {
                     " LIMIT 1",
                     "canonical database contains a forbidden operational column"
                 );
+                if (schema_version == 2) {
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM entity_redirects r JOIN entities e "
+                        "ON e.id=r.alias_id LIMIT 1",
+                        "an entity redirect alias is still a live entity"
+                    );
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM entity_redirects r JOIN "
+                        "entity_redirects next ON next.alias_id=r.canonical_id "
+                        "LIMIT 1",
+                        "entity redirects contain a chain or cycle"
+                    );
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM entity_redirects r JOIN entities e "
+                        "ON e.id=r.canonical_id WHERE "
+                        "e.entity_type<>r.entity_type LIMIT 1",
+                        "an entity redirect has an incompatible target type"
+                    );
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM source_redirects r JOIN sources s "
+                        "ON s.id=r.alias_id LIMIT 1",
+                        "a source redirect alias is still a live source"
+                    );
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM source_redirects r JOIN "
+                        "source_redirects next ON "
+                        "next.alias_id=r.canonical_id LIMIT 1",
+                        "source redirects contain a chain or cycle"
+                    );
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM concept_slug_aliases a JOIN concepts c "
+                        "ON c.slug=a.slug LIMIT 1",
+                        "a concept slug alias is still a live canonical slug"
+                    );
+                }
+                if (schema_version >= 2) {
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM source_urls u JOIN sources s "
+                        "ON s.url=u.url LIMIT 1",
+                        "an alternate source URL is also a primary source URL"
+                    );
+                }
+                if (schema_version >= 3) {
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM sqlite_schema WHERE name IN"
+                        "('entity_redirects','source_redirects',"
+                        "'concept_slug_aliases',"
+                        "'entity_redirects_canonical_idx',"
+                        "'source_redirects_canonical_idx',"
+                        "'concept_slug_aliases_concept_idx',"
+                        "'entity_redirect_alias_not_active_insert',"
+                        "'entity_redirect_alias_not_active_update',"
+                        "'entity_id_not_redirect_alias_insert',"
+                        "'entity_id_not_redirect_alias_update',"
+                        "'source_redirect_alias_not_active_insert',"
+                        "'source_redirect_alias_not_active_update',"
+                        "'source_id_not_redirect_alias_insert',"
+                        "'source_id_not_redirect_alias_update',"
+                        "'concept_slug_not_alias_insert',"
+                        "'concept_slug_not_alias_update',"
+                        "'concept_alias_not_canonical_insert',"
+                        "'concept_alias_not_canonical_update') LIMIT 1",
+                        "product schema v3 contains retired compatibility "
+                        "metadata"
+                    );
+                }
             } else {
                 add_problem_if(
                     report, db.get(),
@@ -4564,8 +5053,9 @@ namespace {
         std::string_view order;
     };
 
-    const std::vector<export_table>& export_tables(graph_domain domain) {
-        static const std::vector<export_table> product {
+    const std::vector<export_table>&
+    export_tables(graph_domain domain, const int product_schema_version = 1) {
+        static const std::vector<export_table> product_v1 {
             { "entities", "id" },
             { "works", "entity_id" },
             { "manifestations", "entity_id" },
@@ -4587,13 +5077,68 @@ namespace {
             { "parent_guide_assertions", "id" },
             { "parent_guide_evidence", "assertion_id,evidence_id" },
         };
+        static const std::vector<export_table> product_v2 {
+            { "entities", "id" },
+            { "entity_redirects", "alias_id" },
+            { "works", "entity_id" },
+            { "manifestations", "entity_id" },
+            { "names", "id" },
+            { "external_ids", "id" },
+            { "agents", "entity_id" },
+            { "credits", "id" },
+            { "measurements", "id" },
+            { "financial_facts", "id" },
+            { "remote_assets", "id" },
+            { "concepts", "entity_id" },
+            { "concept_slug_aliases", "slug" },
+            { "concept_relations", "id" },
+            { "work_concepts", "id" },
+            { "sources", "id" },
+            { "source_redirects", "alias_id" },
+            { "source_urls", "id" },
+            { "source_archives", "id" },
+            { "evidence", "id" },
+            { "work_concept_evidence", "assertion_id,evidence_id" },
+            { "concept_relation_evidence", "assertion_id,evidence_id" },
+            { "parent_guide_assertions", "id" },
+            { "parent_guide_evidence", "assertion_id,evidence_id" },
+        };
+        static const std::vector<export_table> product_v3 {
+            { "entities", "id" },
+            { "works", "entity_id" },
+            { "manifestations", "entity_id" },
+            { "names", "id" },
+            { "external_ids", "id" },
+            { "agents", "entity_id" },
+            { "credits", "id" },
+            { "measurements", "id" },
+            { "financial_facts", "id" },
+            { "remote_assets", "id" },
+            { "concepts", "entity_id" },
+            { "concept_relations", "id" },
+            { "work_concepts", "id" },
+            { "sources", "id" },
+            { "source_urls", "id" },
+            { "source_archives", "id" },
+            { "evidence", "id" },
+            { "work_concept_evidence", "assertion_id,evidence_id" },
+            { "concept_relation_evidence", "assertion_id,evidence_id" },
+            { "parent_guide_assertions", "id" },
+            { "parent_guide_evidence", "assertion_id,evidence_id" },
+        };
         static const std::vector<export_table> candidate {
             { "candidate_graph_info", "singleton" },
             { "candidate_groups", "id" },
             { "candidate_nodes", "id" },
             { "candidate_edges", "id" },
         };
-        return domain == graph_domain::product ? product : candidate;
+        if (domain != graph_domain::product) {
+            return candidate;
+        }
+        if (product_schema_version >= 3) {
+            return product_v3;
+        }
+        return product_schema_version == 2 ? product_v2 : product_v1;
     }
 
     json sqlite_value(sqlite3_stmt* statement_value, int column) {
@@ -4778,6 +5323,14 @@ std::string store::export_jsonl(
         database_path, SQLITE_OPEN_READONLY, database_access::immutable_readonly
     );
     db.exec("PRAGMA foreign_keys = ON");
+    int product_schema_version = 1;
+    if (domain == graph_domain::product) {
+        statement version(db.get(), "PRAGMA user_version");
+        if (!version.row()) {
+            fail("cannot read product database schema version");
+        }
+        product_schema_version = sqlite3_column_int(version.get(), 0);
+    }
     if (!destination.parent_path().empty()) {
         fs::create_directories(destination.parent_path());
     }
@@ -4785,7 +5338,7 @@ std::string store::export_jsonl(
     if (!output) {
         fail("cannot create deterministic export: " + destination.string());
     }
-    for (const auto& table : export_tables(domain)) {
+    for (const auto& table : export_tables(domain, product_schema_version)) {
         statement rows(
             db.get(),
             "SELECT * FROM " + std::string(table.name) + " ORDER BY "
@@ -5036,7 +5589,11 @@ normalized_product_import_result store::import_normalized_product(
 
     const json manifest = read_normalized_manifest(manifest_path);
     // Complete preflight happens before any staging or destination mutation.
-    validate_batch_transfer_surface(manifest, true);
+    const int normalized_version
+        = validate_batch_transfer_surface(manifest, true);
+    const int database_schema_version = normalized_version >= 2
+        ? current_product_schema_version
+        : normalized_version;
 
     fs::create_directories(destination.parent_path());
     path_error.clear();
@@ -5120,10 +5677,10 @@ normalized_product_import_result store::import_normalized_product(
             staging_database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
         );
         configure_connection(db);
-        create_schema(db, graph_domain::product);
+        create_schema(db, graph_domain::product, database_schema_version);
         transaction import(db);
         import_batch(db.get(), manifest, {}, true);
-        normalize_obvious_product_values(db);
+        normalize_obvious_product_values(db, normalized_version < 2);
         import.commit();
     }
     seal_and_validate_database(graph_domain::product, staging_database);
@@ -5175,6 +5732,187 @@ normalized_product_import_result store::import_normalized_product(
             + destination.string()
         );
     }
+    return result;
+}
+
+product_database_migration_result store::migrate_product_database(
+    const fs::path& database_path
+) {
+    if (database_path.empty()) {
+        fail("product database migration requires a database path");
+    }
+
+    const fs::path requested_destination
+        = fs::absolute(database_path).lexically_normal();
+    if (requested_destination == requested_destination.root_path()
+        || requested_destination.filename().empty()) {
+        fail("product database migration path must name a file");
+    }
+    for (const auto& component : requested_destination) {
+        if (component == "inbox") {
+            fail("product database migration must not operate inside inbox");
+        }
+    }
+
+    std::error_code path_error;
+    const fs::path resolved_parent
+        = fs::weakly_canonical(requested_destination.parent_path(), path_error);
+    if (path_error) {
+        fail(
+            "cannot resolve product database migration parent: "
+            + path_error.message()
+        );
+    }
+    for (const auto& component : resolved_parent) {
+        if (component == "inbox") {
+            fail("product database migration must not resolve inside inbox");
+        }
+    }
+    const fs::path destination
+        = resolved_parent / requested_destination.filename();
+
+    const auto validate_destination = [&]() {
+        std::error_code error;
+        const fs::file_status destination_status
+            = fs::symlink_status(destination, error);
+        if (error || !fs::is_regular_file(destination_status)) {
+            fail(
+                "product database migration requires a non-symlink regular "
+                "database file: "
+                + destination.string()
+            );
+        }
+        for (const std::string_view suffix : { "-wal", "-shm", "-journal" }) {
+            fs::path sidecar = destination;
+            sidecar += suffix;
+            error.clear();
+            const fs::file_status sidecar_status
+                = fs::symlink_status(sidecar, error);
+            if (error && error != std::errc::no_such_file_or_directory) {
+                fail(
+                    "cannot inspect product database migration sidecar: "
+                    + error.message()
+                );
+            }
+            if (!error && fs::exists(sidecar_status)) {
+                fail(
+                    "refusing to migrate a canonical database with a live "
+                    "SQLite sidecar: "
+                    + sidecar.string()
+                );
+            }
+        }
+    };
+    validate_destination();
+
+    const fs::path lock_path = destination.parent_path()
+        / ("." + destination.filename().string() + ".import-lock");
+    path_error.clear();
+    if (!fs::create_directory(lock_path, path_error)) {
+        if (path_error) {
+            fail(
+                "cannot acquire product database migration lock: "
+                + path_error.message()
+            );
+        }
+        fail(
+            "another product database writer holds the destination lock: "
+            + lock_path.string()
+        );
+    }
+    normalized_import_lock_guard writer_lock {
+        .path = lock_path,
+        .expected_parent = destination.parent_path(),
+        .expected_name = lock_path.filename().string()
+    };
+    validate_destination();
+
+    int previous_schema_version = 0;
+    {
+        database source(
+            destination, SQLITE_OPEN_READONLY,
+            database_access::immutable_readonly
+        );
+        previous_schema_version = product_schema_version(source.get());
+    }
+    if (previous_schema_version != 2
+        && previous_schema_version != current_product_schema_version) {
+        fail(
+            "unsupported product database migration from schema version "
+            + std::to_string(previous_schema_version)
+        );
+    }
+
+    const auto require_valid_database = [&](const fs::path& path) {
+        const auto report = inspect_database(
+            graph_domain::product, path, database_access::immutable_readonly
+        );
+        if (report.ok) {
+            return;
+        }
+        std::string message = "product database migration validation failed";
+        for (const auto& problem : report.problems) {
+            message += "\n- " + problem;
+        }
+        fail(std::move(message));
+    };
+    require_valid_database(destination);
+
+    product_database_migration_result result {
+        .database_path = destination,
+        .previous_schema_version = previous_schema_version,
+        .schema_version = previous_schema_version,
+        .changed = false
+    };
+    if (previous_schema_version == current_product_schema_version) {
+        return result;
+    }
+
+    normalized_import_staging_guard staging {
+        .path = make_normalized_import_staging_directory(destination),
+        .expected_parent = destination.parent_path(),
+        .expected_prefix
+        = "." + destination.filename().string() + ".import-staging"
+    };
+    const fs::path staging_database = staging.path / "graph.sqlite";
+    copy_database(destination, staging_database);
+    {
+        database db(staging_database, SQLITE_OPEN_READWRITE);
+        configure_connection(db);
+        if (product_schema_version(db.get()) != 2) {
+            fail("staged product database changed schema version before migration");
+        }
+        db.exec(read_bytes(schema_path("migrations/product_v2_to_v3.sql")));
+        if (product_schema_version(db.get())
+            != current_product_schema_version) {
+            fail("product database migration did not set schema version 3");
+        }
+        db.exec("VACUUM");
+    }
+    seal_and_validate_database(graph_domain::product, staging_database);
+    remove_staging_sqlite_sidecars(staging_database, staging.path);
+
+    for (const std::string_view suffix : { "-wal", "-shm", "-journal" }) {
+        fs::path sidecar = staging_database;
+        sidecar += suffix;
+        if (fs::exists(sidecar)) {
+            fail(
+                "checkpointed migrated product database retained a SQLite "
+                "sidecar: "
+                + sidecar.string()
+            );
+        }
+    }
+    validate_destination();
+    if (std::rename(staging_database.c_str(), destination.c_str()) != 0) {
+        fail(
+            "cannot atomically activate migrated product database: "
+            + destination.string()
+        );
+    }
+
+    result.schema_version = current_product_schema_version;
+    result.changed = true;
     return result;
 }
 

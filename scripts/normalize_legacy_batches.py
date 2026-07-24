@@ -2293,10 +2293,19 @@ class Normalizer:
             value = record.value
             url = value.get("url")
             record_identities: list[str] = []
-            for key in ("doi", "isbn", "url", "bibliography", "bibliography_text"):
+            # Bibliographic prose is a fallback identity, not an authority
+            # equivalent to DOI/ISBN/URL.  Using every populated field as a
+            # union edge can transitively collapse two distinct web pages that
+            # happen to share a generic citation string.
+            for key in ("doi", "isbn", "url"):
                 if _is_scalar_string(value.get(key)):
-                    canonical_key = "bibliography" if key == "bibliography_text" else key
-                    record_identities.append(f"{canonical_key}:{value[key]}")
+                    record_identities.append(f"{key}:{value[key]}")
+            if not record_identities:
+                for key in ("bibliography", "bibliography_text"):
+                    if _is_scalar_string(value.get(key)):
+                        record_identities.append(
+                            f"bibliography:{value[key]}"
+                        )
             if isinstance(url, str) and url.lower().startswith("file:"):
                 _reject(self.findings, record, "non_scholarly_file_reference", "local file URI is not a portable scholarly source")
                 continue

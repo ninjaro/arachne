@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -49,6 +50,10 @@ from scripts.normalize_legacy_batches import (
     _canonical_isni,
     _safe_member,
     load_documents,
+)
+from scripts.consolidate_canonical_manifest import (
+    ConsolidationError,
+    _validate_manifest_references as _validate_v2_manifest,
 )
 
 
@@ -1415,10 +1420,11 @@ def _read_existing_manifest(path: Path) -> dict[str, Any] | None:
         value = _strict_json_object(path.read_text(encoding="utf-8"), str(path))
     except UnicodeDecodeError as error:
         raise CleanupError(f"{path}: existing manifest is not UTF-8") from error
-    if (
-        value.get("contract") != "normalized_product_import_v1"
-        or value.get("format_version") != 1
-    ):
+    contract = (value.get("contract"), value.get("format_version"))
+    if contract not in {
+        ("normalized_product_import_v1", 1),
+        ("normalized_product_import_v2", 2),
+    }:
         raise CleanupError(f"{path}: existing manifest has an unsupported contract")
     for collection in MANIFEST_ARRAYS:
         records = value.get(collection)
@@ -1428,6 +1434,22 @@ def _read_existing_manifest(path: Path) -> dict[str, Any] | None:
             raise CleanupError(
                 f"{path}: normalized manifest collection {collection!r} is invalid"
             )
+    if contract == ("normalized_product_import_v2", 2):
+        for collection in ("entity_redirects", "source_redirects"):
+            records = value.get(collection)
+            if not isinstance(records, list) or any(
+                not isinstance(record, dict) for record in records
+            ):
+                raise CleanupError(
+                    f"{path}: normalized manifest collection "
+                    f"{collection!r} is invalid"
+                )
+        try:
+            _validate_v2_manifest(value)
+        except (ConsolidationError, KeyError, TypeError, ValueError) as error:
+            raise CleanupError(
+                f"{path}: existing v2 manifest is invalid: {error}"
+            ) from error
     return value
 
 
@@ -1642,7 +1664,10 @@ def _work_keys(
                 ]
             )
         ]
-    return authority
+    # A title/date/medium record without a resolved key creator is not a
+    # canonical work identity, even when every submitted scalar happens to be
+    # byte-identical to an existing row.
+    return []
 
 
 def _reference_keys(value: Mapping[str, Any]) -> list[str]:
@@ -1652,13 +1677,17 @@ def _reference_keys(value: Mapping[str, Any]) -> list[str]:
         result.append(_json_text(["doi", doi.lower()]))
     isbn = value.get("isbn")
     if isinstance(isbn, str) and isbn:
-        result.append(_json_text(["isbn", _normalized_isbn(isbn) or isbn]))
-    for key in ("url", "bibliography"):
-        item = value.get(key)
-        if isinstance(item, str) and item:
-            result.append(_json_text([key, item]))
+        result.append(
+            _json_text(["isbn", _normalized_isbn(isbn) or isbn])
+        )
+    url = value.get("url")
+    if isinstance(url, str) and url:
+        result.append(_json_text(["url", url]))
     if result:
         return sorted(set(result))
+    bibliography = value.get("bibliography")
+    if isinstance(bibliography, str) and bibliography:
+        return [_json_text(["bibliography", bibliography])]
     return [_json_text(["semantic", value])]
 
 
@@ -1783,6 +1812,898 @@ def _rewrite_evidence(
                 item["ref_id"] = _replace_identifier(
                     item.get("ref_id"), reference_ids
                 )
+
+
+def _transport_identifier(
+    collection: str, value: Mapping[str, Any]
+) -> str:
+    key = "ref_id" if collection == "references" else "local_id"
+    identifier = value.get(key)
+    if not isinstance(identifier, str) or not identifier:
+        raise CleanupError(
+            f"normalized {collection} record is missing its transport identifier"
+        )
+    return identifier
+
+
+def _stable_v2_id(prefix: str, identity: str) -> str:
+    return prefix + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _v2_concept_id(value: Mapping[str, Any]) -> str:
+    slug = value.get("slug")
+    if not isinstance(slug, str) or not slug:
+        raise CleanupError("normalized concept has no stable slug")
+    return _stable_v2_id("con_", slug)
+
+
+def _v2_source_identity(value: Mapping[str, Any]) -> str:
+    for field in ("doi", "isbn", "url", "bibliography"):
+        item = value.get(field)
+        if isinstance(item, str) and item:
+            return f"{field}|{item}"
+    raise CleanupError(
+        f"normalized source {value.get('ref_id', '<unknown>')} has no "
+        "stable identity field"
+    )
+
+
+def _v2_source_id(value: Mapping[str, Any]) -> str:
+    return _stable_v2_id("src_", _v2_source_identity(value))
+
+
+def _v2_work_keys(
+    value: Mapping[str, Any], creators_by_work: Mapping[str, list[str]]
+) -> list[str]:
+    authority = _entity_keys("work", value)
+    if authority and json.loads(authority[0])[0] == "external":
+        return authority
+    identifier = _transport_identifier("works", value)
+    title = _preferred_title(value)
+    creators = creators_by_work.get(identifier, [])
+    if title and value.get("date") is not None and value.get("medium") and creators:
+        return [
+            _json_text(
+                [
+                    "composite",
+                    title,
+                    value.get("date"),
+                    value.get("medium"),
+                    creators,
+                ]
+            )
+        ]
+    return authority
+
+
+def _normalized_creator_labels(value: Mapping[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    name = value.get("name")
+    if isinstance(name, str) and name:
+        labels.add(unicodedata.normalize("NFKC", name).casefold().strip())
+    for item in value.get("names", []):
+        if isinstance(item, dict) and isinstance(item.get("value"), str):
+            label = unicodedata.normalize(
+                "NFKC", item["value"]
+            ).casefold().strip()
+            if label:
+                labels.add(label)
+    return labels
+
+
+def _authority_keys(kind: str, value: Mapping[str, Any]) -> list[str]:
+    return sorted(
+        {
+            _json_text(
+                [
+                    "external",
+                    *_normalized_external_identity(kind, scheme, raw),
+                ]
+            )
+            for scheme, raw, _ in _external_values(value.get("external_ids"))
+        }
+    )
+
+
+def _v2_reference_keys(value: Mapping[str, Any]) -> list[str]:
+    result: list[str] = []
+    doi = value.get("doi")
+    if isinstance(doi, str) and doi:
+        result.append(_json_text(["doi", doi.lower()]))
+    isbn = value.get("isbn")
+    if isinstance(isbn, str) and isbn:
+        result.append(
+            _json_text(["isbn", _normalized_isbn(isbn) or isbn])
+        )
+    for item in [value.get("url"), *value.get("alternate_urls", [])]:
+        if isinstance(item, str) and item:
+            result.append(_json_text(["url", item]))
+    if result:
+        return sorted(set(result))
+    bibliography = value.get("bibliography")
+    if isinstance(bibliography, str) and bibliography:
+        return [_json_text(["bibliography", bibliography])]
+    return [_json_text(["semantic", value])]
+
+
+def _fresh_transport_ids(
+    prefix: str,
+    used_identifiers: Iterable[str],
+    pending_identifiers: Iterable[str],
+) -> dict[str, str]:
+    used = set(used_identifiers)
+    numeric = [
+        int(identifier[len(prefix) + 1 :])
+        for identifier in used
+        if identifier.startswith(prefix + "-")
+        and identifier[len(prefix) + 1 :].isdigit()
+    ]
+    next_number = max(numeric, default=0) + 1
+    width = max(
+        6,
+        max(
+            (
+                len(identifier[len(prefix) + 1 :])
+                for identifier in used
+                if identifier.startswith(prefix + "-")
+            ),
+            default=0,
+        ),
+    )
+    result: dict[str, str] = {}
+    for current_id in sorted(set(pending_identifiers)):
+        while True:
+            desired = f"{prefix}-{next_number:0{width}d}"
+            next_number += 1
+            if desired not in used:
+                break
+        result[current_id] = desired
+        used.add(desired)
+    return result
+
+
+def _v2_assign_transport_ids(
+    collection: str,
+    prefix: str,
+    previous: Sequence[Mapping[str, Any]],
+    current: Sequence[Mapping[str, Any]],
+    previous_keys: Mapping[str, Sequence[str]],
+    current_keys: Mapping[str, Sequence[str]],
+    *,
+    forbidden_identifiers: Iterable[str] = (),
+    redirected_candidates: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """Match only exact identities and allocate fresh transport-local IDs.
+
+    Multiple live matches are quarantined rather than resolved by input order,
+    coincident local IDs, or a preferred duplicate.
+    """
+    prior_index: dict[str, set[str]] = {}
+    previous_by_id = {
+        _transport_identifier(collection, value): value for value in previous
+    }
+    for identifier, keys in previous_keys.items():
+        for key in keys:
+            prior_index.setdefault(key, set()).add(identifier)
+
+    mapping: dict[str, str] = {}
+    pending: list[str] = []
+    ambiguities: list[dict[str, Any]] = []
+    redirected_candidates = redirected_candidates or {}
+    for value in sorted(current, key=_json_text):
+        current_id = _transport_identifier(collection, value)
+        keys = list(current_keys.get(current_id, []))
+        candidates: set[str] = set()
+        for key in keys:
+            candidates.update(prior_index.get(key, set()))
+        redirected = redirected_candidates.get(current_id)
+        if redirected is not None:
+            candidates.add(redirected)
+        if len(candidates) > 1:
+            ambiguities.append(
+                {
+                    "current_id": current_id,
+                    "record": copy.deepcopy(value),
+                    "candidate_ids": sorted(candidates),
+                    "candidate_records": [
+                        copy.deepcopy(previous_by_id[identifier])
+                        for identifier in sorted(candidates)
+                    ],
+                    "identity_keys": sorted(set(keys)),
+                }
+            )
+        elif candidates:
+            mapping[current_id] = next(iter(candidates))
+        else:
+            pending.append(current_id)
+
+    used = {
+        _transport_identifier(collection, value) for value in previous
+    }
+    used.update(forbidden_identifiers)
+    mapping.update(_fresh_transport_ids(prefix, used, pending))
+    return mapping, ambiguities
+
+
+def _pop_records(
+    manifest: dict[str, Any],
+    collection: str,
+    predicate: Any,
+) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    for value in manifest[collection]:
+        (removed if predicate(value) else kept).append(value)
+    manifest[collection] = kept
+    return removed
+
+
+def _quarantine_v2_ambiguities(
+    manifest: dict[str, Any],
+    collection: str,
+    ambiguities: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    if not ambiguities:
+        return [], set()
+    identifiers = {
+        str(value["current_id"]) for value in ambiguities
+    }
+    normalized_by_id: dict[str, list[dict[str, Any]]] = {}
+    for family in (
+        "creators",
+        "works",
+        "tags",
+        "references",
+        "manifestations",
+    ):
+        for value in manifest[family]:
+            identifier = _transport_identifier(family, value)
+            normalized_by_id.setdefault(identifier, []).append(
+                {
+                    "collection": family,
+                    "transport_id": identifier,
+                    "record": copy.deepcopy(value),
+                }
+            )
+
+    def linked_context(value: Mapping[str, Any]) -> list[dict[str, Any]]:
+        linked_ids: set[str] = {
+            item
+            for field in (
+                "work",
+                "creator",
+                "tag",
+                "subject",
+                "object",
+                "entity",
+            )
+            for item in [value.get(field)]
+            if isinstance(item, str) and item
+        }
+        for evidence in value.get("evidence", []):
+            if (
+                isinstance(evidence, dict)
+                and isinstance(evidence.get("ref_id"), str)
+                and evidence["ref_id"]
+            ):
+                linked_ids.add(evidence["ref_id"])
+        return sorted(
+            [
+                copy.deepcopy(context)
+                for identifier in sorted(linked_ids)
+                for context in normalized_by_id.get(identifier, [])
+            ],
+            key=_json_text,
+        )
+
+    dependency_rows: list[
+        tuple[str, dict[str, Any], list[dict[str, Any]]]
+    ] = []
+    _pop_records(
+        manifest,
+        collection,
+        lambda value: _transport_identifier(collection, value) in identifiers,
+    )
+
+    def remove(name: str, predicate: Any) -> list[dict[str, Any]]:
+        values = _pop_records(manifest, name, predicate)
+        dependency_rows.extend(
+            (name, value, linked_context(value)) for value in values
+        )
+        return values
+
+    if collection == "creators":
+        remove("credits", lambda value: value.get("creator") in identifiers)
+        remove("measurements", lambda value: value.get("entity") in identifiers)
+        remove("remote_assets", lambda value: value.get("entity") in identifiers)
+    elif collection == "works":
+        remove("credits", lambda value: value.get("work") in identifiers)
+        remove("assertions", lambda value: value.get("work") in identifiers)
+        remove("financial_facts", lambda value: value.get("work") in identifiers)
+        remove(
+            "parent_guide_assertions",
+            lambda value: value.get("work") in identifiers,
+        )
+        removed_manifestations = remove(
+            "manifestations", lambda value: value.get("work") in identifiers
+        )
+        manifestation_ids = {
+            str(value["local_id"]) for value in removed_manifestations
+        }
+        entity_ids = identifiers | manifestation_ids
+        remove("measurements", lambda value: value.get("entity") in entity_ids)
+        remove("remote_assets", lambda value: value.get("entity") in entity_ids)
+    elif collection == "tags":
+        remove("assertions", lambda value: value.get("tag") in identifiers)
+        remove(
+            "concept_relations",
+            lambda value: value.get("subject") in identifiers
+            or value.get("object") in identifiers,
+        )
+        remove(
+            "parent_guide_assertions",
+            lambda value: value.get("tag") in identifiers,
+        )
+        remove("remote_assets", lambda value: value.get("entity") in identifiers)
+    elif collection == "references":
+        for family in (
+            "assertions",
+            "concept_relations",
+            "parent_guide_assertions",
+        ):
+            remove(
+                family,
+                lambda value: any(
+                    isinstance(evidence, dict)
+                    and evidence.get("ref_id") in identifiers
+                    for evidence in value.get("evidence", [])
+                ),
+            )
+    elif collection == "manifestations":
+        remove("measurements", lambda value: value.get("entity") in identifiers)
+        remove("remote_assets", lambda value: value.get("entity") in identifiers)
+
+    lines: list[dict[str, Any]] = []
+    for value in ambiguities:
+        current_id = str(value["current_id"])
+        occurrences = [
+            {
+                "source": {"container": "current_normalized_input"},
+                "context": {
+                    "collection": collection,
+                    "transport_id": current_id,
+                },
+                "value": value["record"],
+            }
+        ]
+        for candidate in value["candidate_records"]:
+            occurrences.append(
+                {
+                    "source": {"container": "activated_normalized_manifest"},
+                    "context": {
+                        "collection": collection,
+                        "transport_id": _transport_identifier(
+                            collection, candidate
+                        ),
+                    },
+                    "value": candidate,
+                }
+            )
+        lines.append(
+            {
+                "record_type": "quarantine",
+                "format_version": 1,
+                "category": "canonical_identity_ambiguity",
+                "identity": {
+                    "collection": collection,
+                    "incoming_transport_id": current_id,
+                    "candidate_transport_ids": value["candidate_ids"],
+                    "exact_identity_keys": [
+                        json.loads(key) for key in value["identity_keys"]
+                    ],
+                },
+                "field": "identity",
+                "reason": (
+                    "the normalized record has no authority-safe unique "
+                    "canonical target; no target was selected"
+                ),
+                "occurrences": occurrences,
+            }
+        )
+    for dependency_collection, value, linked in sorted(
+        dependency_rows, key=lambda item: (item[0], _json_text(item[1]))
+    ):
+        lines.append(
+            {
+                "record_type": "quarantine",
+                "format_version": 1,
+                "category": "quarantined_ambiguous_identity_dependency",
+                "identity": {
+                    "ambiguous_collection": collection,
+                    "ambiguous_transport_ids": sorted(identifiers),
+                    "dependent_collection": dependency_collection,
+                },
+                "field": "dependency",
+                "reason": (
+                    "the dependent normalized record cannot be attached until "
+                    "its ambiguous canonical endpoint is resolved"
+                ),
+                "occurrences": [
+                    {
+                        "source": {"container": "current_normalized_input"},
+                        "context": {
+                            "collection": dependency_collection,
+                            "linked_normalized_records": linked,
+                        },
+                        "value": value,
+                    }
+                ],
+            }
+        )
+    return lines, identifiers
+
+
+def _name_alias(value: str, language: Any = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "type": "alias",
+        "value": value,
+        "preferred": False,
+    }
+    if isinstance(language, str):
+        result["language"] = language
+    return result
+
+
+def _preserve_incoming_name_as_alias(
+    previous: Mapping[str, Any], current: dict[str, Any]
+) -> None:
+    prior_name = previous.get("name")
+    incoming_name = current.get("name")
+    if (
+        not isinstance(prior_name, str)
+        or not prior_name
+        or not isinstance(incoming_name, str)
+        or not incoming_name
+        or prior_name == incoming_name
+    ):
+        return
+    names = [
+        copy.deepcopy(value)
+        for value in current.get("names", [])
+        if isinstance(value, dict)
+    ]
+    if not any(value.get("value") == incoming_name for value in names):
+        names.append(_name_alias(incoming_name, current.get("language")))
+    current["names"] = sorted(names, key=_json_text)
+    current["name"] = prior_name
+
+
+def _prepare_v2_current(
+    previous: Mapping[str, Any], current: dict[str, Any]
+) -> None:
+    previous_by_collection = {
+        collection: {
+            _transport_identifier(collection, value): value
+            for value in previous[collection]
+        }
+        for collection in (
+            "creators",
+            "works",
+            "tags",
+            "references",
+            "manifestations",
+        )
+    }
+    live_entity_ids = {
+        str(value["canonical_id"])
+        for collection in ("creators", "works", "tags", "manifestations")
+        for value in previous[collection]
+    }
+    blocked_entity_ids = live_entity_ids | {
+        str(value["alias_id"]) for value in previous["entity_redirects"]
+    }
+    live_source_ids = {
+        str(value["canonical_id"]) for value in previous["references"]
+    }
+    blocked_source_ids = live_source_ids | {
+        str(value["alias_id"]) for value in previous["source_redirects"]
+    }
+
+    for collection in ("creators", "works", "manifestations"):
+        for value in current[collection]:
+            identifier = _transport_identifier(collection, value)
+            prior = previous_by_collection[collection].get(identifier)
+            if prior is not None:
+                value["canonical_id"] = prior["canonical_id"]
+                if collection == "creators":
+                    _preserve_incoming_name_as_alias(prior, value)
+            else:
+                if identifier in blocked_entity_ids:
+                    raise CleanupError(
+                        f"new {collection} ID would resurrect a live or "
+                        f"redirected canonical identity: {identifier}"
+                    )
+                value["canonical_id"] = identifier
+                blocked_entity_ids.add(identifier)
+
+    for value in current["tags"]:
+        identifier = _transport_identifier("tags", value)
+        prior = previous_by_collection["tags"].get(identifier)
+        if prior is not None:
+            incoming_slug = value.get("slug")
+            value["canonical_id"] = prior["canonical_id"]
+            _preserve_incoming_name_as_alias(prior, value)
+            aliases = [
+                item
+                for item in value.get("slug_aliases", [])
+                if isinstance(item, str) and item
+            ]
+            if (
+                isinstance(incoming_slug, str)
+                and incoming_slug
+                and incoming_slug != prior["slug"]
+            ):
+                aliases.append(incoming_slug)
+            value["slug"] = prior["slug"]
+            value["slug_aliases"] = sorted(set(aliases))
+        else:
+            canonical_id = _v2_concept_id(value)
+            if canonical_id in blocked_entity_ids:
+                raise CleanupError(
+                    "new concept would resurrect a live or redirected "
+                    f"canonical identity: {canonical_id}"
+                )
+            value["canonical_id"] = canonical_id
+            value.setdefault("names", [])
+            value.setdefault("slug_aliases", [])
+            blocked_entity_ids.add(canonical_id)
+
+    for value in current["references"]:
+        identifier = _transport_identifier("references", value)
+        prior = previous_by_collection["references"].get(identifier)
+        if prior is not None:
+            value["canonical_id"] = prior["canonical_id"]
+            prior_url = prior.get("url")
+            incoming_url = value.get("url")
+            alternates = [
+                item
+                for item in value.get("alternate_urls", [])
+                if isinstance(item, str) and item
+            ]
+            if (
+                isinstance(prior_url, str)
+                and prior_url
+                and isinstance(incoming_url, str)
+                and incoming_url
+                and incoming_url != prior_url
+            ):
+                alternates.append(incoming_url)
+                value["url"] = prior_url
+            value["alternate_urls"] = sorted(set(alternates))
+        else:
+            canonical_id = _v2_source_id(value)
+            if canonical_id in blocked_source_ids:
+                raise CleanupError(
+                    "new source would resurrect a live or redirected "
+                    f"canonical identity: {canonical_id}"
+                )
+            value["canonical_id"] = canonical_id
+            value.setdefault("alternate_urls", [])
+            blocked_source_ids.add(canonical_id)
+
+
+def _rewrite_normalizer_mapping(
+    normalizer: Normalizer,
+    attribute: str,
+    mapping: Mapping[str, str],
+    quarantined: set[str],
+) -> None:
+    values = getattr(normalizer, attribute)
+    for key, identifier in list(values.items()):
+        if identifier in quarantined:
+            del values[key]
+        else:
+            values[key] = mapping.get(identifier, identifier)
+
+
+def _rebase_current_manifest_v2(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+    normalizer: Normalizer,
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, str]],
+    list[dict[str, Any]],
+]:
+    result = copy.deepcopy(current)
+    mappings: dict[str, dict[str, str]] = {}
+    quarantine_lines: list[dict[str, Any]] = []
+    quarantined: dict[str, set[str]] = {}
+    entity_redirect_aliases = {
+        str(value["alias_id"]) for value in previous["entity_redirects"]
+    }
+
+    previous_creator_keys = {
+        _transport_identifier("creators", value): _authority_keys(
+            "creator", value
+        )
+        for value in previous["creators"]
+    }
+    current_creator_keys = {
+        _transport_identifier("creators", value): _authority_keys(
+            "creator", value
+        )
+        for value in result["creators"]
+    }
+    prior_creator_by_id = {
+        _transport_identifier("creators", value): value
+        for value in previous["creators"]
+    }
+    prior_creator_names: dict[str, set[str]] = {}
+    for identifier, value in prior_creator_by_id.items():
+        for label in _normalized_creator_labels(value):
+            prior_creator_names.setdefault(label, set()).add(identifier)
+    name_only_ambiguities: list[dict[str, Any]] = []
+    name_only_ids: set[str] = set()
+    for value in result["creators"]:
+        current_id = _transport_identifier("creators", value)
+        if current_creator_keys[current_id]:
+            continue
+        candidates: set[str] = set()
+        labels = _normalized_creator_labels(value)
+        for label in labels:
+            candidates.update(prior_creator_names.get(label, set()))
+        if not candidates:
+            continue
+        name_only_ids.add(current_id)
+        name_only_ambiguities.append(
+            {
+                "current_id": current_id,
+                "record": copy.deepcopy(value),
+                "candidate_ids": sorted(candidates),
+                "candidate_records": [
+                    copy.deepcopy(prior_creator_by_id[identifier])
+                    for identifier in sorted(candidates)
+                ],
+                "identity_keys": [
+                    _json_text(["unresolved-name-only", label])
+                    for label in sorted(labels)
+                ],
+            }
+        )
+    creator_ids, ambiguities = _v2_assign_transport_ids(
+        "creators",
+        "agent",
+        previous["creators"],
+        [
+            value
+            for value in result["creators"]
+            if _transport_identifier("creators", value)
+            not in name_only_ids
+        ],
+        previous_creator_keys,
+        current_creator_keys,
+        forbidden_identifiers=entity_redirect_aliases,
+    )
+    ambiguities.extend(name_only_ambiguities)
+    lines, quarantined["creators"] = _quarantine_v2_ambiguities(
+        result, "creators", ambiguities
+    )
+    quarantine_lines.extend(lines)
+    mappings["creators"] = creator_ids
+    for value in result["creators"]:
+        old = _transport_identifier("creators", value)
+        value["local_id"] = creator_ids[old]
+    for value in result["credits"]:
+        value["creator"] = _replace_identifier(
+            value.get("creator"), creator_ids
+        )
+    for collection in ("measurements", "remote_assets"):
+        for value in result[collection]:
+            value["entity"] = _replace_identifier(
+                value.get("entity"), creator_ids
+            )
+
+    previous_work_creators = _work_creators(previous["credits"])
+    current_work_creators = _work_creators(result["credits"])
+    previous_work_keys = {
+        _transport_identifier("works", value): _v2_work_keys(
+            value, previous_work_creators
+        )
+        for value in previous["works"]
+    }
+    current_work_keys = {
+        _transport_identifier("works", value): _v2_work_keys(
+            value, current_work_creators
+        )
+        for value in result["works"]
+    }
+    work_ids, ambiguities = _v2_assign_transport_ids(
+        "works",
+        "work",
+        previous["works"],
+        result["works"],
+        previous_work_keys,
+        current_work_keys,
+        forbidden_identifiers=entity_redirect_aliases,
+    )
+    lines, quarantined["works"] = _quarantine_v2_ambiguities(
+        result, "works", ambiguities
+    )
+    quarantine_lines.extend(lines)
+    mappings["works"] = work_ids
+    for value in result["works"]:
+        old = _transport_identifier("works", value)
+        value["local_id"] = work_ids[old]
+    for collection in (
+        "credits",
+        "assertions",
+        "financial_facts",
+        "parent_guide_assertions",
+    ):
+        for value in result[collection]:
+            value["work"] = _replace_identifier(value.get("work"), work_ids)
+    for value in result["manifestations"]:
+        value["work"] = _replace_identifier(value.get("work"), work_ids)
+    for collection in ("measurements", "remote_assets"):
+        for value in result[collection]:
+            value["entity"] = _replace_identifier(
+                value.get("entity"), work_ids
+            )
+
+    previous_tag_keys: dict[str, list[str]] = {}
+    previous_tag_by_canonical: dict[str, str] = {}
+    for value in previous["tags"]:
+        identifier = _transport_identifier("tags", value)
+        previous_tag_keys[identifier] = [
+            _json_text(["concept-slug", slug])
+            for slug in [value.get("slug"), *value.get("slug_aliases", [])]
+            if isinstance(slug, str) and slug
+        ]
+        previous_tag_by_canonical[str(value["canonical_id"])] = identifier
+    current_tag_keys = {
+        _transport_identifier("tags", value): [
+            _json_text(["concept-slug", value.get("slug")])
+        ]
+        for value in result["tags"]
+    }
+    entity_redirects = {
+        str(value["alias_id"]): str(value["canonical_id"])
+        for value in previous["entity_redirects"]
+        if value.get("entity_type") == "concept"
+    }
+    redirected_tags: dict[str, str] = {}
+    for value in result["tags"]:
+        current_id = _transport_identifier("tags", value)
+        target = entity_redirects.get(_v2_concept_id(value))
+        if target in previous_tag_by_canonical:
+            redirected_tags[current_id] = previous_tag_by_canonical[target]
+    tag_ids, ambiguities = _v2_assign_transport_ids(
+        "tags",
+        "concept",
+        previous["tags"],
+        result["tags"],
+        previous_tag_keys,
+        current_tag_keys,
+        forbidden_identifiers=entity_redirect_aliases,
+        redirected_candidates=redirected_tags,
+    )
+    lines, quarantined["tags"] = _quarantine_v2_ambiguities(
+        result, "tags", ambiguities
+    )
+    quarantine_lines.extend(lines)
+    mappings["tags"] = tag_ids
+    for value in result["tags"]:
+        old = _transport_identifier("tags", value)
+        value["local_id"] = tag_ids[old]
+    for value in result["assertions"]:
+        value["tag"] = _replace_identifier(value.get("tag"), tag_ids)
+    for value in result["parent_guide_assertions"]:
+        value["tag"] = _replace_identifier(value.get("tag"), tag_ids)
+    for value in result["concept_relations"]:
+        value["subject"] = _replace_identifier(value.get("subject"), tag_ids)
+        value["object"] = _replace_identifier(value.get("object"), tag_ids)
+    for value in result["remote_assets"]:
+        value["entity"] = _replace_identifier(value.get("entity"), tag_ids)
+
+    previous_reference_keys = {
+        _transport_identifier("references", value): _v2_reference_keys(value)
+        for value in previous["references"]
+    }
+    current_reference_keys = {
+        _transport_identifier("references", value): _v2_reference_keys(value)
+        for value in result["references"]
+    }
+    previous_source_by_canonical = {
+        str(value["canonical_id"]): _transport_identifier("references", value)
+        for value in previous["references"]
+    }
+    source_redirects = {
+        str(value["alias_id"]): str(value["canonical_id"])
+        for value in previous["source_redirects"]
+    }
+    redirected_sources: dict[str, str] = {}
+    for value in result["references"]:
+        current_id = _transport_identifier("references", value)
+        target = source_redirects.get(_v2_source_id(value))
+        if target in previous_source_by_canonical:
+            redirected_sources[current_id] = previous_source_by_canonical[target]
+    reference_ids, ambiguities = _v2_assign_transport_ids(
+        "references",
+        "source",
+        previous["references"],
+        result["references"],
+        previous_reference_keys,
+        current_reference_keys,
+        forbidden_identifiers=source_redirects,
+        redirected_candidates=redirected_sources,
+    )
+    lines, quarantined["references"] = _quarantine_v2_ambiguities(
+        result, "references", ambiguities
+    )
+    quarantine_lines.extend(lines)
+    mappings["references"] = reference_ids
+    for value in result["references"]:
+        old = _transport_identifier("references", value)
+        value["ref_id"] = reference_ids[old]
+    for collection in (
+        "assertions",
+        "concept_relations",
+        "parent_guide_assertions",
+    ):
+        _rewrite_evidence(result[collection], reference_ids)
+
+    previous_manifestation_keys = {
+        _transport_identifier(
+            "manifestations", value
+        ): _manifestation_keys(value)
+        for value in previous["manifestations"]
+    }
+    current_manifestation_keys = {
+        _transport_identifier(
+            "manifestations", value
+        ): _manifestation_keys(value)
+        for value in result["manifestations"]
+    }
+    manifestation_ids, ambiguities = _v2_assign_transport_ids(
+        "manifestations",
+        "manifestation",
+        previous["manifestations"],
+        result["manifestations"],
+        previous_manifestation_keys,
+        current_manifestation_keys,
+        forbidden_identifiers=entity_redirect_aliases,
+    )
+    lines, quarantined["manifestations"] = _quarantine_v2_ambiguities(
+        result, "manifestations", ambiguities
+    )
+    quarantine_lines.extend(lines)
+    mappings["manifestations"] = manifestation_ids
+    for value in result["manifestations"]:
+        old = _transport_identifier("manifestations", value)
+        value["local_id"] = manifestation_ids[old]
+    for collection in ("measurements", "remote_assets"):
+        for value in result[collection]:
+            value["entity"] = _replace_identifier(
+                value.get("entity"), manifestation_ids
+            )
+
+    _prepare_v2_current(previous, result)
+    for attribute, collection in (
+        ("creator_map", "creators"),
+        ("work_map", "works"),
+        ("existing_work_map", "works"),
+        ("concept_map", "tags"),
+        ("reference_map", "references"),
+        ("manifestation_map", "manifestations"),
+    ):
+        _rewrite_normalizer_mapping(
+            normalizer,
+            attribute,
+            mappings[collection],
+            quarantined[collection],
+        )
+    return result, mappings, quarantine_lines
 
 
 def _rebase_current_manifest(
@@ -2070,12 +2991,28 @@ def _merge_normalized_manifests(
             "previous_manifest": False,
             "preserved_records": 0,
         }
-    rebased, _ = _rebase_current_manifest(previous, current, normalizer)
-    merged: dict[str, Any] = {
-        "contract": "normalized_product_import_v1",
-        "format_version": 1,
-    }
-    conflict_lines: list[dict[str, Any]] = []
+    is_v2 = (
+        previous.get("contract") == "normalized_product_import_v2"
+        and previous.get("format_version") == 2
+    )
+    if is_v2:
+        rebased, _, quarantine_lines = _rebase_current_manifest_v2(
+            previous, current, normalizer
+        )
+        merged: dict[str, Any] = {
+            "contract": "normalized_product_import_v2",
+            "format_version": 2,
+            "entity_redirects": copy.deepcopy(previous["entity_redirects"]),
+            "source_redirects": copy.deepcopy(previous["source_redirects"]),
+        }
+        conflict_lines: list[dict[str, Any]] = list(quarantine_lines)
+    else:
+        rebased, _ = _rebase_current_manifest(previous, current, normalizer)
+        merged = {
+            "contract": "normalized_product_import_v1",
+            "format_version": 1,
+        }
+        conflict_lines = []
     preserved = 0
     for collection in MANIFEST_ARRAYS:
         prior_by_key: dict[str, dict[str, Any]] = {}
@@ -2130,9 +3067,23 @@ def _merge_normalized_manifests(
                 )
         merged[collection] = sorted(combined.values(), key=_json_text)
         preserved += len(prior_by_key)
+    if is_v2:
+        try:
+            _validate_v2_manifest(merged)
+        except (ConsolidationError, KeyError, TypeError, ValueError) as error:
+            raise CleanupError(
+                f"merged v2 manifest is invalid: {error}"
+            ) from error
     report = _manifest_preservation_report(previous, merged)
     report["previous_manifest"] = True
     report["preserved_records"] = preserved
+    if is_v2:
+        report["preserved_entity_redirects"] = len(
+            previous["entity_redirects"]
+        )
+        report["preserved_source_redirects"] = len(
+            previous["source_redirects"]
+        )
     return merged, conflict_lines, report
 
 
@@ -2173,12 +3124,24 @@ def _manifest_preservation_report(
 
 def _manifest_id_universe(manifest: Mapping[str, Any]) -> set[str]:
     result: set[str] = set()
+    is_v2 = (
+        manifest.get("contract") == "normalized_product_import_v2"
+        and manifest.get("format_version") == 2
+    )
     for collection in (
         "creators", "works", "tags", "references", "manifestations"
     ):
         for value in manifest.get(collection, []):
             if isinstance(value, dict):
-                result.add(_record_identifier(collection, value))
+                if collection == "references" and is_v2:
+                    canonical_id = value.get("canonical_id")
+                    if not isinstance(canonical_id, str) or not canonical_id:
+                        raise CleanupError(
+                            "v2 source is missing its canonical ID"
+                        )
+                    result.add(canonical_id)
+                else:
+                    result.add(_record_identifier(collection, value))
     return result
 
 
@@ -2238,9 +3201,19 @@ def _identity_index(
     creators = manifest.get("creators")
     works = manifest.get("works")
     tags = manifest.get("tags")
+    references = manifest.get("references", [])
     manifestations = manifest.get("manifestations")
     credits = manifest.get("credits")
-    if not all(isinstance(value, list) for value in (creators, works, tags, manifestations, credits)):
+    if not all(
+        isinstance(value, list)
+        for value in (
+            creators,
+            works,
+            tags,
+            manifestations,
+            credits,
+        )
+    ):
         raise CleanupError("normalized manifest is missing an identity collection")
 
     for creator in creators:
@@ -2300,11 +3273,34 @@ def _identity_index(
         if not isinstance(concept, dict):
             raise CleanupError("normalized concept is not an object")
         canonical_id = _canonical_identifier(concept, concept=True)
-        add(
-            "concept-slug",
-            [concept.get("slug"), concept.get("type")],
-            canonical_id,
+        for slug in [
+            concept.get("slug"), *concept.get("slug_aliases", [])
+        ]:
+            if isinstance(slug, str) and slug:
+                add(
+                    "concept-slug",
+                    [slug, concept.get("type")],
+                    canonical_id,
+                )
+
+    is_v2 = (
+        manifest.get("contract") == "normalized_product_import_v2"
+        and manifest.get("format_version") == 2
+    )
+    for source in references:
+        if not isinstance(source, dict):
+            raise CleanupError("normalized source is not an object")
+        canonical_id = (
+            source.get("canonical_id")
+            if is_v2
+            else source.get("ref_id")
         )
+        if not isinstance(canonical_id, str) or not canonical_id:
+            raise CleanupError(
+                "normalized source is missing its stable canonical ID"
+            )
+        for key in _v2_reference_keys(source):
+            add("source-identity", json.loads(key), canonical_id)
 
     for manifestation in manifestations:
         if not isinstance(manifestation, dict):
@@ -2436,14 +3432,17 @@ def _activate_artifacts(
                     pass
 
 
-def _invoke_importer(paths: CleanupPaths) -> dict[str, Any]:
+def _invoke_importer(
+    paths: CleanupPaths, manifest_path: Path | None = None
+) -> dict[str, Any]:
     paths.database.parent.mkdir(parents=True, exist_ok=True)
+    activated_manifest = manifest_path or paths.manifest
     command = [
         str(paths.binary),
         "product",
         "import-normalized",
         "--manifest",
-        str(paths.manifest),
+        str(activated_manifest),
         "--database",
         str(paths.database),
     ]
@@ -2656,8 +3655,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     _require_same_snapshot(effective_input, snapshot)
     _require_same_directories(effective_input, directory_snapshot)
+    staged_candidate = _stage_bytes(
+        paths.manifest,
+        (_json_text(manifest, pretty=True) + "\n").encode("utf-8"),
+    )
+    try:
+        summary["import"] = _invoke_importer(
+            paths, Path(staged_candidate)
+        )
+        # Penelope activates SQLite independently and atomically.  Revalidate
+        # the analyzed bytes before publishing the matching manifest/issues so
+        # an inbox write during that import cannot advance all canonical
+        # artifacts and then be mistaken for retired input.  On failure the
+        # inbox remains available for a deterministic converging rerun.
+        _require_same_snapshot(effective_input, snapshot)
+        _require_same_directories(effective_input, directory_snapshot)
+    finally:
+        try:
+            os.unlink(staged_candidate)
+        except FileNotFoundError:
+            pass
     _activate_artifacts(manifest, jsonl, paths)
-    summary["import"] = _invoke_importer(paths)
+    # Close the smaller race between the pre-activation validation and inbox
+    # isolation.  Any newly observed bytes remain unretired for the next run.
     _require_same_snapshot(effective_input, snapshot)
     _require_same_directories(effective_input, directory_snapshot)
 

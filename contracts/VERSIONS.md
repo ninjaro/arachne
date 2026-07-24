@@ -5,11 +5,12 @@ The files in `schemas/` are JSON Schema Draft 2020-12 contracts. The files in
 `artifacts/` contains schemas and examples for large resolved payloads that are
 referenced by boundary contracts rather than treated as additional contracts.
 
-`normalized_product_import_v1` is a narrow discriminator exception inside that
-directory. Penelope consumes it directly after whole-corpus normalization, so
-its root uses `contract` rather than `artifact_type`. It is still a data-file
-format, is not a member of the C++ `contract_name` enumeration, and is not a
-public miner intake contract.
+`normalized_product_import_v1` and `normalized_product_import_v2` are narrow
+discriminator exceptions inside that directory. Penelope consumes them directly
+after whole-corpus normalization or reviewed consolidation, so their roots use
+`contract` rather than `artifact_type`. They are still data-file formats, are
+not members of the C++ `contract_name` enumeration, and are not public miner
+intake contracts.
 
 ## Version header
 
@@ -100,6 +101,14 @@ members of the C++ `contract_name` enumeration:
   research fields only, requires explicit creator/work/manifestation IDs, and
   carries no batch, run, hash, backup, or operational-metadata dependency. It
   does not replace the deliberately open `mining_batch_v1` compatibility marker.
+- `normalized_product_import_v2` is the reviewed-consolidation successor. It
+  requires explicit concept and source IDs, preserves concept names and slug
+  aliases plus alternate source URLs, and carries direct retired-identity
+  redirects. Redirects cannot chain, cross entity types, or coexist with a live
+  alias ID. The retired identifiers and old slugs are preservation and rebase
+  metadata in this transfer artifact; product schema v3 validates them but does
+  not materialize them. Nonpreferred concept names and alternate source URLs
+  remain ordinary canonical research data.
 - `consolidated_corpus_unresolved_v1` preserves exact conflicting or
   non-transferable JSON outside the product database, with source pointers,
   reasons, and dependency context. Its envelope and locator records are closed,

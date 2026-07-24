@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/normalized_product_import_v2.schema.json",
+  "title": "Corpus-normalized product import v2",
+  "description": "Closed, corpus-derived transfer artifact consumed by Penelope after legacy batch discovery and reconciliation. Version 2 adds stable concept and source identities, retired-identity redirects, concept names and slug aliases, and alternate source URLs. This is not a public miner intake contract.",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "creators",
+    "works",
+    "tags",
+    "manifestations",
+    "measurements",
+    "financial_facts",
+    "remote_assets",
+    "credits",
+    "references",
+    "assertions",
+    "concept_relations",
+    "parent_guide_assertions",
+    "entity_redirects",
+    "source_redirects"
+  ],
+  "properties": {
+    "contract": {
+      "const": "normalized_product_import_v2"
+    },
+    "format_version": {
+      "const": 2
+    },
+    "creators": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/creator"
+      }
+    },
+    "works": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/work"
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/concept"
+      }
+    },
+    "manifestations": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/manifestation"
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/measurement"
+      }
+    },
+    "financial_facts": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/financial_fact"
+      }
+    },
+    "remote_assets": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/remote_asset"
+      }
+    },
+    "credits": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/credit"
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reference"
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/work_concept_assertion"
+      }
+    },
+    "concept_relations": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/concept_relation"
+      }
+    },
+    "parent_guide_assertions": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/parent_guide_assertion"
+      }
+    },
+    "entity_redirects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity_redirect"
+      }
+    },
+    "source_redirects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/source_redirect"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "entity_type": {
+      "enum": [
+        "work",
+        "manifestation",
+        "person",
+        "organization",
+        "group",
+        "concept"
+      ]
+    },
+    "concept_type": {
+      "enum": [
+        "genre",
+        "style",
+        "theme",
+        "keyword",
+        "motif",
+        "trope",
+        "phobia",
+        "taboo",
+        "technique",
+        "movement",
+        "setting",
+        "mood",
+        "content_warning"
+      ]
+    },
+    "concept": {
+      "type": "object",
+      "required": [
+        "local_id",
+        "canonical_id",
+        "name",
+        "type",
+        "slug"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "canonical_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/canonical_id"
+        },
+        "external_ids": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/external_ids"
+        },
+        "name": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "$ref": "normalized_product_import_v1.schema.json#/$defs/name"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/concept_type"
+        },
+        "slug": {
+          "$ref": "#/$defs/slug"
+        },
+        "slug_aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/slug"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "reference": {
+      "type": "object",
+      "required": [
+        "ref_id",
+        "canonical_id",
+        "source_type"
+      ],
+      "properties": {
+        "ref_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "canonical_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/canonical_id"
+        },
+        "source_type": {
+          "enum": [
+            "book",
+            "article",
+            "catalogue",
+            "web_page",
+            "interview",
+            "database",
+            "video",
+            "audio",
+            "PDF"
+          ]
+        },
+        "title": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "bibliography": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "publisher": {
+          "type": "string"
+        },
+        "publication_date": {
+          "type": "string"
+        },
+        "url": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "alternate_urls": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+          }
+        },
+        "doi": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "isbn": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "archive": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/archive"
+        }
+      },
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": [
+                "doi"
+              ]
+            },
+            {
+              "required": [
+                "isbn"
+              ]
+            },
+            {
+              "required": [
+                "url"
+              ]
+            },
+            {
+              "required": [
+                "bibliography"
+              ]
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "required": [
+                "title"
+              ]
+            },
+            {
+              "required": [
+                "bibliography"
+              ]
+            },
+            {
+              "required": [
+                "url"
+              ]
+            }
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "entity_redirect": {
+      "type": "object",
+      "required": [
+        "alias_id",
+        "canonical_id",
+        "entity_type"
+      ],
+      "properties": {
+        "alias_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/canonical_id"
+        },
+        "canonical_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/canonical_id"
+        },
+        "entity_type": {
+          "$ref": "#/$defs/entity_type"
+        }
+      },
+      "additionalProperties": false
+    },
+    "source_redirect": {
+      "type": "object",
+      "required": [
+        "alias_id",
+        "canonical_id"
+      ],
+      "properties": {
+        "alias_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/canonical_id"
+        },
+        "canonical_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/canonical_id"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

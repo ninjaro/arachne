@@ -62,26 +62,41 @@ read-only.
 
 ## Normalization surface
 
-The normalized transfer artifact is
+The initial whole-corpus adapter emits
 [`normalized_product_import_v1`](../contracts/artifacts/normalized_product_import_v1.schema.json).
-It is an internal, corpus-derived data-file format consumed by Penelope. It is
-not `mining_batch_v1`, not a future Arachne batch manifest, and not a reason to
-force later miner submissions into the legacy corpus's shapes.
+Reviewed identity consolidation upgrades that artifact to
+[`normalized_product_import_v2`](../contracts/artifacts/normalized_product_import_v2.schema.json).
+Both are internal, corpus-derived data-file formats consumed by Penelope. They
+are not `mining_batch_v1`, future Arachne batch manifests, or a reason to force
+later miner submissions into the legacy corpus's shapes.
 
-Its root contains only:
+The v2 root contains only:
 
-- `contract: "normalized_product_import_v1"` and `format_version: 1`;
+- `contract: "normalized_product_import_v2"` and `format_version: 2`;
 - canonical arrays named `creators`, `works`, `tags`, `manifestations`,
   `measurements`, `financial_facts`, `remote_assets`, `credits`, `references`,
-  `assertions`, `concept_relations`, and `parent_guide_assertions`.
+  `assertions`, `concept_relations`, and `parent_guide_assertions`;
+- direct `entity_redirects` and `source_redirects` for reviewed retired
+  identities.
 
-Every creator, work, and manifestation carries an explicit safe
-`canonical_id`. Local IDs are transfer-local references only. The manifest does
-not contain batch names, filenames, run IDs, miner/model data, timestamps,
-input-container or batch hashes, queue state, or integration history.
+Every creator, work, manifestation, concept, and source carries an explicit safe
+`canonical_id`. Concepts retain nonpreferred names and old slugs; sources retain
+alternate URLs. Redirect aliases cannot remain live, target another redirect,
+cross entity types, or point outside the active graph. Local IDs are
+transfer-local references only. The manifest does not contain batch names,
+filenames, run IDs, miner/model data, timestamps, input-container or batch
+hashes, queue state, or integration history.
 Scholarly archive checksums remain permitted on a source archive when the
 underlying captured artifact actually exists; they are evidence fields, not an
 input identity or import prerequisite.
+
+The v2 manifest remains a consolidation and rebase artifact, so it preserves
+reviewed retired IDs and old slugs even though they are not product records.
+Penelope validates those compatibility fields before mutation but deliberately
+does not materialize them in product schema v3. The final database therefore has
+no `entity_redirects`, `source_redirects`, or `concept_slug_aliases` tables.
+Human-readable aliases in `names` and additional checked locators in
+`source_urls` are canonical research data and remain.
 
 The adapter applies only mechanical aliases whose meaning is unchanged:
 
@@ -134,9 +149,14 @@ Records are never merged on a person name or work title alone. A trusted
 creator object without an authority ID remains a distinct submitted entity;
 repeated names are not collapsed or treated as uniqueness keys. Conflicting
 authority identifiers, incomplete work composites, manual-review
-reconciliation entries, and deferred mappings stay unresolved. Concepts use a
-stable normalized slug with an exact canonical concept type. Sources join
-transitively on any exact DOI, ISBN, URL, or bibliography identity.
+reconciliation entries, and deferred mappings stay unresolved. V1 derives
+concepts from a stable normalized slug with an exact canonical concept type.
+Sources join transitively on exact DOI, ISBN, or URL identities; bibliographic
+prose is used only when neither record supplies one of those stronger
+identifiers. This prevents distinct web pages from collapsing merely because
+they share a generic citation. V2 freezes accepted identities as explicit IDs.
+It never performs new implicit semantic source coalescing: later identity
+changes require a reviewed plan, retained aliases, and redirects.
 
 All documents are staged before dependency resolution. The temporary graph is
 resolved independent of container and array order, then serialized in stable
@@ -190,6 +210,41 @@ python3 scripts/normalize_legacy_batches.py \
   --unresolved corpus-import/consolidated-unresolved.json
 ```
 
+Compile the reviewed audits once against the pre-consolidation v1 manifest. The
+resulting plan is a durable semantic input: it must be retained because retired
+local IDs cannot be reconstructed from the consolidated graph.
+
+```sh
+python3 scripts/build_canonical_merge_plan.py \
+  --manifest corpus-import/normalized-product-import.json \
+  --concept-report ../concept-merge-report.md \
+  --deep-report ../deep-backyard-audit.md \
+  --non-concept-report ../non-concept-merge-audit.md \
+  --output corpus-import/canonical-merge-plan.json
+```
+
+Apply that explicit plan to the complete manifest. The command is a dry run
+without `--apply`; with `--apply`, provenance and summary are staged before the
+manifest commit point. Rerunning with the retained plan is byte-stable and
+preserves accumulated lineage.
+
+```sh
+python3 scripts/consolidate_canonical_manifest.py \
+  --manifest corpus-import/normalized-product-import.json \
+  --plan corpus-import/canonical-merge-plan.json \
+  --output corpus-import/normalized-product-import.json \
+  --provenance corpus-import/canonical-merge-provenance.jsonl \
+  --summary corpus-import/canonical-merge-summary.json \
+  --apply
+```
+
+The plan never infers identity from report order or spelling during
+application. It contains explicit reviewed groups and an explicit blocked-ID
+guard. Scalar alternatives, original rows, and retired identities are retained
+in the deterministic JSONL. Evidence locators are combined only inside a
+collided logical assertion, never across unrelated works or concepts that
+happen to quote the same passage.
+
 Then activate the canonical database through Arachne's coordination surface:
 
 ```sh
@@ -202,8 +257,37 @@ The command requires no run ID, configuration file, input checksum, cocoon,
 ledger, or backup. Its JSON result reports the activated database path and
 aggregate entity, work, and assertion counts.
 
-For the explicitly authorized cleanup of an Arachne-owned migrated inbox, use
-the guarded wrapper. It is a write-free dry run unless `--apply` is present:
+Normalized v2 imports materialize product schema v3. All relationships reference
+the live canonical entity or source IDs directly. Schema v3 removes the three
+legacy compatibility tables, their indexes and triggers, and the redundant
+`entities(id, entity_type)` uniqueness constraint that existed only for the
+entity-redirect foreign key. It retains `sources_url_unique`, because distinct
+source IDs must not claim the same primary URL, as well as the `source_urls`
+uniqueness and primary/alternate collision guards.
+
+Migrate an existing standalone v2 product database through the same boundary:
+
+```sh
+<arachne-binary> product migrate-database \
+  --database database/art-islands.sqlite
+```
+
+The result reports the previous and activated schema versions and whether it
+changed the database. The v2-to-v3 migration runs only inside Penelope's
+database boundary, preserves every surviving row and stable ID, sets
+`PRAGMA user_version` to `3`, and runs `VACUUM` before the final foreign-key,
+integrity, checkpoint, and atomic activation checks. Do not remove these objects
+manually from a canonical database.
+
+Explicitly authorized cleanup of an Arachne-owned migrated inbox uses the
+guarded wrapper below. It is a write-free dry run unless `--apply` is present.
+The wrapper accepts either the initial v1 normalized surface or the activated
+v2 canonical manifest. A v2 rebase preserves local endpoint IDs separately
+from canonical IDs, retains redirects and aliases in the transfer artifact,
+resolves only exact
+authority, slug/slug-alias, DOI/ISBN/URL/alternate-URL identities, and assigns
+fresh transport IDs above the activated namespaces. Name-only creator matches
+and multi-target identities are quarantined with their dependent rows.
 
 ```sh
 python3 scripts/cleanup_merged_inbox.py \
@@ -219,9 +303,11 @@ python3 scripts/cleanup_merged_inbox.py \
 The wrapper consolidates every unresolved fragment and conflict as deterministic
 JSONL, adds canonical entity and relationship context where resolution is known,
 and losslessly includes unimportable container or archive-member bytes as UTF-8
-or base64. A later nonempty inbox is merged with the prior normalized transfer;
-previous canonical IDs and accepted records are preservation gates, while truly
-new records may be added. The wrapper invokes Penelope through the Arachne CLI;
+or base64. Previous canonical IDs, redirects, and accepted records are
+preservation gates, while exact matches and truly new records may be added.
+Semantic synonyms and identities that cannot be resolved mechanically still
+require an explicit reviewed plan or remain in JSONL; the rebase never revives
+a retired canonical ID. The wrapper invokes Penelope through the Arachne CLI;
 it never opens SQLite itself.
 
 Only after a successful transactional database activation does the wrapper
@@ -232,12 +318,24 @@ are analyzed again and transactionally re-imported before retirement resumes;
 the staging path is never treated as proof of a completed import. The procedure
 uses neither input hashes nor backups nor persistent operational metadata.
 
+Penelope's atomic SQLite replacement and the canonical manifest/JSONL file
+replacements cannot form one cross-filesystem transaction without introducing
+the prohibited ledger or backup protocol. The wrapper therefore revalidates
+the captured inbox immediately after database activation and again before
+retirement. During an existing-manifest rebase, if the inbox changes or artifact
+publication fails in that narrow window, no source byte is retired; a rerun
+recomputes the complete candidate from the still-present input and converges
+the database and artifacts. A first-ever bootstrap has no prior manifest from
+which to prove recovery, so an interruption after database activation must be
+resolved explicitly rather than inferred from the surviving inbox.
+
 ## Actor boundaries
 
 - **Arachne** safely enumerates the local corpus, detects variants, coordinates
   normalization, and invokes the database owner. It does not write SQLite rows.
-- **Penelope** owns the transfer validation, product schema, identifiers,
-  transaction, integrity checks, checkpoint, and atomic database activation.
+- **Penelope** owns the transfer validation, product schema and migrations,
+  identifiers, transaction, vacuuming, integrity checks, checkpoint, and atomic
+  database activation.
 - **Pheidippides** is not involved: the corpus bytes are already local, and no
   transport, fetching, or domain interpretation belongs to it.
 - **Ariadne** is not involved: this is accepted human-mined product data, not

@@ -40,6 +40,8 @@ migration/analysis command explicitly needs it. Normal runtime operations do not
 | `inbox-baseline` | `arachne inbox baseline --config CONFIG` (external legacy inbox only) |
 | `inbox-verify` | `arachne inbox verify --config CONFIG` (external legacy inbox only) |
 | `product-integrate` | `arachne product integrate --config CONFIG --logical-date DATE --run-id ID [--force]` |
+| `product-import-normalized` | `arachne product import-normalized --manifest FILE --database FILE` |
+| `product-migrate-database` | `arachne product migrate-database --database FILE` |
 | `candidate-plan` | `arachne candidate plan --config CONFIG --external-graph JSON --product-snapshot PRODUCT_SNAPSHOT_CONTROL --output-artifact PATH --output-control PATH` |
 | `candidate-rebuild` | `arachne candidate rebuild --config CONFIG --plan-control FILE --run-id ID` |
 | `viewer-build` | `arachne viewer build --config CONFIG --product-snapshot CONTROL [--candidate-snapshot CONTROL]` |
@@ -142,6 +144,14 @@ git lfs install
 cp /path/to/arachne/.gitattributes .gitattributes
 git add .gitattributes
 ```
+
+Direct normalized v2 imports and the v2-to-v3 migration produce product schema
+v3, which contains final canonical records but no entity/source redirect or
+concept-slug-alias tables. Penelope retains primary-source URL uniqueness and
+requires clean foreign-key and integrity checks before activation. The migration
+also preserves every non-compatibility row and stable ID and runs `VACUUM`. Use
+Penelope's import or migration path; do not edit a canonical database schema by
+hand.
 
 `propose_state_change.py` refuses to publish a staged `.sqlite`, `.sqlite3`, or
 `.db` file unless Git reports `filter=lfs` for that path.

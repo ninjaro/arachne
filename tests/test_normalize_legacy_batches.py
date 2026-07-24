@@ -147,6 +147,39 @@ class NormalizeLegacyBatchesTests(unittest.TestCase):
         self.assertNotIn('"sha256"', encoded)
         self.assertNotIn('"run_id"', encoded)
 
+    def test_shared_bibliography_never_merges_distinct_authority_urls(
+        self,
+    ) -> None:
+        first = batch("batch-a", "a")
+        second = batch("batch-b", "b")
+        for value, url in (
+            (first, "https://example.test/source-a"),
+            (second, "https://example.test/source-b"),
+        ):
+            reference = value["references"][0]
+            reference.pop("doi")
+            reference["url"] = url
+            reference["bibliography"] = "Editors. “Shared generic label.”"
+        self.write("a.json", first)
+        self.write("b.json", second)
+
+        manifest, unresolved = normalize_corpus(self.inbox)
+
+        self.assertEqual(
+            {source["url"] for source in manifest["references"]},
+            {
+                "https://example.test/source-a",
+                "https://example.test/source-b",
+            },
+        )
+        self.assertFalse(
+            any(
+                conflict["category"] == "reference_field_conflict"
+                and conflict["field"] == "url"
+                for conflict in unresolved["conflicts"]
+            )
+        )
+
     def test_load_documents_uses_only_captured_bytes_when_provided(self) -> None:
         captured = batch("captured-batch", "captured")
         live = batch("live-batch", "live")
