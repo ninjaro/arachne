@@ -25,6 +25,16 @@ def rows(db: sqlite3.Connection, sql: str) -> list[dict[str, Any]]:
     return [dict(row) for row in db.execute(sql)]
 
 
+def projection_id(namespace: str, value: Any) -> str:
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return f"{namespace}:{value}"
+    raise ValueError(
+        f"{namespace} identifier must be a positive integer or non-empty string"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build viewer/data/projection.json directly from an Arachne product SQLite database."
@@ -144,15 +154,16 @@ def main() -> int:
             FROM sources
             """,
         ):
+            source_id = projection_id("source", row["id"])
             label = (
                 row["bibliography_text"]
                 or row["url"]
                 or row["doi"]
                 or row["isbn"]
-                or row["id"]
+                or source_id
             )
             upsert_node(
-                row["id"],
+                source_id,
                 "source",
                 label=label,
                 attributes={
@@ -178,10 +189,11 @@ def main() -> int:
         ):
             quote = row["exact_quote"] or ""
             label = quote if len(quote) <= 120 else quote[:117] + "..."
+            evidence_id = projection_id("evidence", row["id"])
             upsert_node(
-                row["id"],
+                evidence_id,
                 "evidence",
-                label=label or f"Evidence {row['id']}",
+                label=label or f"Evidence {evidence_id}",
                 attributes={
                     "exact_quote": row["exact_quote"],
                     "quote_language": row["quote_language"],
@@ -192,10 +204,10 @@ def main() -> int:
             )
 
     evidence_by_assertion: dict[str, list[str]] = {}
-    for table in (
-        "work_concept_evidence",
-        "concept_relation_evidence",
-        "parent_guide_evidence",
+    for table, assertion_namespace in (
+        ("work_concept_evidence", "work-concept"),
+        ("concept_relation_evidence", "concept-relation"),
+        ("parent_guide_evidence", "parent-guide"),
     ):
         if not table_exists(db, table):
             continue
@@ -203,9 +215,12 @@ def main() -> int:
             db,
             f"SELECT assertion_id, evidence_id FROM {table}",
         ):
-            evidence_by_assertion.setdefault(row["assertion_id"], []).append(
-                row["evidence_id"]
+            assertion_id = projection_id(
+                assertion_namespace,
+                row["assertion_id"],
             )
+            evidence_id = projection_id("evidence", row["evidence_id"])
+            evidence_by_assertion.setdefault(assertion_id, []).append(evidence_id)
 
     edges: list[dict[str, Any]] = []
 
@@ -253,12 +268,13 @@ def main() -> int:
             db,
             "SELECT id, work_id, concept_id, relation_type FROM work_concepts",
         ):
+            assertion_id = projection_id("work-concept", row["id"])
             add_edge(
                 row["work_id"],
                 row["concept_id"],
                 row["relation_type"],
-                row["id"],
-                evidence_by_assertion.get(row["id"]),
+                assertion_id,
+                evidence_by_assertion.get(assertion_id),
             )
 
     if table_exists(db, "concept_relations"):
@@ -269,12 +285,13 @@ def main() -> int:
             FROM concept_relations
             """,
         ):
+            assertion_id = projection_id("concept-relation", row["id"])
             add_edge(
                 row["subject_concept_id"],
                 row["object_concept_id"],
                 row["relation_type"],
-                row["id"],
-                evidence_by_assertion.get(row["id"]),
+                assertion_id,
+                evidence_by_assertion.get(assertion_id),
             )
 
     if table_exists(db, "parent_guide_assertions"):
@@ -285,12 +302,13 @@ def main() -> int:
             FROM parent_guide_assertions
             """,
         ):
+            assertion_id = projection_id("parent-guide", row["id"])
             add_edge(
                 row["work_id"],
                 row["concept_id"],
                 f"parent_guide:{row['category']}",
-                row["id"],
-                evidence_by_assertion.get(row["id"]),
+                assertion_id,
+                evidence_by_assertion.get(assertion_id),
             )
 
     if table_exists(db, "credits"):
@@ -302,16 +320,17 @@ def main() -> int:
                 row["agent_id"],
                 row["work_id"],
                 f"credit:{row['role']}",
-                row["id"],
+                projection_id("credit", row["id"]),
             )
 
     if table_exists(db, "evidence"):
         for row in rows(db, "SELECT id, source_id FROM evidence"):
+            evidence_id = projection_id("evidence", row["id"])
             add_edge(
-                row["source_id"],
-                row["id"],
+                projection_id("source", row["source_id"]),
+                evidence_id,
                 "documents_evidence",
-                f"source-link:{row['id']}",
+                f"source-link:{evidence_id}",
             )
 
     dated_works = sorted(

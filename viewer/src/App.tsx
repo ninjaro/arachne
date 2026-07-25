@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { buildDomain, loadCatalog } from "./lib/data";
+import { buildDomain, loadCatalog, loadResearch } from "./lib/data";
 import { buildFeatureIndex } from "./lib/features";
+import { buildResearchData } from "./lib/research";
 import { DEFAULT_SETTINGS } from "./lib/settings";
 import { EMPTY_FILTERS } from "./lib/browse";
 import type { BrowseFilters, BrowseSort } from "./lib/browse";
@@ -11,28 +12,37 @@ import type {
   EntityId,
   RatingValue,
   Ratings,
+  ResearchData,
 } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
 import { RecommendationsView } from "./views/RecommendationsView";
 import { EvolutionView } from "./views/EvolutionView";
 import { IslandsView } from "./views/IslandsView";
+import { ResearchView } from "./views/ResearchView";
 import {
   FloatingEntityWindows,
   useEntityWindows,
 } from "./components/windows";
 import "./styles.css";
 
-type ViewName = "browse" | "recommendations" | "evolution" | "islands";
+type ViewName =
+  | "browse"
+  | "recommendations"
+  | "evolution"
+  | "islands"
+  | "research";
 
 const VIEWS: Array<{ name: ViewName; label: string }> = [
   { name: "browse", label: "Browse" },
   { name: "recommendations", label: "Recommendations" },
   { name: "evolution", label: "Evolution" },
   { name: "islands", label: "Islands" },
+  { name: "research", label: "Research" },
 ];
 
 export default function App() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [externalResearch, setExternalResearch] = useState<ResearchData | null>(null);
   const [domain, setDomain] = useState<Domain | null>(null);
   const [error, setError] = useState("");
   const [view, setView] = useState<ViewName>("browse");
@@ -53,10 +63,11 @@ export default function App() {
   } = useEntityWindows();
 
   useEffect(() => {
-    loadCatalog()
-      .then((loaded) => {
-        setCatalog(loaded);
-        setDomain(buildDomain(loaded));
+    Promise.all([loadCatalog(), loadResearch()])
+      .then(([loadedCatalog, loadedResearch]) => {
+        setCatalog(loadedCatalog);
+        setExternalResearch(loadedResearch);
+        setDomain(buildDomain(loadedCatalog));
       })
       .catch((cause: unknown) =>
         setError(cause instanceof Error ? cause.message : String(cause)),
@@ -71,6 +82,11 @@ export default function App() {
         ? buildFeatureIndex(domain, DEFAULT_SETTINGS.features)
         : null,
     [domain],
+  );
+
+  const research = useMemo(
+    () => (catalog ? buildResearchData(catalog, externalResearch) : null),
+    [catalog, externalResearch],
   );
 
   function rate(id: EntityId, value: RatingValue) {
@@ -106,7 +122,7 @@ export default function App() {
     );
   }
 
-  if (!catalog || !domain || !featureIndex) {
+  if (!catalog || !domain || !featureIndex || !research) {
     return <main className="state">Loading catalog…</main>;
   }
 
@@ -130,6 +146,9 @@ export default function App() {
               onClick={() => setView(name)}
             >
               {label}
+              {name === "research" && research.summary.problems > 0 ? (
+                <span className="tab-count">{research.summary.problems}</span>
+              ) : null}
             </button>
           ))}
         </nav>
@@ -180,7 +199,7 @@ export default function App() {
             settings={DEFAULT_SETTINGS}
             onOpen={openWindow}
           />
-        ) : (
+        ) : view === "islands" ? (
           <IslandsView
             domain={domain}
             index={featureIndex}
@@ -189,6 +208,8 @@ export default function App() {
             onOpen={openWindow}
             onRate={rate}
           />
+        ) : (
+          <ResearchView data={research} domain={domain} onOpen={openWindow} />
         )}
       </main>
 

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <stdexcept>
 
 namespace {
@@ -61,27 +62,25 @@ nlohmann::json product_export() {
               { "value", "Body horror" },
               { "is_preferred", true } } } },
         { "work_concepts",
-          { { { "id", "assertion-1" },
+          { { { "id", 1 },
               { "work_id", "work-a" },
               { "concept_id", "concept-a" },
-              { "relation_type", "anticipates" },
-              { "evidence", { "evidence-1" } } },
-            { { "id", "assertion-2" },
+              { "relation_type", "anticipates" } },
+            { { "id", 2 },
               { "work_id", "work-b" },
               { "concept_id", "concept-a" },
               { "relation_type", "associated_with" } } } },
         { "sources",
-          { { { "id", "source-1" },
+          { { { "id", 1 },
               { "source_type", "book" },
               { "bibliography_text", "A cited monograph" } } } },
         { "evidence",
-          { { { "id", "evidence-1" },
-              { "source_id", "source-1" },
+          { { { "id", 1 },
+              { "source_id", 1 },
               { "exact_quote", "A short supporting quotation." },
               { "stance", "supports" } } } },
         { "work_concept_evidence",
-          { { { "assertion_id", "assertion-1" },
-              { "evidence_id", "evidence-1" } } } },
+          { { { "assertion_id", 1 }, { "evidence_id", 1 } } } },
     };
 }
 
@@ -154,7 +153,7 @@ TEST(AriadneViewer, ProjectionCannotConfuseDerivedAndHumanEdges) {
             );
             EXPECT_EQ(
                 edge.at("provenance").at("source_ids"),
-                nlohmann::json::array({ "assertion-1", "assertion-2" })
+                nlohmann::json::array({ "work-concept:1", "work-concept:2" })
             );
             EXPECT_EQ(edge.at("provenance").at("origin"), "derived_projection");
             EXPECT_EQ(
@@ -169,16 +168,16 @@ TEST(AriadneViewer, ProjectionCannotConfuseDerivedAndHumanEdges) {
                 std::string::npos
             );
         } else if (
-            edge.at("attributes").value("assertion_id", "") == "assertion-1"
+            edge.at("attributes").value("assertion_id", "") == "work-concept:1"
         ) {
             found_human = true;
             EXPECT_FALSE(edge.at("attributes").at("derived").get<bool>());
             EXPECT_EQ(edge.at("provenance").at("origin"), "human_authored");
-            EXPECT_EQ(edge.at("attributes").at("evidence").at(0), "evidence-1");
+            EXPECT_EQ(edge.at("attributes").at("evidence").at(0), "evidence:1");
         } else if (edge.at("edge_type") == "documents_evidence") {
             found_source_link = true;
-            EXPECT_EQ(edge.at("source"), "source-1");
-            EXPECT_EQ(edge.at("target"), "evidence-1");
+            EXPECT_EQ(edge.at("source"), "source:1");
+            EXPECT_EQ(edge.at("target"), "evidence:1");
         }
     }
     EXPECT_EQ(projection.at("artifact_type"), "viewer_projection_data_v1");
@@ -192,12 +191,91 @@ TEST(AriadneViewer, ProjectionCannotConfuseDerivedAndHumanEdges) {
     bool found_evidence_node = false;
     for (const auto& node : projection.at("nodes")) {
         found_source_node
-            = found_source_node || node.at("node_id") == "source-1";
+            = found_source_node || node.at("node_id") == "source:1";
         found_evidence_node
-            = found_evidence_node || node.at("node_id") == "evidence-1";
+            = found_evidence_node || node.at("node_id") == "evidence:1";
     }
     EXPECT_TRUE(found_source_node);
     EXPECT_TRUE(found_evidence_node);
+}
+
+TEST(AriadneViewer, IntegerProductIdsUseExplicitProjectionNamespaces) {
+    auto product = product_export();
+    product["entities"].push_back(
+        { { "id", "concept-b" }, { "entity_type", "concept" } }
+    );
+    product["entities"].push_back(
+        { { "id", "agent-a" }, { "entity_type", "person" } }
+    );
+    product["concepts"].push_back(
+        { { "entity_id", "concept-b" },
+          { "slug", "gothic" },
+          { "concept_type", "genre" } }
+    );
+    product["agents"] = nlohmann::json::array(
+        { { { "entity_id", "agent-a" }, { "agent_type", "person" } } }
+    );
+    product["concept_relations"] = nlohmann::json::array(
+        { { { "id", 3 },
+            { "subject_concept_id", "concept-a" },
+            { "object_concept_id", "concept-b" },
+            { "relation_type", "broader_than" } } }
+    );
+    product["parent_guide_assertions"] = nlohmann::json::array(
+        { { { "id", 4 },
+            { "work_id", "work-a" },
+            { "concept_id", "concept-a" },
+            { "category", "violence" } } }
+    );
+    product["credits"] = nlohmann::json::array(
+        { { { "id", 5 },
+            { "work_id", "work-a" },
+            { "agent_id", "agent-a" },
+            { "role", "director" } } }
+    );
+    product["concept_relation_evidence"] = nlohmann::json::array(
+        { { { "assertion_id", 3 }, { "evidence_id", 1 } } }
+    );
+    product["parent_guide_evidence"] = nlohmann::json::array(
+        { { { "assertion_id", 4 }, { "evidence_id", 1 } } }
+    );
+
+    const auto projection = arachne::ariadne::viewer_builder::project(
+        product, candidate_export(), "product-1", "candidate-1"
+    );
+    std::set<std::string> assertion_ids;
+    for (const auto& node : projection.at("nodes")) {
+        EXPECT_TRUE(node.at("node_id").is_string());
+    }
+    for (const auto& edge : projection.at("edges")) {
+        EXPECT_TRUE(edge.at("source").is_string());
+        EXPECT_TRUE(edge.at("target").is_string());
+        if (edge.contains("attributes")
+            && edge.at("attributes").contains("assertion_id")) {
+            EXPECT_TRUE(edge.at("attributes").at("assertion_id").is_string());
+            assertion_ids.insert(
+                edge.at("attributes").at("assertion_id").get<std::string>()
+            );
+        }
+        if (edge.at("provenance").contains("source_ids")) {
+            for (const auto& source_id :
+                 edge.at("provenance").at("source_ids")) {
+                EXPECT_TRUE(source_id.is_string());
+            }
+        }
+    }
+    EXPECT_TRUE(assertion_ids.contains("work-concept:1"));
+    EXPECT_TRUE(assertion_ids.contains("concept-relation:3"));
+    EXPECT_TRUE(assertion_ids.contains("parent-guide:4"));
+    EXPECT_TRUE(assertion_ids.contains("credit:5"));
+
+    const auto catalog
+        = arachne::ariadne::viewer_builder::catalog(product, "product-1");
+    ASSERT_EQ(catalog.at("works").at(0).at("advisories").size(), 1U);
+    EXPECT_EQ(
+        catalog.at("works").at(0).at("advisories").at(0).at("id"),
+        "parent-guide:4"
+    );
 }
 
 TEST(AriadneViewer, SimilarityProjectionIsOrderIndependentAndUsesNoHeuristics) {

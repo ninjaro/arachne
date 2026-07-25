@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
-import hashlib
 import io
 import json
 import os
@@ -53,7 +52,7 @@ from scripts.normalize_legacy_batches import (
 )
 from scripts.consolidate_canonical_manifest import (
     ConsolidationError,
-    _validate_manifest_references as _validate_v2_manifest,
+    _validate_manifest_references as _validate_normalized_manifest,
 )
 
 
@@ -1424,6 +1423,7 @@ def _read_existing_manifest(path: Path) -> dict[str, Any] | None:
     if contract not in {
         ("normalized_product_import_v1", 1),
         ("normalized_product_import_v2", 2),
+        ("normalized_product_import_v3", 3),
     }:
         raise CleanupError(f"{path}: existing manifest has an unsupported contract")
     for collection in MANIFEST_ARRAYS:
@@ -1444,11 +1444,15 @@ def _read_existing_manifest(path: Path) -> dict[str, Any] | None:
                     f"{path}: normalized manifest collection "
                     f"{collection!r} is invalid"
                 )
+    if contract in {
+        ("normalized_product_import_v2", 2),
+        ("normalized_product_import_v3", 3),
+    }:
         try:
-            _validate_v2_manifest(value)
+            _validate_normalized_manifest(value)
         except (ConsolidationError, KeyError, TypeError, ValueError) as error:
             raise CleanupError(
-                f"{path}: existing v2 manifest is invalid: {error}"
+                f"{path}: existing normalized manifest is invalid: {error}"
             ) from error
     return value
 
@@ -1824,32 +1828,6 @@ def _transport_identifier(
             f"normalized {collection} record is missing its transport identifier"
         )
     return identifier
-
-
-def _stable_v2_id(prefix: str, identity: str) -> str:
-    return prefix + hashlib.sha256(identity.encode("utf-8")).hexdigest()
-
-
-def _v2_concept_id(value: Mapping[str, Any]) -> str:
-    slug = value.get("slug")
-    if not isinstance(slug, str) or not slug:
-        raise CleanupError("normalized concept has no stable slug")
-    return _stable_v2_id("con_", slug)
-
-
-def _v2_source_identity(value: Mapping[str, Any]) -> str:
-    for field in ("doi", "isbn", "url", "bibliography"):
-        item = value.get(field)
-        if isinstance(item, str) and item:
-            return f"{field}|{item}"
-    raise CleanupError(
-        f"normalized source {value.get('ref_id', '<unknown>')} has no "
-        "stable identity field"
-    )
-
-
-def _v2_source_id(value: Mapping[str, Any]) -> str:
-    return _stable_v2_id("src_", _v2_source_identity(value))
 
 
 def _v2_work_keys(
@@ -2278,118 +2256,71 @@ def _preserve_incoming_name_as_alias(
     current["name"] = prior_name
 
 
-def _prepare_v2_current(
-    previous: Mapping[str, Any], current: dict[str, Any]
-) -> None:
+def _as_v3_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the product-only v3 surface for any supported input version."""
+    result = copy.deepcopy(manifest)
+    result["contract"] = "normalized_product_import_v3"
+    result["format_version"] = 3
+    result.pop("entity_redirects", None)
+    result.pop("source_redirects", None)
+    for collection in MANIFEST_ARRAYS:
+        result.setdefault(collection, [])
+    for collection in ("creators", "works", "manifestations"):
+        for value in result[collection]:
+            identifier = _transport_identifier(collection, value)
+            value["canonical_id"] = identifier
+    for value in result["tags"]:
+        identifier = _transport_identifier("tags", value)
+        value["canonical_id"] = identifier
+        value.setdefault("names", [])
+        value.pop("slug_aliases", None)
+    for value in result["references"]:
+        value.pop("canonical_id", None)
+        value.setdefault("alternate_urls", [])
+    return result
+
+
+def _prepare_v3_current(
+    previous: Mapping[str, Any], current: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Preserve useful labels and URLs while discarding compatibility IDs."""
+    prior = _as_v3_manifest(previous)
+    result = _as_v3_manifest(current)
     previous_by_collection = {
         collection: {
             _transport_identifier(collection, value): value
-            for value in previous[collection]
+            for value in prior[collection]
         }
-        for collection in (
-            "creators",
-            "works",
-            "tags",
-            "references",
-            "manifestations",
-        )
+        for collection in ("creators", "tags", "references")
     }
-    live_entity_ids = {
-        str(value["canonical_id"])
-        for collection in ("creators", "works", "tags", "manifestations")
-        for value in previous[collection]
-    }
-    blocked_entity_ids = live_entity_ids | {
-        str(value["alias_id"]) for value in previous["entity_redirects"]
-    }
-    live_source_ids = {
-        str(value["canonical_id"]) for value in previous["references"]
-    }
-    blocked_source_ids = live_source_ids | {
-        str(value["alias_id"]) for value in previous["source_redirects"]
-    }
-
-    for collection in ("creators", "works", "manifestations"):
-        for value in current[collection]:
+    for collection in ("creators", "tags"):
+        for value in result[collection]:
             identifier = _transport_identifier(collection, value)
-            prior = previous_by_collection[collection].get(identifier)
-            if prior is not None:
-                value["canonical_id"] = prior["canonical_id"]
-                if collection == "creators":
-                    _preserve_incoming_name_as_alias(prior, value)
-            else:
-                if identifier in blocked_entity_ids:
-                    raise CleanupError(
-                        f"new {collection} ID would resurrect a live or "
-                        f"redirected canonical identity: {identifier}"
-                    )
-                value["canonical_id"] = identifier
-                blocked_entity_ids.add(identifier)
-
-    for value in current["tags"]:
-        identifier = _transport_identifier("tags", value)
-        prior = previous_by_collection["tags"].get(identifier)
-        if prior is not None:
-            incoming_slug = value.get("slug")
-            value["canonical_id"] = prior["canonical_id"]
-            _preserve_incoming_name_as_alias(prior, value)
-            aliases = [
-                item
-                for item in value.get("slug_aliases", [])
-                if isinstance(item, str) and item
-            ]
-            if (
-                isinstance(incoming_slug, str)
-                and incoming_slug
-                and incoming_slug != prior["slug"]
-            ):
-                aliases.append(incoming_slug)
-            value["slug"] = prior["slug"]
-            value["slug_aliases"] = sorted(set(aliases))
-        else:
-            canonical_id = _v2_concept_id(value)
-            if canonical_id in blocked_entity_ids:
-                raise CleanupError(
-                    "new concept would resurrect a live or redirected "
-                    f"canonical identity: {canonical_id}"
-                )
-            value["canonical_id"] = canonical_id
-            value.setdefault("names", [])
-            value.setdefault("slug_aliases", [])
-            blocked_entity_ids.add(canonical_id)
-
-    for value in current["references"]:
+            previous_value = previous_by_collection[collection].get(identifier)
+            if previous_value is not None:
+                _preserve_incoming_name_as_alias(previous_value, value)
+    for value in result["references"]:
         identifier = _transport_identifier("references", value)
-        prior = previous_by_collection["references"].get(identifier)
-        if prior is not None:
-            value["canonical_id"] = prior["canonical_id"]
-            prior_url = prior.get("url")
-            incoming_url = value.get("url")
-            alternates = [
-                item
-                for item in value.get("alternate_urls", [])
-                if isinstance(item, str) and item
-            ]
-            if (
-                isinstance(prior_url, str)
-                and prior_url
-                and isinstance(incoming_url, str)
-                and incoming_url
-                and incoming_url != prior_url
-            ):
-                alternates.append(incoming_url)
-                value["url"] = prior_url
-            value["alternate_urls"] = sorted(set(alternates))
-        else:
-            canonical_id = _v2_source_id(value)
-            if canonical_id in blocked_source_ids:
-                raise CleanupError(
-                    "new source would resurrect a live or redirected "
-                    f"canonical identity: {canonical_id}"
-                )
-            value["canonical_id"] = canonical_id
-            value.setdefault("alternate_urls", [])
-            blocked_source_ids.add(canonical_id)
+        previous_value = previous_by_collection["references"].get(identifier)
+        if previous_value is None:
+            continue
+        prior_url = previous_value.get("url")
+        incoming_url = value.get("url")
+        if (
+            isinstance(prior_url, str)
+            and prior_url
+            and isinstance(incoming_url, str)
+            and incoming_url
+            and incoming_url != prior_url
+        ):
+            value["alternate_urls"] = sorted(
+                {
+                    *value.get("alternate_urls", []),
+                    incoming_url,
+                }
+            )
+            value["url"] = prior_url
+    return result
 
 
 def _rewrite_normalizer_mapping(
@@ -2419,9 +2350,6 @@ def _rebase_current_manifest_v2(
     mappings: dict[str, dict[str, str]] = {}
     quarantine_lines: list[dict[str, Any]] = []
     quarantined: dict[str, set[str]] = {}
-    entity_redirect_aliases = {
-        str(value["alias_id"]) for value in previous["entity_redirects"]
-    }
 
     previous_creator_keys = {
         _transport_identifier("creators", value): _authority_keys(
@@ -2483,7 +2411,6 @@ def _rebase_current_manifest_v2(
         ],
         previous_creator_keys,
         current_creator_keys,
-        forbidden_identifiers=entity_redirect_aliases,
     )
     ambiguities.extend(name_only_ambiguities)
     lines, quarantined["creators"] = _quarantine_v2_ambiguities(
@@ -2525,7 +2452,6 @@ def _rebase_current_manifest_v2(
         result["works"],
         previous_work_keys,
         current_work_keys,
-        forbidden_identifiers=entity_redirect_aliases,
     )
     lines, quarantined["works"] = _quarantine_v2_ambiguities(
         result, "works", ambiguities
@@ -2552,7 +2478,6 @@ def _rebase_current_manifest_v2(
             )
 
     previous_tag_keys: dict[str, list[str]] = {}
-    previous_tag_by_canonical: dict[str, str] = {}
     for value in previous["tags"]:
         identifier = _transport_identifier("tags", value)
         previous_tag_keys[identifier] = [
@@ -2560,24 +2485,12 @@ def _rebase_current_manifest_v2(
             for slug in [value.get("slug"), *value.get("slug_aliases", [])]
             if isinstance(slug, str) and slug
         ]
-        previous_tag_by_canonical[str(value["canonical_id"])] = identifier
     current_tag_keys = {
         _transport_identifier("tags", value): [
             _json_text(["concept-slug", value.get("slug")])
         ]
         for value in result["tags"]
     }
-    entity_redirects = {
-        str(value["alias_id"]): str(value["canonical_id"])
-        for value in previous["entity_redirects"]
-        if value.get("entity_type") == "concept"
-    }
-    redirected_tags: dict[str, str] = {}
-    for value in result["tags"]:
-        current_id = _transport_identifier("tags", value)
-        target = entity_redirects.get(_v2_concept_id(value))
-        if target in previous_tag_by_canonical:
-            redirected_tags[current_id] = previous_tag_by_canonical[target]
     tag_ids, ambiguities = _v2_assign_transport_ids(
         "tags",
         "concept",
@@ -2585,8 +2498,6 @@ def _rebase_current_manifest_v2(
         result["tags"],
         previous_tag_keys,
         current_tag_keys,
-        forbidden_identifiers=entity_redirect_aliases,
-        redirected_candidates=redirected_tags,
     )
     lines, quarantined["tags"] = _quarantine_v2_ambiguities(
         result, "tags", ambiguities
@@ -2614,20 +2525,6 @@ def _rebase_current_manifest_v2(
         _transport_identifier("references", value): _v2_reference_keys(value)
         for value in result["references"]
     }
-    previous_source_by_canonical = {
-        str(value["canonical_id"]): _transport_identifier("references", value)
-        for value in previous["references"]
-    }
-    source_redirects = {
-        str(value["alias_id"]): str(value["canonical_id"])
-        for value in previous["source_redirects"]
-    }
-    redirected_sources: dict[str, str] = {}
-    for value in result["references"]:
-        current_id = _transport_identifier("references", value)
-        target = source_redirects.get(_v2_source_id(value))
-        if target in previous_source_by_canonical:
-            redirected_sources[current_id] = previous_source_by_canonical[target]
     reference_ids, ambiguities = _v2_assign_transport_ids(
         "references",
         "source",
@@ -2635,8 +2532,6 @@ def _rebase_current_manifest_v2(
         result["references"],
         previous_reference_keys,
         current_reference_keys,
-        forbidden_identifiers=source_redirects,
-        redirected_candidates=redirected_sources,
     )
     lines, quarantined["references"] = _quarantine_v2_ambiguities(
         result, "references", ambiguities
@@ -2672,7 +2567,6 @@ def _rebase_current_manifest_v2(
         result["manifestations"],
         previous_manifestation_keys,
         current_manifestation_keys,
-        forbidden_identifiers=entity_redirect_aliases,
     )
     lines, quarantined["manifestations"] = _quarantine_v2_ambiguities(
         result, "manifestations", ambiguities
@@ -2688,7 +2582,7 @@ def _rebase_current_manifest_v2(
                 value.get("entity"), manifestation_ids
             )
 
-    _prepare_v2_current(previous, result)
+    result = _prepare_v3_current(previous, result)
     for attribute, collection in (
         ("creator_map", "creators"),
         ("work_map", "works"),
@@ -2987,36 +2881,42 @@ def _merge_normalized_manifests(
     normalizer: Normalizer,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     if previous is None:
-        return copy.deepcopy(current), [], {
+        merged = _as_v3_manifest(current)
+        try:
+            _validate_normalized_manifest(merged)
+        except (ConsolidationError, KeyError, TypeError, ValueError) as error:
+            raise CleanupError(
+                f"new normalized v3 manifest is invalid: {error}"
+            ) from error
+        return merged, [], {
             "previous_manifest": False,
             "preserved_records": 0,
         }
-    is_v2 = (
-        previous.get("contract") == "normalized_product_import_v2"
-        and previous.get("format_version") == 2
-    )
-    if is_v2:
+    baseline = _as_v3_manifest(previous)
+    uses_exact_identity_rebase = (
+        previous.get("contract"),
+        previous.get("format_version"),
+    ) in {
+        ("normalized_product_import_v2", 2),
+        ("normalized_product_import_v3", 3),
+    }
+    if uses_exact_identity_rebase:
         rebased, _, quarantine_lines = _rebase_current_manifest_v2(
             previous, current, normalizer
         )
-        merged: dict[str, Any] = {
-            "contract": "normalized_product_import_v2",
-            "format_version": 2,
-            "entity_redirects": copy.deepcopy(previous["entity_redirects"]),
-            "source_redirects": copy.deepcopy(previous["source_redirects"]),
-        }
         conflict_lines: list[dict[str, Any]] = list(quarantine_lines)
     else:
-        rebased, _ = _rebase_current_manifest(previous, current, normalizer)
-        merged = {
-            "contract": "normalized_product_import_v1",
-            "format_version": 1,
-        }
+        rebased, _ = _rebase_current_manifest(baseline, current, normalizer)
+        rebased = _prepare_v3_current(baseline, rebased)
         conflict_lines = []
+    merged: dict[str, Any] = {
+        "contract": "normalized_product_import_v3",
+        "format_version": 3,
+    }
     preserved = 0
     for collection in MANIFEST_ARRAYS:
         prior_by_key: dict[str, dict[str, Any]] = {}
-        for value in previous[collection]:
+        for value in baseline[collection]:
             identity = _collection_identity(collection, value)
             if identity in prior_by_key:
                 raise CleanupError(
@@ -3067,23 +2967,15 @@ def _merge_normalized_manifests(
                 )
         merged[collection] = sorted(combined.values(), key=_json_text)
         preserved += len(prior_by_key)
-    if is_v2:
-        try:
-            _validate_v2_manifest(merged)
-        except (ConsolidationError, KeyError, TypeError, ValueError) as error:
-            raise CleanupError(
-                f"merged v2 manifest is invalid: {error}"
-            ) from error
-    report = _manifest_preservation_report(previous, merged)
+    try:
+        _validate_normalized_manifest(merged)
+    except (ConsolidationError, KeyError, TypeError, ValueError) as error:
+        raise CleanupError(
+            f"merged normalized v3 manifest is invalid: {error}"
+        ) from error
+    report = _manifest_preservation_report(baseline, merged)
     report["previous_manifest"] = True
     report["preserved_records"] = preserved
-    if is_v2:
-        report["preserved_entity_redirects"] = len(
-            previous["entity_redirects"]
-        )
-        report["preserved_source_redirects"] = len(
-            previous["source_redirects"]
-        )
     return merged, conflict_lines, report
 
 
@@ -3124,24 +3016,12 @@ def _manifest_preservation_report(
 
 def _manifest_id_universe(manifest: Mapping[str, Any]) -> set[str]:
     result: set[str] = set()
-    is_v2 = (
-        manifest.get("contract") == "normalized_product_import_v2"
-        and manifest.get("format_version") == 2
-    )
     for collection in (
         "creators", "works", "tags", "references", "manifestations"
     ):
         for value in manifest.get(collection, []):
             if isinstance(value, dict):
-                if collection == "references" and is_v2:
-                    canonical_id = value.get("canonical_id")
-                    if not isinstance(canonical_id, str) or not canonical_id:
-                        raise CleanupError(
-                            "v2 source is missing its canonical ID"
-                        )
-                    result.add(canonical_id)
-                else:
-                    result.add(_record_identifier(collection, value))
+                result.add(_record_identifier(collection, value))
     return result
 
 
@@ -3273,28 +3153,18 @@ def _identity_index(
         if not isinstance(concept, dict):
             raise CleanupError("normalized concept is not an object")
         canonical_id = _canonical_identifier(concept, concept=True)
-        for slug in [
-            concept.get("slug"), *concept.get("slug_aliases", [])
-        ]:
-            if isinstance(slug, str) and slug:
-                add(
-                    "concept-slug",
-                    [slug, concept.get("type")],
-                    canonical_id,
-                )
+        slug = concept.get("slug")
+        if isinstance(slug, str) and slug:
+            add(
+                "concept-slug",
+                [slug, concept.get("type")],
+                canonical_id,
+            )
 
-    is_v2 = (
-        manifest.get("contract") == "normalized_product_import_v2"
-        and manifest.get("format_version") == 2
-    )
     for source in references:
         if not isinstance(source, dict):
             raise CleanupError("normalized source is not an object")
-        canonical_id = (
-            source.get("canonical_id")
-            if is_v2
-            else source.get("ref_id")
-        )
+        canonical_id = source.get("ref_id")
         if not isinstance(canonical_id, str) or not canonical_id:
             raise CleanupError(
                 "normalized source is missing its stable canonical ID"
@@ -3330,8 +3200,10 @@ def canonical_id_stability_report(
     """Refuse deterministic renumbering of any previously known identity."""
     if previous is None:
         return {"previous_manifest": False, "matched_identities": 0}
-    old = _identity_index(previous)
-    new = _identity_index(current)
+    previous_v3 = _as_v3_manifest(previous)
+    current_v3 = _as_v3_manifest(current)
+    old = _identity_index(previous_v3)
+    new = _identity_index(current_v3)
     matched = sorted(set(old).intersection(new))
     conflicts = [
         {
@@ -3349,8 +3221,8 @@ def canonical_id_stability_report(
             "canonical ID stability check failed; activation would renumber an "
             f"existing semantic identity: {example}"
         )
-    old_ids = _manifest_id_universe(previous)
-    new_ids = _manifest_id_universe(current)
+    old_ids = _manifest_id_universe(previous_v3)
+    new_ids = _manifest_id_universe(current_v3)
     return {
         "previous_manifest": True,
         "matched_identities": len(matched),

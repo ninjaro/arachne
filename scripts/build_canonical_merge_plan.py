@@ -10,7 +10,6 @@ copied into the plan's blocked-ID guard rather than inferred as merges.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -160,10 +159,6 @@ LABEL_NORMALIZATION = {
 }
 
 
-def _sha(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
 def _load_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -253,10 +248,15 @@ def _concept_sections(report: str) -> list[tuple[str, str]]:
 def _concept_groups(
     report: str, tags: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    by_canonical = {
-        record.get("canonical_id", "con_" + _sha(record["slug"])): record
-        for record in tags
-    }
+    by_identifier: dict[str, dict[str, Any]] = {}
+    for record in tags:
+        for candidate in (record.get("canonical_id"), record.get("local_id")):
+            if isinstance(candidate, str) and candidate:
+                by_identifier[candidate] = record
+    # Reports written against v2 contain con_<sha256> identifiers.  Accept
+    # those as input references while emitting only the matched readable
+    # transport IDs in the new plan.
+    report_identifier = r"(?:concept-[0-9]{6,}|con_[0-9a-f]{64})"
     accepted: list[dict[str, Any]] = []
     blocked: list[str] = []
     sections = _concept_sections(report)
@@ -273,16 +273,16 @@ def _concept_groups(
     for heading, body in sections:
         member_line = re.search(r"(?m)^- Members: (.+)$", body)
         target_match = re.search(
-            r"(?m)^- Recommended target: `(con_[0-9a-f]{64})`$", body
+            rf"(?m)^- Recommended target: `({report_identifier})`$", body
         )
         if member_line is None or target_match is None:
             raise PlanError(f"cannot parse concept section {heading!r}")
         canonical_members = re.findall(
-            r"`(con_[0-9a-f]{64})`", member_line.group(1)
+            rf"`({report_identifier})`", member_line.group(1)
         )
         try:
-            members = [by_canonical[value]["local_id"] for value in canonical_members]
-            target_record = by_canonical[target_match.group(1)]
+            members = [by_identifier[value]["local_id"] for value in canonical_members]
+            target_record = by_identifier[target_match.group(1)]
         except KeyError as error:
             raise PlanError(
                 f"concept report ID is absent from the manifest: {error}"

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import type { Domain, EntityId, Settings } from "../lib/types";
 import type { FeatureIndex } from "../lib/features";
 import { factorPhrase } from "../lib/features";
@@ -22,6 +23,20 @@ interface PlacedNode {
   hiddenCount?: number;
   parentId?: EntityId;
   evidence?: EvolutionNode["evidence"];
+}
+
+function evolutionEdgeStyle(
+  score: number | null | undefined,
+): CSSProperties {
+  if (score === null || score === undefined) {
+    return { strokeWidth: 1, opacity: 0.45 };
+  }
+  const strength = Math.max(0, Math.min(1, score));
+  return {
+    strokeWidth: 0.9 + 4.2 * Math.pow(strength, 1.35),
+    opacity: 0.35 + 0.65 * strength,
+    strokeLinecap: "round",
+  };
 }
 
 function visibleLayout(
@@ -222,6 +237,8 @@ export function EvolutionView({
                   key={`edge:${node.key}`}
                   d={`M ${x1} ${y1} C ${x1 + 70} ${y1}, ${x2 - 70} ${y2}, ${x2} ${y2}`}
                   className="evolution-edge"
+                  style={evolutionEdgeStyle(node.evidence?.score)}
+                  vectorEffect="non-scaling-stroke"
                 >
                   <title>
                     {node.evidence

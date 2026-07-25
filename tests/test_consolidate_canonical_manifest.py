@@ -191,32 +191,23 @@ class CanonicalConsolidationTests(unittest.TestCase):
     def test_merges_rewire_and_preserve_aliases_provenance(self) -> None:
         result, events, summary = consolidate(_manifest(), _plan())
 
-        self.assertEqual(result["contract"], "normalized_product_import_v2")
-        self.assertEqual(result["format_version"], 2)
+        self.assertEqual(result["contract"], "normalized_product_import_v3")
+        self.assertEqual(result["format_version"], 3)
         self.assertEqual([row["local_id"] for row in result["creators"]], ["agent-live"])
         self.assertEqual([row["local_id"] for row in result["tags"]], ["concept-live"])
         self.assertEqual([row["ref_id"] for row in result["references"]], ["source-live"])
 
         concept = result["tags"][0]
+        self.assertEqual(concept["canonical_id"], "concept-live")
         self.assertIn("ageing", [row["value"] for row in concept["names"]])
-        self.assertEqual(concept["slug_aliases"], ["ageing"])
+        self.assertNotIn("slug_aliases", concept)
         source = result["references"][0]
+        self.assertNotIn("canonical_id", source)
         self.assertEqual(
             source["alternate_urls"], ["https://example.test/source"]
         )
-
-        entity_redirects = {
-            row["alias_id"]: row for row in result["entity_redirects"]
-        }
-        self.assertEqual(
-            entity_redirects["agent_old"]["canonical_id"], "agent_live"
-        )
-        self.assertNotIn("target_id", entity_redirects["agent_old"])
-        self.assertIn("con_", entity_redirects[next(
-            key for key in entity_redirects if key.startswith("con_")
-        )]["canonical_id"])
-        self.assertEqual(len(result["source_redirects"]), 1)
-        self.assertIn("canonical_id", result["source_redirects"][0])
+        self.assertNotIn("entity_redirects", result)
+        self.assertNotIn("source_redirects", result)
 
         self.assertEqual(len(result["credits"]), 1)
         self.assertEqual(result["credits"][0]["creator"], "agent-live")
@@ -260,16 +251,16 @@ class CanonicalConsolidationTests(unittest.TestCase):
         ):
             consolidate(_manifest(), plan)
 
-    def test_redirect_chain_is_rejected(self) -> None:
+    def test_v2_compatibility_metadata_is_removed_during_upgrade(self) -> None:
         manifest = _manifest()
         manifest["contract"] = "normalized_product_import_v2"
         manifest["format_version"] = 2
         for tag in manifest["tags"]:
-            tag["canonical_id"] = "con_" + tag["slug"]
+            tag["canonical_id"] = "con_" + "a" * 64
             tag["names"] = []
-            tag["slug_aliases"] = []
+            tag["slug_aliases"] = [tag["slug"] + "-legacy"]
         for source in manifest["references"]:
-            source["canonical_id"] = "src_" + source["ref_id"]
+            source["canonical_id"] = "src_" + "b" * 64
             source["alternate_urls"] = []
         manifest["entity_redirects"] = [
             {
@@ -278,26 +269,27 @@ class CanonicalConsolidationTests(unittest.TestCase):
                 "entity_type": "person",
             }
         ]
-        manifest["source_redirects"] = []
+        manifest["source_redirects"] = [
+            {
+                "alias_id": "src_" + "c" * 64,
+                "canonical_id": "src_" + "b" * 64,
+            }
+        ]
 
-        with self.assertRaisesRegex(ConsolidationError, "redirect chains are forbidden"):
-            consolidate(manifest, _plan())
+        result, _, _ = consolidate(manifest, _plan())
 
-    def test_redirect_type_must_match_target(self) -> None:
-        result, _, _ = consolidate(_manifest(), _plan())
-        result["entity_redirects"][0]["entity_type"] = "organization"
-
-        with self.assertRaisesRegex(ConsolidationError, "has type"):
-            consolidate(result, _plan())
-
-    def test_slug_alias_may_not_repeat_live_slug(self) -> None:
-        result, _, _ = consolidate(_manifest(), _plan())
-        result["tags"][0]["slug_aliases"].append(result["tags"][0]["slug"])
-
-        with self.assertRaisesRegex(
-            ConsolidationError, "concept slug/alias is duplicated"
-        ):
-            consolidate(result, _plan())
+        self.assertEqual(result["contract"], "normalized_product_import_v3")
+        self.assertNotIn("entity_redirects", result)
+        self.assertNotIn("source_redirects", result)
+        self.assertTrue(
+            all(tag["canonical_id"] == tag["local_id"] for tag in result["tags"])
+        )
+        self.assertTrue(
+            all("slug_aliases" not in tag for tag in result["tags"])
+        )
+        self.assertTrue(
+            all("canonical_id" not in source for source in result["references"])
+        )
 
     def test_alternate_url_may_not_repeat_primary_url(self) -> None:
         result, _, _ = consolidate(_manifest(), _plan())
@@ -475,6 +467,53 @@ class CanonicalConsolidationTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(PlanError, "unreviewed headings"):
                 build_canonical_merge_plan._concept_groups(report, [])
+
+    def test_plan_builder_accepts_readable_v3_concept_ids(self) -> None:
+        report = "\n".join(
+            [
+                "### accepted",
+                "- Members: `concept-000001`, `concept-000002`",
+                "- Recommended target: `concept-000002`",
+                "- Reason: reviewed identity",
+            ]
+        )
+        tags = [
+            {
+                "local_id": "concept-000001",
+                "canonical_id": "concept-000001",
+                "name": "First",
+                "type": "theme",
+                "slug": "first",
+            },
+            {
+                "local_id": "concept-000002",
+                "canonical_id": "concept-000002",
+                "name": "Second",
+                "type": "theme",
+                "slug": "second",
+            },
+        ]
+        with (
+            mock.patch.object(
+                build_canonical_merge_plan,
+                "ACCEPTED_CONCEPT_HEADINGS",
+                {"accepted"},
+            ),
+            mock.patch.object(
+                build_canonical_merge_plan,
+                "DEFERRED_CONCEPT_HEADINGS",
+                set(),
+            ),
+        ):
+            groups, blocked = build_canonical_merge_plan._concept_groups(
+                report, tags
+            )
+
+        self.assertEqual(blocked, [])
+        self.assertEqual(groups[0]["target"], "concept-000002")
+        self.assertEqual(
+            groups[0]["members"], ["concept-000001", "concept-000002"]
+        )
 
 
 if __name__ == "__main__":

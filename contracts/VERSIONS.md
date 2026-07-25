@@ -5,12 +5,15 @@ The files in `schemas/` are JSON Schema Draft 2020-12 contracts. The files in
 `artifacts/` contains schemas and examples for large resolved payloads that are
 referenced by boundary contracts rather than treated as additional contracts.
 
-`normalized_product_import_v1` and `normalized_product_import_v2` are narrow
-discriminator exceptions inside that directory. Penelope consumes them directly
-after whole-corpus normalization or reviewed consolidation, so their roots use
+`normalized_product_import_v1`, `normalized_product_import_v2`, and
+`normalized_product_import_v3` are narrow discriminator exceptions inside that
+directory. Penelope consumes these transfer artifacts directly after
+whole-corpus normalization or reviewed consolidation, so their roots use
 `contract` rather than `artifact_type`. They are still data-file formats, are
 not members of the C++ `contract_name` enumeration, and are not public miner
-intake contracts.
+intake contracts. Their suffixes are independent of SQLite
+`PRAGMA user_version`; an import-artifact version and a product-schema version
+describe different boundaries.
 
 ## Version header
 
@@ -102,18 +105,44 @@ members of the C++ `contract_name` enumeration:
   carries no batch, run, hash, backup, or operational-metadata dependency. It
   does not replace the deliberately open `mining_batch_v1` compatibility marker.
 - `normalized_product_import_v2` is the reviewed-consolidation successor. It
-  requires explicit concept and source IDs, preserves concept names and slug
-  aliases plus alternate source URLs, and carries direct retired-identity
-  redirects. Redirects cannot chain, cross entity types, or coexist with a live
-  alias ID. The retired identifiers and old slugs are preservation and rebase
-  metadata in this transfer artifact; product schema v3 validates them but does
-  not materialize them. Nonpreferred concept names and alternate source URLs
-  remain ordinary canonical research data.
+  requires explicit hash-based concept and source IDs, preserves concept names
+  and slug aliases plus alternate source URLs, and carries direct
+  retired-identity redirects. Redirects cannot chain, cross entity types, or
+  coexist with a live alias ID. It is accepted only as legacy upgrade input;
+  new normalization, consolidation, and cleanup artifacts must not emit it.
+- `normalized_product_import_v3` is the final-record transfer successor.
+  Creators, works, concepts, and manifestations use readable category-specific
+  canonical IDs identical to their local transfer IDs. Sources use `ref_id`
+  only. It contains no redirect arrays, source canonical compatibility IDs, or
+  concept slug aliases. Nonpreferred concept names, alternate source URLs, and
+  archive SHA-256 values for actual captured bytes remain ordinary research and
+  integrity data. Product schema v4 retains the readable entity IDs but assigns
+  sources and other internal records integer primary keys.
 - `consolidated_corpus_unresolved_v1` preserves exact conflicting or
   non-transferable JSON outside the product database, with source pointers,
   reasons, and dependency context. Its envelope and locator records are closed,
   while preserved values and aggregate summary keys remain intentionally
   flexible for evidence-derived later analysis.
+
+## Normalized import and product schema versions
+
+The current direct-import mapping is explicit:
+
+| Normalized artifact | Product schema | Meaning |
+|---|---:|---|
+| `normalized_product_import_v1` | 1 | Historical one-file import behavior. |
+| `normalized_product_import_v2` | 3 | Legacy compatibility fields are validated but not materialized. |
+| `normalized_product_import_v3` | 4 | Readable canonical entities and compact integer internal keys. |
+
+Database migration is a separate operation. Schema v2 contains the historical
+redirect and concept-slug-alias structures. Migrating v2 without a manifest
+removes only that metadata and activates schema v3, preserving surviving text
+IDs. Schema v3 has no compatibility tables but still carries the v2 hash-era
+concept, source, and internal text keys. Migrating schema v3 to v4 requires an
+equivalent `normalized_product_import_v3` manifest and performs a fresh rebuild
+plus semantic-equivalence validation. Supplying that manifest also permits a
+direct schema-v2-to-v4 rebuild. Schema v4 is already current and migration is a
+no-op; schema v1 is not accepted by the standalone migration command.
 
 ## Compatibility policy
 

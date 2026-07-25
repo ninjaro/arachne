@@ -1,9 +1,15 @@
-import type { Catalog, Domain } from "./types";
+import type { Catalog, Domain, ResearchData } from "./types";
 
 function isCatalog(value: unknown): value is Catalog {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return record.formatVersion === 1 && Array.isArray(record.works);
+}
+
+function isResearchData(value: unknown): value is ResearchData {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return record.formatVersion === 1 && Array.isArray(record.items);
 }
 
 export async function loadCatalog(): Promise<Catalog> {
@@ -13,6 +19,17 @@ export async function loadCatalog(): Promise<Catalog> {
   if (!response.ok) throw new Error(`Catalog load failed (${response.status})`);
   const value: unknown = await response.json();
   if (!isCatalog(value)) throw new Error("Unsupported or invalid catalog.json");
+  return value;
+}
+
+export async function loadResearch(): Promise<ResearchData | null> {
+  const response = await fetch(`${import.meta.env.BASE_URL}data/research.json`, {
+    cache: "no-store",
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Research data load failed (${response.status})`);
+  const value: unknown = await response.json();
+  if (!isResearchData(value)) throw new Error("Unsupported or invalid research.json");
   return value;
 }
 

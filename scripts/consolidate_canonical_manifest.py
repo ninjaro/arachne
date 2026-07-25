@@ -2,7 +2,7 @@
 """Apply a reviewed canonical merge plan to a normalized product manifest.
 
 The transformer never opens SQLite.  It produces a complete
-``normalized_product_import_v2`` artifact for Penelope, together with a
+``normalized_product_import_v3`` artifact for Penelope, together with a
 deterministic JSONL lineage/conflict record.  The database is activated
 separately through Arachne's ``product import-normalized`` command.
 
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import math
 import os
@@ -40,32 +39,11 @@ def _canonical_json(value: Any) -> str:
     )
 
 
-def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _stable_id(prefix: str, key: str) -> str:
-    return prefix + _sha256(key)
-
-
 def _concept_id(record: dict[str, Any]) -> str:
-    return record.get("canonical_id") or _stable_id("con_", record["slug"])
-
-
-def _source_identity(record: dict[str, Any]) -> str:
-    for field in ("doi", "isbn", "url", "bibliography"):
-        value = record.get(field)
-        if isinstance(value, str) and value:
-            return f"{field}|{value}"
-    raise ConsolidationError(
-        f"source {record.get('ref_id', '<unknown>')} has no stable identity field"
-    )
-
-
-def _source_id(record: dict[str, Any]) -> str:
-    return record.get("canonical_id") or _stable_id(
-        "src_", _source_identity(record)
-    )
+    identifier = record.get("canonical_id") or record.get("local_id")
+    if not isinstance(identifier, str) or not identifier:
+        raise ConsolidationError("concept is missing its explicit canonical ID")
+    return identifier
 
 
 def _normalize_text(value: str) -> str:
@@ -596,11 +574,10 @@ def _replace_records(
 
 def _apply_agent_merges(
     manifest: dict[str, Any], plan: dict[str, Any], recorder: Recorder
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
+) -> dict[str, str]:
     records = manifest["creators"]
     by_id = _records_by(records, "local_id")
     remap: dict[str, str] = {}
-    redirects: list[dict[str, Any]] = []
     replacements: dict[str, dict[str, Any]] = {}
     removed: set[str] = set()
     for group in plan["agent_merges"]:
@@ -644,15 +621,6 @@ def _apply_agent_merges(
         target_canonical = merged["canonical_id"]
         losers = [member for member in active_ids if member != target]
         for member in losers:
-            old_canonical = by_id[member]["canonical_id"]
-            if old_canonical != target_canonical:
-                redirects.append(
-                    {
-                        "alias_id": old_canonical,
-                        "canonical_id": target_canonical,
-                        "entity_type": merged["entity_type"],
-                    }
-                )
             remap[member] = target
             removed.add(member)
         recorder.add(
@@ -673,16 +641,15 @@ def _apply_agent_merges(
         replacements=replacements,
         removed=removed,
     )
-    return remap, redirects
+    return remap
 
 
 def _apply_work_merges(
     manifest: dict[str, Any], plan: dict[str, Any], recorder: Recorder
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
+) -> dict[str, str]:
     records = manifest["works"]
     by_id = _records_by(records, "local_id")
     remap: dict[str, str] = {}
-    redirects: list[dict[str, Any]] = []
     replacements: dict[str, dict[str, Any]] = {}
     removed: set[str] = set()
     for group in plan["work_merges"]:
@@ -743,15 +710,6 @@ def _apply_work_merges(
         target_canonical = merged["canonical_id"]
         losers = [member for member in active_ids if member != target]
         for member in losers:
-            old_canonical = by_id[member]["canonical_id"]
-            if old_canonical != target_canonical:
-                redirects.append(
-                    {
-                        "alias_id": old_canonical,
-                        "canonical_id": target_canonical,
-                        "entity_type": "work",
-                    }
-                )
             remap[member] = target
             removed.add(member)
         recorder.add(
@@ -772,7 +730,7 @@ def _apply_work_merges(
         replacements=replacements,
         removed=removed,
     )
-    return remap, redirects
+    return remap
 
 
 def _concept_alias(
@@ -788,11 +746,10 @@ def _concept_alias(
 
 def _apply_concept_merges(
     manifest: dict[str, Any], plan: dict[str, Any], recorder: Recorder
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
+) -> dict[str, str]:
     records = manifest["tags"]
     by_id = _records_by(records, "local_id")
     remap: dict[str, str] = {}
-    redirects: list[dict[str, Any]] = []
     replacements: dict[str, dict[str, Any]] = {}
     removed: set[str] = set()
     for group in plan["concept_merges"]:
@@ -854,29 +811,11 @@ def _apply_concept_merges(
                 exact[key] = name
         merged["names"] = list(exact.values())
 
-        slug_aliases: list[str] = []
-        for record in originals:
-            for slug in record.get("slug_aliases", []):
-                if slug != merged["slug"] and slug not in slug_aliases:
-                    slug_aliases.append(slug)
-            if record["slug"] != merged["slug"] and record["slug"] not in slug_aliases:
-                slug_aliases.append(record["slug"])
-        merged["slug_aliases"] = slug_aliases
+        merged.pop("slug_aliases", None)
         replacements[target] = merged
         target_canonical = merged["canonical_id"]
         losers = [member for member in active_ids if member != target]
         for member in losers:
-            old_canonical = by_id[member].get(
-                "canonical_id", _concept_id(by_id[member])
-            )
-            if old_canonical != target_canonical:
-                redirects.append(
-                    {
-                        "alias_id": old_canonical,
-                        "canonical_id": target_canonical,
-                        "entity_type": "concept",
-                    }
-                )
             remap[member] = target
             removed.add(member)
         recorder.add(
@@ -897,16 +836,15 @@ def _apply_concept_merges(
         replacements=replacements,
         removed=removed,
     )
-    return remap, redirects
+    return remap
 
 
 def _apply_source_merges(
     manifest: dict[str, Any], plan: dict[str, Any], recorder: Recorder
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
+) -> dict[str, str]:
     records = manifest["references"]
     by_id = _records_by(records, "ref_id")
     remap: dict[str, str] = {}
-    redirects: list[dict[str, Any]] = []
     replacements: dict[str, dict[str, Any]] = {}
     removed: set[str] = set()
     for group in plan["source_merges"]:
@@ -920,9 +858,7 @@ def _apply_source_merges(
         target_index = active_ids.index(target)
         merged = _copy_json(originals[target_index])
         merged["ref_id"] = target
-        merged["canonical_id"] = originals[target_index].get(
-            "canonical_id", _source_id(originals[target_index])
-        )
+        merged.pop("canonical_id", None)
         scalar_fields = (
             "source_type",
             "title",
@@ -973,19 +909,9 @@ def _apply_source_merges(
                 alternate_urls.append(value)
         merged["alternate_urls"] = alternate_urls
         replacements[target] = merged
-        target_canonical = merged["canonical_id"]
+        target_canonical = target
         losers = [member for member in active_ids if member != target]
         for member in losers:
-            old_canonical = by_id[member].get(
-                "canonical_id", _source_id(by_id[member])
-            )
-            if old_canonical != target_canonical:
-                redirects.append(
-                    {
-                        "alias_id": old_canonical,
-                        "canonical_id": target_canonical,
-                    }
-                )
             remap[member] = target
             removed.add(member)
         recorder.add(
@@ -1006,7 +932,7 @@ def _apply_source_merges(
         replacements=replacements,
         removed=removed,
     )
-    return remap, redirects
+    return remap
 
 
 def _remap_value(record: dict[str, Any], field: str, mapping: dict[str, str]) -> None:
@@ -1604,65 +1530,31 @@ def _normalize_vocabularies(
             )
 
 
-def _merge_redirects(
-    existing: list[dict[str, Any]],
-    additions: list[dict[str, Any]],
-    *,
-    entity: bool,
-) -> list[dict[str, Any]]:
-    combined: dict[str, dict[str, Any]] = {}
-    for record in [*existing, *additions]:
-        alias = record.get("alias_id")
-        target = record.get("canonical_id")
-        if not isinstance(alias, str) or not alias or not isinstance(target, str) or not target:
-            raise ConsolidationError(f"invalid redirect: {record!r}")
-        if alias == target:
-            raise ConsolidationError(f"self redirect is forbidden: {alias}")
-        normalized = {
-            "alias_id": alias,
-            "canonical_id": target,
-        }
-        if entity:
-            value = record.get("entity_type")
-            if not isinstance(value, str) or not value:
-                raise ConsolidationError(f"entity redirect lacks entity_type: {record!r}")
-            normalized["entity_type"] = value
-        if alias in combined and _canonical_json(combined[alias]) != _canonical_json(
-            normalized
-        ):
-            raise ConsolidationError(f"redirect alias has multiple targets: {alias}")
-        combined[alias] = normalized
-    aliases = set(combined)
-    for redirect in combined.values():
-        if redirect["canonical_id"] in aliases:
-            raise ConsolidationError(
-                f"redirect chains are forbidden: {redirect['alias_id']} -> "
-                f"{redirect['canonical_id']}"
-            )
-    return [combined[key] for key in sorted(combined)]
-
-
-def _upgrade_to_v2(manifest: dict[str, Any]) -> None:
+def _upgrade_to_v3(manifest: dict[str, Any]) -> None:
     contract = manifest.get("contract")
     version = manifest.get("format_version")
     if (contract, version) not in (
         ("normalized_product_import_v1", 1),
         ("normalized_product_import_v2", 2),
+        ("normalized_product_import_v3", 3),
     ):
         raise ConsolidationError(
-            "input must be normalized_product_import_v1 or "
-            "normalized_product_import_v2"
+            "input must be normalized_product_import_v1, "
+            "normalized_product_import_v2, or normalized_product_import_v3"
         )
-    manifest["contract"] = "normalized_product_import_v2"
-    manifest["format_version"] = 2
-    manifest.setdefault("entity_redirects", [])
-    manifest.setdefault("source_redirects", [])
+    manifest["contract"] = "normalized_product_import_v3"
+    manifest["format_version"] = 3
+    manifest.pop("entity_redirects", None)
+    manifest.pop("source_redirects", None)
+    for collection in ("creators", "works", "manifestations"):
+        for record in manifest[collection]:
+            record["canonical_id"] = record["local_id"]
     for tag in manifest["tags"]:
-        tag.setdefault("canonical_id", _concept_id(tag))
+        tag["canonical_id"] = tag["local_id"]
         tag.setdefault("names", [])
-        tag.setdefault("slug_aliases", [])
+        tag.pop("slug_aliases", None)
     for source in manifest["references"]:
-        source.setdefault("canonical_id", _source_id(source))
+        source.pop("canonical_id", None)
         source.setdefault("alternate_urls", [])
 
 
@@ -1745,7 +1637,6 @@ def _validate_manifest_references(manifest: dict[str, Any]) -> None:
             )
 
     canonical_ids: dict[str, str] = {}
-    canonical_entity_types: dict[str, str] = {}
     for family in ("creators", "works", "manifestations", "tags"):
         for record in manifest[family]:
             canonical = record["canonical_id"]
@@ -1754,57 +1645,12 @@ def _validate_manifest_references(manifest: dict[str, Any]) -> None:
                     f"live canonical entity ID is duplicated: {canonical}"
                 )
             canonical_ids[canonical] = family
-            if family == "creators":
-                canonical_entity_types[canonical] = record["entity_type"]
-            elif family == "works":
-                canonical_entity_types[canonical] = "work"
-            elif family == "manifestations":
-                canonical_entity_types[canonical] = "manifestation"
-            else:
-                canonical_entity_types[canonical] = "concept"
-    source_ids: set[str] = set()
-    for record in manifest["references"]:
-        canonical = record["canonical_id"]
-        if canonical in source_ids:
-            raise ConsolidationError(f"live canonical source ID is duplicated: {canonical}")
-        source_ids.add(canonical)
-
-    for redirect in manifest["entity_redirects"]:
-        if redirect["alias_id"] in canonical_ids:
-            raise ConsolidationError(
-                f"entity redirect alias is still live: {redirect['alias_id']}"
-            )
-        if redirect["canonical_id"] not in canonical_ids:
-            raise ConsolidationError(
-                "entity redirect target is missing: "
-                f"{redirect['canonical_id']}"
-            )
-        expected_type = canonical_entity_types[redirect["canonical_id"]]
-        if redirect.get("entity_type") != expected_type:
-            raise ConsolidationError(
-                f"entity redirect {redirect['alias_id']} has type "
-                f"{redirect.get('entity_type')!r}; target "
-                f"{redirect['canonical_id']} has type {expected_type!r}"
-            )
-    for redirect in manifest["source_redirects"]:
-        if redirect["alias_id"] in source_ids:
-            raise ConsolidationError(
-                f"source redirect alias is still live: {redirect['alias_id']}"
-            )
-        if redirect["canonical_id"] not in source_ids:
-            raise ConsolidationError(
-                "source redirect target is missing: "
-                f"{redirect['canonical_id']}"
-            )
-
     slugs: dict[str, str] = {}
     for record in manifest["tags"]:
-        for slug in [record["slug"], *record.get("slug_aliases", [])]:
-            if slug in slugs:
-                raise ConsolidationError(
-                    f"concept slug/alias is duplicated: {slug}"
-                )
-            slugs[slug] = record["canonical_id"]
+        slug = record["slug"]
+        if slug in slugs:
+            raise ConsolidationError(f"concept slug is duplicated: {slug}")
+        slugs[slug] = record["canonical_id"]
 
     urls: dict[str, str] = {}
     for record in manifest["references"]:
@@ -1819,7 +1665,7 @@ def _validate_manifest_references(manifest: dict[str, Any]) -> None:
                 raise ConsolidationError(
                     f"source primary/alternate URL is duplicated: {url}"
                 )
-            urls[url] = record["canonical_id"]
+            urls[url] = record["ref_id"]
 
     # Simulate Penelope keys whose ID omits a persisted scalar field.
     credit_keys: dict[tuple[Any, ...], str] = {}
@@ -1832,14 +1678,11 @@ def _validate_manifest_references(manifest: dict[str, Any]) -> None:
             )
         credit_keys[key] = importance
     evidence_keys: dict[tuple[Any, ...], tuple[Any, Any]] = {}
-    source_canonical = {
-        record["ref_id"]: record["canonical_id"] for record in manifest["references"]
-    }
     for family in ("assertions", "concept_relations", "parent_guide_assertions"):
         for record in manifest[family]:
             for evidence in record.get("evidence", []):
                 key = (
-                    source_canonical[evidence["ref_id"]],
+                    evidence["ref_id"],
                     evidence["quote"],
                     _canonical_json(evidence.get("locator"))
                     if "locator" in evidence
@@ -1927,15 +1770,13 @@ def consolidate(
     }
     result = _copy_json(manifest)
     recorder = Recorder()
-    _upgrade_to_v2(result)
+    _upgrade_to_v3(result)
     _normalize_vocabularies(result, plan, recorder)
 
-    agent_remap, agent_redirects = _apply_agent_merges(result, plan, recorder)
-    work_remap, work_redirects = _apply_work_merges(result, plan, recorder)
-    concept_remap, concept_redirects = _apply_concept_merges(
-        result, plan, recorder
-    )
-    source_remap, source_redirects = _apply_source_merges(result, plan, recorder)
+    agent_remap = _apply_agent_merges(result, plan, recorder)
+    work_remap = _apply_work_merges(result, plan, recorder)
+    concept_remap = _apply_concept_merges(result, plan, recorder)
+    source_remap = _apply_source_merges(result, plan, recorder)
 
     entity_remap = {**agent_remap, **work_remap, **concept_remap}
     _consolidate_simple_references(
@@ -1980,16 +1821,10 @@ def consolidate(
         source_remap=source_remap,
         recorder=recorder,
     )
-    result["entity_redirects"] = _merge_redirects(
-        result.get("entity_redirects", []),
-        [*agent_redirects, *work_redirects, *concept_redirects],
-        entity=True,
-    )
-    result["source_redirects"] = _merge_redirects(
-        result.get("source_redirects", []),
-        source_redirects,
-        entity=False,
-    )
+    # Retired identifiers are recorded only in external merge provenance. The
+    # normalized v3 product surface contains final records and direct references.
+    result.pop("entity_redirects", None)
+    result.pop("source_redirects", None)
     _validate_manifest_references(result)
 
     new_counts = {

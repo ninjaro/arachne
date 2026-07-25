@@ -5,12 +5,14 @@
 
 #include <algorithm>
 #include <array>
-#include <utility>
+#include <cstdint>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace arachne::ariadne {
@@ -30,11 +32,68 @@ namespace {
         return document.at(field);
     }
 
-    std::string identifier(const nlohmann::json& value) {
+    std::optional<std::string> projection_identifier(
+        const nlohmann::json& value, std::string_view field,
+        std::string_view integer_namespace
+    ) {
+        const auto found = value.find(std::string(field));
+        if (found == value.end() || found->is_null()) {
+            return std::nullopt;
+        }
+        if (found->is_string()) {
+            const auto id = found->get<std::string>();
+            return id.empty() ? std::nullopt
+                              : std::optional<std::string> { id };
+        }
+        if (found->is_number_integer() && !integer_namespace.empty()) {
+            const auto id = found->get<std::int64_t>();
+            if (id <= 0) {
+                throw std::invalid_argument(
+                    std::string(field)
+                    + " must be a positive internal database identifier"
+                );
+            }
+            return std::string(integer_namespace) + ":" + std::to_string(id);
+        }
+        throw std::invalid_argument(
+            std::string(field)
+            + " must be a string identifier or a namespaced integer"
+        );
+    }
+
+    std::optional<std::string> projection_identifier(
+        const nlohmann::json& value, std::string_view integer_namespace
+    ) {
+        if (value.is_null()) {
+            return std::nullopt;
+        }
+        if (value.is_string()) {
+            const auto id = value.get<std::string>();
+            return id.empty() ? std::nullopt
+                              : std::optional<std::string> { id };
+        }
+        if (value.is_number_integer() && !integer_namespace.empty()) {
+            const auto id = value.get<std::int64_t>();
+            if (id <= 0) {
+                throw std::invalid_argument(
+                    "internal database identifier must be positive"
+                );
+            }
+            return std::string(integer_namespace) + ":" + std::to_string(id);
+        }
+        throw std::invalid_argument(
+            "projection identifier must be a string or namespaced integer"
+        );
+    }
+
+    std::string identifier(
+        const nlohmann::json& value, std::string_view integer_namespace = {}
+    ) {
         for (const auto* field :
              { "id", "entity_id", "candidate_id", "work_id" }) {
-            if (value.contains(field) && value.at(field).is_string()) {
-                return value.at(field).get<std::string>();
+            if (const auto id
+                = projection_identifier(value, field, integer_namespace)) {
+                return *id;
             }
         }
         throw std::invalid_argument("viewer record has no stable identifier");
@@ -99,20 +158,25 @@ namespace {
         const nlohmann::json& evidence = nlohmann::json::array()
     ) {
         nlohmann::ordered_json source_ids = nlohmann::ordered_json::array();
+        nlohmann::ordered_json evidence_ids = nlohmann::ordered_json::array();
         std::set<std::string, std::less<>> unique_sources;
+        std::set<std::string, std::less<>> unique_evidence;
         if (!assertion_id.empty()) {
             unique_sources.insert(assertion_id);
         }
         if (evidence.is_array()) {
             for (const auto& value : evidence) {
-                if (value.is_string()
-                    && !value.get_ref<const std::string&>().empty()) {
-                    unique_sources.insert(value.get<std::string>());
+                if (const auto id = projection_identifier(value, "evidence")) {
+                    unique_sources.insert(*id);
+                    unique_evidence.insert(*id);
                 }
             }
         }
         for (const auto& source : unique_sources) {
             source_ids.push_back(source);
+        }
+        for (const auto& evidence_id : unique_evidence) {
+            evidence_ids.push_back(evidence_id);
         }
         nlohmann::ordered_json provenance {
             { "origin", "human_authored" },
@@ -131,7 +195,7 @@ namespace {
               { "attributes",
                 { { "derived", false },
                   { "assertion_id", assertion_id },
-                  { "evidence", evidence } } } }
+                  { "evidence", std::move(evidence_ids) } } } }
         );
     }
 
@@ -355,7 +419,7 @@ nlohmann::ordered_json viewer_builder::project(
         if (!source.is_object()) {
             continue;
         }
-        const auto id = identifier(source);
+        const auto id = identifier(source, "source");
         std::string label = entity_label(source, "");
         for (const auto* field :
              { "bibliography_text", "url", "doi", "isbn" }) {
@@ -393,7 +457,7 @@ nlohmann::ordered_json viewer_builder::project(
         if (!evidence.is_object()) {
             continue;
         }
-        const auto id = identifier(evidence);
+        const auto id = identifier(evidence, "evidence");
         std::string label = evidence.value("exact_quote", std::string {});
         if (label.size() > 120U) {
             label.resize(117U);
@@ -424,34 +488,38 @@ nlohmann::ordered_json viewer_builder::project(
     }
 
     std::map<std::string, nlohmann::json, std::less<>> evidence_by_assertion;
-    const auto collect_evidence_links = [&](std::string_view field) {
-        for (const auto& link : array_or_empty(product_export, field)) {
-            if (!link.is_object()) {
-                continue;
-            }
-            const auto assertion_id = link.value("assertion_id", "");
-            const auto evidence_id = link.value("evidence_id", "");
-            if (assertion_id.empty() || evidence_id.empty()) {
-                continue;
-            }
-            auto& values = evidence_by_assertion[assertion_id];
-            if (!values.is_array()) {
-                values = nlohmann::json::array();
-            }
-            const bool already_present
-                = std::ranges::any_of(values, [&](const auto& value) {
-                      return value.is_string()
-                          && value.template get_ref<const std::string&>()
-                          == evidence_id;
-                  });
-            if (!already_present) {
-                values.push_back(evidence_id);
-            }
-        }
-    };
-    collect_evidence_links("work_concept_evidence");
-    collect_evidence_links("concept_relation_evidence");
-    collect_evidence_links("parent_guide_evidence");
+    const auto collect_evidence_links
+        = [&](std::string_view field, std::string_view assertion_namespace) {
+              for (const auto& link : array_or_empty(product_export, field)) {
+                  if (!link.is_object()) {
+                      continue;
+                  }
+                  const auto assertion_id = projection_identifier(
+                      link, "assertion_id", assertion_namespace
+                  );
+                  const auto evidence_id
+                      = projection_identifier(link, "evidence_id", "evidence");
+                  if (!assertion_id || !evidence_id) {
+                      continue;
+                  }
+                  auto& values = evidence_by_assertion[*assertion_id];
+                  if (!values.is_array()) {
+                      values = nlohmann::json::array();
+                  }
+                  const bool already_present
+                      = std::ranges::any_of(values, [&](const auto& value) {
+                            return value.is_string()
+                                && value.template get_ref<const std::string&>()
+                                == *evidence_id;
+                        });
+                  if (!already_present) {
+                      values.push_back(*evidence_id);
+                  }
+              }
+          };
+    collect_evidence_links("work_concept_evidence", "work-concept");
+    collect_evidence_links("concept_relation_evidence", "concept-relation");
+    collect_evidence_links("parent_guide_evidence", "parent-guide");
 
     nlohmann::ordered_json edges = nlohmann::ordered_json::array();
     std::map<
@@ -470,7 +538,8 @@ nlohmann::ordered_json viewer_builder::project(
             continue;
         }
         const auto assertion_id
-            = assertion.value("id", edge_id(from, to, "assertion", "missing"));
+            = projection_identifier(assertion, "id", "work-concept")
+                  .value_or(edge_id(from, to, "assertion", "missing"));
         if (nodes.contains(from) && nodes.contains(to)
             && nodes.at(from).value("node_type", "") == "work"
             && nodes.at(to).value("node_type", "") == "concept") {
@@ -497,9 +566,9 @@ nlohmann::ordered_json viewer_builder::project(
         if (from.empty() || to.empty()) {
             continue;
         }
-        const auto assertion_id = relation.value(
-            "id", edge_id(from, to, "concept_relation", "missing")
-        );
+        const auto assertion_id
+            = projection_identifier(relation, "id", "concept-relation")
+                  .value_or(edge_id(from, to, "concept_relation", "missing"));
         const auto evidence = relation.contains("evidence")
             ? relation.at("evidence")
             : evidence_by_assertion.contains(assertion_id)
@@ -520,9 +589,9 @@ nlohmann::ordered_json viewer_builder::project(
         if (from.empty() || to.empty()) {
             continue;
         }
-        const auto assertion_id = assertion.value(
-            "id", edge_id(from, to, "parent_guide", "missing")
-        );
+        const auto assertion_id
+            = projection_identifier(assertion, "id", "parent-guide")
+                  .value_or(edge_id(from, to, "parent_guide", "missing"));
         const auto evidence = evidence_by_assertion.contains(assertion_id)
             ? evidence_by_assertion.at(assertion_id)
             : nlohmann::json::array();
@@ -543,7 +612,8 @@ nlohmann::ordered_json viewer_builder::project(
         }
         append_human_edge(
             edges, from, to, "credit:" + credit.value("role", "contributor"),
-            credit.value("id", edge_id(from, to, "credit", "missing")),
+            projection_identifier(credit, "id", "credit")
+                .value_or(edge_id(from, to, "credit", "missing")),
             product_snapshot_for_provenance
         );
     }
@@ -551,14 +621,16 @@ nlohmann::ordered_json viewer_builder::project(
         if (!evidence.is_object()) {
             continue;
         }
-        const auto evidence_id = evidence.value("id", "");
-        const auto source_id = evidence.value("source_id", "");
-        if (evidence_id.empty() || source_id.empty()) {
+        const auto evidence_id
+            = projection_identifier(evidence, "id", "evidence");
+        const auto source_id
+            = projection_identifier(evidence, "source_id", "source");
+        if (!evidence_id || !source_id) {
             continue;
         }
         append_human_edge(
-            edges, source_id, evidence_id, "documents_evidence",
-            "source-link:" + evidence_id, product_snapshot_for_provenance
+            edges, *source_id, *evidence_id, "documents_evidence",
+            "source-link:" + *evidence_id, product_snapshot_for_provenance
         );
     }
 
@@ -997,7 +1069,9 @@ nlohmann::ordered_json viewer_builder::catalog(
             continue;
         }
         nlohmann::ordered_json item {
-            { "id", assertion.value("id", "") },
+            { "id",
+              projection_identifier(assertion, "id", "parent-guide")
+                  .value_or("") },
             { "conceptId", concept_id },
             { "label", concept_it->second.at("label") },
             { "category", assertion.value("category", "guidance") },

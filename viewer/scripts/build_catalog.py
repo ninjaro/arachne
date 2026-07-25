@@ -35,6 +35,16 @@ def parse_json(value: Any) -> Any:
         return value
 
 
+def projection_id(namespace: str, value: Any) -> str:
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return f"{namespace}:{value}"
+    raise ValueError(
+        f"{namespace} identifier must be a positive integer or non-empty string"
+    )
+
+
 def external_url(scheme: str, value: str, canonical: str | None) -> str | None:
     if canonical:
         return canonical
@@ -155,7 +165,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
             continue
         advisories[row["work_id"]].append(
             {
-                "id": row["id"],
+                "id": projection_id("parent-guide", row["id"]),
                 "conceptId": row["concept_id"],
                 "label": concept["label"],
                 "category": row["category"],

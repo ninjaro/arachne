@@ -3,7 +3,7 @@
 
 The adapter deliberately treats source locations and local identifiers as staging
 coordinates, never as product identity.  It observes every batch before resolving
-dependencies, then emits a closed ``normalized_product_import_v1`` artifact and a
+dependencies, then emits a closed ``normalized_product_import_v3`` artifact and a
 lossless, external unresolved-data artifact.  No file digest, batch order, archive
 member order, timestamp, backup, or prior-run ledger participates in the result.
 """
@@ -777,8 +777,8 @@ class Normalizer:
         self._keep_separate: set[frozenset[ScopedId]] = set()
         self.cross_kind_ids: set[tuple[str, str]] = set()
         self.manifest: dict[str, Any] = {
-            "contract": "normalized_product_import_v1",
-            "format_version": 1,
+            "contract": "normalized_product_import_v3",
+            "format_version": 3,
             **{key: [] for key in MANIFEST_ARRAYS},
         }
 
@@ -2119,7 +2119,13 @@ class Normalizer:
                 for record in grouped: _reject(self.findings, record, "unimportable_concept", "concept name conflict")
                 continue
             local_id = f"concept-{index:0{width}d}"
-            result: dict[str, Any] = {"local_id": local_id, "name": names[0], "type": key[1], "slug": key[0]}
+            result: dict[str, Any] = {
+                "local_id": local_id,
+                "canonical_id": local_id,
+                "name": names[0],
+                "type": key[1],
+                "slug": key[0],
+            }
             # Concept authority IDs are only retained when schemes have one value.
             ext_values: dict[str, set[tuple[str, str | None]]] = collections.defaultdict(set)
             for record in grouped:
@@ -3185,7 +3191,7 @@ def write_outputs(manifest: Mapping[str, Any], unresolved: Mapping[str, Any], ro
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True, help="read-only legacy inbox directory")
-    parser.add_argument("--manifest", type=Path, required=True, help="normalized_product_import_v1 output")
+    parser.add_argument("--manifest", type=Path, required=True, help="normalized_product_import_v3 output")
     parser.add_argument("--unresolved", type=Path, required=True, help="consolidated unresolved JSON output")
     args = parser.parse_args(argv)
     try:

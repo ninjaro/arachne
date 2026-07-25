@@ -131,6 +131,13 @@ def activated_manifest_v2() -> dict:
     return value
 
 
+def activated_manifest_v3() -> dict:
+    value = activated_manifest()
+    value["contract"] = "normalized_product_import_v3"
+    value["format_version"] = 3
+    return value
+
+
 def audited_problem_batch() -> dict:
     value = sample_batch()
     value["creators"][0]["external_ids"]["isni"] = {
@@ -703,7 +710,7 @@ print(json.dumps({{'activated': str(database)}}))
         )
         self.assertEqual(list(self.inbox.iterdir()), [])
 
-    def test_v2_manifest_retains_redirects_and_assigns_new_v2_ids(self) -> None:
+    def test_v2_manifest_upgrades_to_product_only_v3_ids(self) -> None:
         prior = activated_manifest_v2()
         prior["creators"] = [
             {
@@ -745,26 +752,32 @@ print(json.dumps({{'activated': str(database)}}))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         merged = json.loads(self.manifest.read_text(encoding="utf-8"))
-        self.assertEqual(merged["contract"], "normalized_product_import_v2")
-        self.assertEqual(merged["format_version"], 2)
-        self.assertEqual(merged["entity_redirects"], prior["entity_redirects"])
-        self.assertEqual(merged["source_redirects"], prior["source_redirects"])
+        self.assertEqual(merged["contract"], "normalized_product_import_v3")
+        self.assertEqual(merged["format_version"], 3)
+        self.assertNotIn("entity_redirects", merged)
+        self.assertNotIn("source_redirects", merged)
 
         concept = next(
             value for value in merged["tags"] if value["name"] == "Dream logic"
         )
-        self.assertRegex(concept["canonical_id"], r"^con_[0-9a-f]{64}$")
-        self.assertNotEqual(concept["local_id"], concept["canonical_id"])
+        self.assertEqual(concept["canonical_id"], concept["local_id"])
+        self.assertRegex(concept["canonical_id"], r"^concept-[0-9]{6,}$")
         self.assertEqual(concept["names"], [])
-        self.assertEqual(concept["slug_aliases"], [])
+        self.assertNotIn("slug_aliases", concept)
 
         source = next(
             value for value in merged["references"]
             if value.get("doi") == "10.1234/cleanup"
         )
-        self.assertRegex(source["canonical_id"], r"^src_[0-9a-f]{64}$")
-        self.assertNotEqual(source["ref_id"], source["canonical_id"])
+        self.assertNotIn("canonical_id", source)
+        self.assertRegex(source["ref_id"], r"^source-[0-9]{6,}$")
         self.assertEqual(source["alternate_urls"], [])
+        encoded = json.dumps(merged)
+        self.assertNotIn('"entity_redirects"', encoded)
+        self.assertNotIn('"source_redirects"', encoded)
+        self.assertNotIn('"slug_aliases"', encoded)
+        self.assertNotIn('"con_', encoded)
+        self.assertNotIn('"src_', encoded)
 
     def test_v2_primary_concept_slug_reuses_prior_local_and_canonical_ids(
         self,
@@ -791,10 +804,10 @@ print(json.dumps({{'activated': str(database)}}))
         merged = json.loads(self.manifest.read_text(encoding="utf-8"))
         self.assertEqual(len(merged["tags"]), 1)
         self.assertEqual(merged["tags"][0]["local_id"], "concept-900001")
-        self.assertEqual(merged["tags"][0]["canonical_id"], canonical_id)
         self.assertEqual(
-            merged["tags"][0]["slug_aliases"], ["oneiric-logic"]
+            merged["tags"][0]["canonical_id"], "concept-900001"
         )
+        self.assertNotIn("slug_aliases", merged["tags"][0])
         self.assertEqual(merged["assertions"][0]["tag"], "concept-900001")
         self.assertNotEqual(merged["assertions"][0]["tag"], canonical_id)
 
@@ -826,9 +839,9 @@ print(json.dumps({{'activated': str(database)}}))
         self.assertEqual(len(merged["tags"]), 1)
         concept = merged["tags"][0]
         self.assertEqual(concept["local_id"], "concept-900002")
-        self.assertEqual(concept["canonical_id"], canonical_id)
+        self.assertEqual(concept["canonical_id"], "concept-900002")
         self.assertEqual(concept["slug"], "dream-logic")
-        self.assertIn("oneiric-logic", concept["slug_aliases"])
+        self.assertNotIn("slug_aliases", concept)
         self.assertEqual(merged["assertions"][0]["tag"], "concept-900002")
         aliases = {
             name["value"]
@@ -866,7 +879,7 @@ print(json.dumps({{'activated': str(database)}}))
         self.assertEqual(len(merged["references"]), 1)
         source = merged["references"][0]
         self.assertEqual(source["ref_id"], "source-900001")
-        self.assertEqual(source["canonical_id"], canonical_id)
+        self.assertNotIn("canonical_id", source)
         self.assertEqual(source["url"], "https://example.test/source/")
         self.assertEqual(source["alternate_urls"], [alternate_url])
         self.assertEqual(
@@ -971,6 +984,75 @@ print(json.dumps({{'activated': str(database)}}))
             "Example Work",
             json.dumps(
                 quarantined_credit, ensure_ascii=False, sort_keys=True
+            ),
+        )
+
+    def test_v3_ambiguous_creator_and_dependent_credit_are_quarantined(
+        self,
+    ) -> None:
+        prior = activated_manifest_v3()
+        prior["creators"] = [
+            {
+                "local_id": "agent-900001",
+                "canonical_id": "agent-900001",
+                "entity_type": "person",
+                "name": "Example Artist",
+            },
+            {
+                "local_id": "agent-900002",
+                "canonical_id": "agent-900002",
+                "entity_type": "person",
+                "name": "Example Artist",
+            },
+        ]
+        batch = sample_batch()
+        batch["creators"][0].pop("external_ids")
+        self.write_activated_v2(prior)
+        (self.inbox / "batch.json").write_text(
+            json.dumps(batch), encoding="utf-8"
+        )
+
+        result = self.run_cleanup("--apply")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        merged = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {creator["local_id"] for creator in merged["creators"]},
+            {"agent-900001", "agent-900002"},
+        )
+        self.assertFalse(merged["credits"])
+        lines = [
+            json.loads(line)
+            for line in self.issues.read_text(encoding="utf-8").splitlines()
+        ]
+        ambiguity = next(
+            line
+            for line in lines
+            if line.get("category") == "canonical_identity_ambiguity"
+        )
+        self.assertEqual(
+            ambiguity["identity"]["candidate_transport_ids"],
+            ["agent-900001", "agent-900002"],
+        )
+        self.assertEqual(ambiguity["field"], "identity")
+        dependency = next(
+            line
+            for line in lines
+            if line.get("category")
+            == "quarantined_ambiguous_identity_dependency"
+        )
+        self.assertEqual(
+            dependency["identity"]["dependent_collection"], "credits"
+        )
+        self.assertEqual(
+            dependency["occurrences"][0]["value"]["role"], "director"
+        )
+        self.assertIn(
+            "Example Work",
+            json.dumps(
+                dependency["occurrences"][0]["context"],
+                ensure_ascii=False,
+                sort_keys=True,
             ),
         )
 
@@ -1540,7 +1622,7 @@ print(json.dumps({{'activated': str(database)}}))
             consolidated["canonical_id_removals"], ["agent-duplicate"]
         )
 
-    def test_v2_source_canonical_id_stability_fails_closed(self) -> None:
+    def test_v2_source_compatibility_id_is_ignored_during_upgrade(self) -> None:
         previous = activated_manifest_v2()
         previous["references"] = [
             {
@@ -1555,8 +1637,10 @@ print(json.dumps({{'activated': str(database)}}))
         current = json.loads(json.dumps(previous))
         current["references"][0]["canonical_id"] = "src_" + "b" * 64
 
-        with self.assertRaises(CleanupError):
-            canonical_id_stability_report(previous, current)
+        report = canonical_id_stability_report(previous, current)
+        self.assertEqual(report["matched_identities"], 1)
+        self.assertTrue(report["canonical_id_universe_equal"])
+        self.assertEqual(report["canonical_id_removals"], [])
 
     def test_cleanup_implementation_never_opens_sqlite(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8").lower()

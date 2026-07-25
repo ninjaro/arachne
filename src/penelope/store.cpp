@@ -13,12 +13,14 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -43,9 +45,11 @@ namespace {
         = "normalized_product_import_v1";
     constexpr std::string_view normalized_product_import_v2_contract
         = "normalized_product_import_v2";
+    constexpr std::string_view normalized_product_import_v3_contract
+        = "normalized_product_import_v3";
     constexpr std::string_view candidate_contract
         = "research_candidate_graph_snapshot_v1";
-    constexpr int current_product_schema_version = 3;
+    constexpr int current_product_schema_version = 4;
     constexpr std::uintmax_t maximum_normalized_manifest_bytes
         = 1024ULL * 1024ULL * 1024ULL;
 
@@ -683,6 +687,39 @@ namespace {
         return *it;
     }
 
+    std::vector<const json*> ordered_array_or_empty(
+        const json& object, std::string_view key, std::string_view context,
+        const std::initializer_list<std::string_view> identity_fields = {}
+    ) {
+        std::vector<std::pair<std::string, const json*>> keyed;
+        const auto& values = array_or_empty(object, key, context);
+        keyed.reserve(values.size());
+        for (const auto& value : values) {
+            if (identity_fields.size() == 0U || !value.is_object()) {
+                keyed.emplace_back(canonical_json(value), &value);
+                continue;
+            }
+            json identity = json::array();
+            for (const std::string_view field : identity_fields) {
+                const auto found = value.find(std::string(field));
+                identity.push_back(
+                    found == value.end() ? json(nullptr) : json(*found)
+                );
+            }
+            keyed.emplace_back(canonical_json(identity), &value);
+        }
+        std::ranges::sort(
+            keyed, {}, &std::pair<std::string, const json*>::first
+        );
+        std::vector<const json*> ordered;
+        ordered.reserve(keyed.size());
+        for (const auto& [unused_key, value] : keyed) {
+            static_cast<void>(unused_key);
+            ordered.push_back(value);
+        }
+        return ordered;
+    }
+
     bool
     table_has_row(sqlite3* db, std::string_view sql, std::string_view value) {
         statement query(db, sql);
@@ -741,7 +778,8 @@ namespace {
         const int product_schema_version = 1
     ) {
         if (domain == graph_domain::product && product_schema_version != 1
-            && product_schema_version != 2 && product_schema_version != 3) {
+            && product_schema_version != 2 && product_schema_version != 3
+            && product_schema_version != 4) {
             fail(
                 "unsupported product schema version "
                 + std::to_string(product_schema_version)
@@ -749,10 +787,13 @@ namespace {
         }
         const fs::path path = schema_path(
             domain == graph_domain::product
-                ? (product_schema_version == 3
-                       ? "product_v3.sql"
-                       : (product_schema_version == 2 ? "product_v2.sql"
-                                                      : "product_v1.sql"))
+                ? (product_schema_version == 4
+                       ? "product_v4.sql"
+                       : (product_schema_version == 3
+                              ? "product_v3.sql"
+                              : (product_schema_version == 2
+                                     ? "product_v2.sql"
+                                     : "product_v1.sql")))
                 : "candidate_v1.sql"
         );
         db.exec(read_bytes(path));
@@ -762,6 +803,7 @@ namespace {
         const database& db,
         const bool allow_implicit_source_identity_coalescing = true
     ) {
+        const int schema_version = product_schema_version(db.get());
         struct external_identifier_row final {
             std::string id;
             std::string entity_id;
@@ -815,14 +857,11 @@ namespace {
             }
             return rows;
         };
-        const auto normalize_external_identifier = [&db](
+        const auto normalize_external_identifier = [&db, schema_version](
                                                        const auto& row,
                                                        std::string_view scheme,
                                                        std::string_view value
                                                    ) {
-            const std::string canonical_id = stable_id(
-                "xid_", std::string(scheme) + "|" + std::string(value)
-            );
             statement collision(
                 db.get(),
                 "SELECT id,entity_id,canonical_url FROM external_ids WHERE "
@@ -849,7 +888,12 @@ namespace {
                 if (target_entity != row.entity_id) {
                     return;
                 }
-                if (target_id != canonical_id) {
+                if (schema_version < 4
+                    && target_id
+                        != stable_id(
+                            "xid_",
+                            std::string(scheme) + "|" + std::string(value)
+                        )) {
                     return;
                 }
                 std::optional<std::string> target_url;
@@ -885,6 +929,21 @@ namespace {
                 remove.done();
                 return;
             }
+            if (schema_version >= 4) {
+                statement update(
+                    db.get(),
+                    "UPDATE external_ids SET scheme=?1,value=?2 WHERE id=?3"
+                );
+                update.text(1, scheme);
+                update.text(2, value);
+                update.text(3, row.id);
+                update.done();
+                return;
+            }
+
+            const std::string canonical_id = stable_id(
+                "xid_", std::string(scheme) + "|" + std::string(value)
+            );
             if (canonical_id == row.id) {
                 statement update(
                     db.get(),
@@ -2266,7 +2325,10 @@ namespace {
             }
         }
         if (result.empty()) {
-            result = "concept-" + crypto::sha256(value).substr(0, 16);
+            fail(
+                "concept name cannot produce an ASCII slug; provide an "
+                "explicit normalized slug"
+            );
         }
         return result;
     }
@@ -2365,7 +2427,8 @@ namespace {
         sqlite3* db, const json& object, std::string_view entity_type,
         std::string_view payload_hash, std::string_view category,
         std::string_view local_id, std::string_view context,
-        const bool require_canonical_id = false
+        const bool require_canonical_id = false,
+        const int schema_version = 1
     ) {
         const auto identifiers = parse_external_ids(object, context);
         std::optional<std::string> resolved;
@@ -2417,6 +2480,12 @@ namespace {
             }
             resolved = supplied_id;
         }
+        if (!resolved && schema_version >= 4) {
+            fail(
+                std::string(context)
+                + ".canonical_id is required for readable product identities"
+            );
+        }
         if (!resolved) {
             std::string key;
             if (!identifiers.empty()) {
@@ -2432,6 +2501,30 @@ namespace {
         }
         insert_entity(db, *resolved, entity_type);
         for (const auto& [scheme, value, url] : identifiers) {
+            if (schema_version >= 4) {
+                statement insert(
+                    db,
+                    "INSERT OR IGNORE INTO external_ids"
+                    "(entity_id,scheme,value,canonical_url) "
+                    "VALUES(?1,?2,?3,?4)"
+                );
+                insert.text(1, *resolved);
+                insert.text(2, scheme);
+                insert.text(3, value);
+                insert.optional_text(4, url);
+                insert.done();
+                statement verify(
+                    db,
+                    "SELECT 1 FROM external_ids WHERE entity_id=?1 "
+                    "AND scheme=?2 AND value=?3 AND canonical_url IS ?4"
+                );
+                verify.text(1, *resolved);
+                verify.text(2, scheme);
+                verify.text(3, value);
+                verify.optional_text(4, url);
+                require_matching_row(verify, context);
+                continue;
+            }
             const std::string identifier_id
                 = stable_id("xid_", scheme + "|" + value);
             statement insert(
@@ -2465,14 +2558,87 @@ namespace {
         sqlite3* db, std::string_view entity_id, std::string_view type,
         const std::optional<std::string>& language,
         const std::optional<std::string>& script, std::string_view value,
-        bool preferred
+        bool preferred, const int schema_version = 1
     ) {
         if (value.empty()) {
             fail("entity name must not be empty");
         }
+        std::optional<std::string> normalized_language = language;
+        std::optional<std::string> normalized_script = script;
+        if (schema_version >= 4 && normalized_language) {
+            const std::string& code = *normalized_language;
+            const std::size_t separator = code.find('-');
+            const bool language_part
+                = (separator == 2U || separator == 3U)
+                && std::ranges::all_of(
+                    code.begin(),
+                    code.begin()
+                        + static_cast<std::string::difference_type>(separator),
+                    [](unsigned char character) {
+                        return character >= 'a' && character <= 'z';
+                    }
+                );
+            const std::string candidate_script
+                = separator == std::string::npos
+                ? std::string {}
+                : code.substr(separator + 1U);
+            const bool script_part = candidate_script.size() == 4U
+                && candidate_script.front() >= 'A'
+                && candidate_script.front() <= 'Z'
+                && std::ranges::all_of(
+                    candidate_script.begin() + 1, candidate_script.end(),
+                    [](unsigned char character) {
+                        return character >= 'a' && character <= 'z';
+                    }
+                );
+            if (language_part && script_part
+                && (!normalized_script
+                    || *normalized_script == candidate_script)) {
+                normalized_language = code.substr(0, separator);
+                normalized_script = candidate_script;
+            }
+        }
         const std::string key = std::string(entity_id) + "|" + std::string(type)
-            + "|" + language.value_or("") + "|" + script.value_or("") + "|"
+            + "|" + normalized_language.value_or("") + "|"
+            + normalized_script.value_or("") + "|"
             + std::string(value);
+        if (schema_version >= 4) {
+            statement insert(
+                db,
+                "INSERT OR IGNORE INTO names"
+                "(entity_id,name_type,language_code,script_code,value,"
+                "is_preferred) VALUES(?1,?2,?3,?4,?5,?6)"
+            );
+            insert.text(1, entity_id);
+            insert.text(2, type);
+            insert.optional_text(3, normalized_language);
+            insert.optional_text(4, normalized_script);
+            insert.text(5, value);
+            insert.integer(6, preferred ? 1 : 0);
+            insert.done();
+            statement find(
+                db,
+                "SELECT id,is_preferred FROM names WHERE entity_id=?1 "
+                "AND name_type=?2 AND language_code IS ?3 "
+                "AND script_code IS ?4 AND value=?5"
+            );
+            find.text(1, entity_id);
+            find.text(2, type);
+            find.optional_text(3, normalized_language);
+            find.optional_text(4, normalized_script);
+            find.text(5, value);
+            require_matching_row(find, "entity name");
+            if (preferred && sqlite3_column_int(find.get(), 1) == 0) {
+                statement retain_preferred(
+                    db, "UPDATE names SET is_preferred=1 WHERE id=?1"
+                );
+                retain_preferred.integer(
+                    1, sqlite3_column_int64(find.get(), 0)
+                );
+                retain_preferred.done();
+            }
+            return;
+        }
         statement insert(
             db,
             "INSERT OR IGNORE INTO names"
@@ -2483,8 +2649,8 @@ namespace {
         insert.text(1, stable_id("nam_", key));
         insert.text(2, entity_id);
         insert.text(3, type);
-        insert.optional_text(4, language);
-        insert.optional_text(5, script);
+        insert.optional_text(4, normalized_language);
+        insert.optional_text(5, normalized_script);
         insert.text(6, value);
         insert.integer(7, preferred ? 1 : 0);
         insert.done();
@@ -2497,8 +2663,8 @@ namespace {
         verify.text(1, stable_id("nam_", key));
         verify.text(2, entity_id);
         verify.text(3, type);
-        verify.optional_text(4, language);
-        verify.optional_text(5, script);
+        verify.optional_text(4, normalized_language);
+        verify.optional_text(5, normalized_script);
         verify.text(6, value);
         verify.integer(7, preferred ? 1 : 0);
         require_matching_row(verify, "entity name");
@@ -2597,7 +2763,11 @@ namespace {
 
     void import_creators(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& creator : array_or_empty(batch, "creators", "batch")) {
+        for (const json* creator_value :
+             ordered_array_or_empty(
+                 batch, "creators", "batch", { "local_id" }
+             )) {
+            const json& creator = *creator_value;
             const std::string where
                 = "creators[" + std::to_string(index++) + "]";
             if (!creator.is_object()) {
@@ -2613,7 +2783,8 @@ namespace {
             }
             const std::string entity_id = resolve_entity(
                 context.db, creator, type, context.payload_hash, "creator",
-                local_id, where, context.require_canonical_ids
+                local_id, where, context.require_canonical_ids,
+                context.product_schema_version
             );
             statement agent(
                 context.db,
@@ -2645,7 +2816,7 @@ namespace {
             verify_agent.optional_integer(4, death_year);
             require_matching_row(verify_agent, where);
             const auto scalar_name = optional_string(creator, "name", where);
-            const auto& names = array_or_empty(creator, "names", where);
+            const auto names = ordered_array_or_empty(creator, "names", where);
             if (!scalar_name && names.empty()) {
                 fail(where + " requires name or names");
             }
@@ -2654,12 +2825,13 @@ namespace {
                 insert_name(
                     context.db, entity_id, "original",
                     optional_string(creator, "language", where), std::nullopt,
-                    *scalar_name, true
+                    *scalar_name, true, context.product_schema_version
                 );
                 preferred = true;
             }
             std::size_t name_index = 0;
-            for (const auto& name : names) {
+            for (const json* name_value : names) {
+                const json& name = *name_value;
                 const std::string name_where
                     = where + ".names[" + std::to_string(name_index++) + "]";
                 if (!name.is_object()) {
@@ -2675,7 +2847,8 @@ namespace {
                     require_string(name, "type", name_where),
                     optional_string(name, "language", name_where),
                     optional_string(name, "script", name_where),
-                    require_string(name, "value", name_where), is_preferred
+                    require_string(name, "value", name_where), is_preferred,
+                    context.product_schema_version
                 );
                 preferred = preferred || is_preferred;
             }
@@ -2688,8 +2861,9 @@ namespace {
 
     void import_concepts(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& concept_value :
-             array_or_empty(batch, "tags", "batch")) {
+        for (const json* raw_concept :
+             ordered_array_or_empty(batch, "tags", "batch", { "local_id" })) {
+            const json& concept_value = *raw_concept;
             const std::string where = "tags[" + std::to_string(index++) + "]";
             if (!concept_value.is_object()) {
                 fail(where + " must be an object");
@@ -2716,7 +2890,8 @@ namespace {
             }
             const std::string entity_id = resolve_entity(
                 context.db, identity, "concept", context.payload_hash,
-                "concept", local_id, where, context.normalized_version >= 2
+                "concept", local_id, where, context.normalized_version >= 2,
+                context.product_schema_version
             );
             statement insert(
                 context.db,
@@ -2743,11 +2918,13 @@ namespace {
                 fail(where + " conflicts with an existing concept definition");
             }
             insert_name(
-                context.db, entity_id, "english", "en", std::nullopt, name, true
+                context.db, entity_id, "english", "en", std::nullopt, name,
+                true, context.product_schema_version
             );
             std::size_t name_index = 0;
-            for (const auto& alternate :
-                 array_or_empty(concept_value, "names", where)) {
+            for (const json* alternate_value :
+                 ordered_array_or_empty(concept_value, "names", where)) {
+                const json& alternate = *alternate_value;
                 const std::string name_where
                     = where + ".names[" + std::to_string(name_index++) + "]";
                 const bool preferred = alternate.value("preferred", false);
@@ -2756,7 +2933,8 @@ namespace {
                     require_string(alternate, "type", name_where),
                     optional_string(alternate, "language", name_where),
                     optional_string(alternate, "script", name_where),
-                    require_string(alternate, "value", name_where), preferred
+                    require_string(alternate, "value", name_where), preferred,
+                    context.product_schema_version
                 );
             }
             if (context.product_schema_version < 3) {
@@ -2781,13 +2959,14 @@ namespace {
         batch_context& context, const json& work, std::string_view entity_id,
         std::string_view where
     ) {
-        const auto& titles = array_or_empty(work, "titles", where);
+        const auto titles = ordered_array_or_empty(work, "titles", where);
         if (titles.empty()) {
             fail(std::string(where) + " must contain at least one title");
         }
         bool preferred = false;
         std::size_t index = 0;
-        for (const auto& title : titles) {
+        for (const json* title_value : titles) {
+            const json& title = *title_value;
             const std::string title_where = std::string(where) + ".titles["
                 + std::to_string(index++) + "]";
             if (!title.is_object()) {
@@ -2804,7 +2983,8 @@ namespace {
                 require_string(title, "type", title_where),
                 optional_string(title, "language", title_where),
                 optional_string(title, "script", title_where),
-                require_string(title, "value", title_where), is_preferred
+                require_string(title, "value", title_where), is_preferred,
+                context.product_schema_version
             );
         }
         if (!preferred) {
@@ -2814,7 +2994,9 @@ namespace {
 
     void import_works(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& work : array_or_empty(batch, "works", "batch")) {
+        for (const json* work_value :
+             ordered_array_or_empty(batch, "works", "batch", { "local_id" })) {
+            const json& work = *work_value;
             const std::string where = "works[" + std::to_string(index++) + "]";
             if (!work.is_object()) {
                 fail(where + " must be an object");
@@ -2824,7 +3006,8 @@ namespace {
             require_unique_local_id(context.works, local_id, where);
             const std::string entity_id = resolve_entity(
                 context.db, work, "work", context.payload_hash, "work",
-                local_id, where, context.require_canonical_ids
+                local_id, where, context.require_canonical_ids,
+                context.product_schema_version
             );
             const std::string medium = require_string(work, "medium", where);
             const parsed_date date = parse_date(work, where);
@@ -2885,8 +3068,11 @@ namespace {
 
     void import_manifestations(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& item :
-             array_or_empty(batch, "manifestations", "batch")) {
+        for (const json* item_value :
+             ordered_array_or_empty(
+                 batch, "manifestations", "batch", { "local_id" }
+             )) {
+            const json& item = *item_value;
             const std::string where
                 = "manifestations[" + std::to_string(index++) + "]";
             if (!item.is_object()) {
@@ -2900,7 +3086,8 @@ namespace {
             );
             const std::string entity_id = resolve_entity(
                 context.db, item, "manifestation", context.payload_hash,
-                "manifestation", local_id, where, context.require_canonical_ids
+                "manifestation", local_id, where,
+                context.require_canonical_ids, context.product_schema_version
             );
             statement insert(
                 context.db,
@@ -3009,8 +3196,12 @@ namespace {
 
     void import_measurements(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& item :
-             array_or_empty(batch, "measurements", "batch")) {
+        for (const json* item_value :
+             ordered_array_or_empty(
+                 batch, "measurements", "batch",
+                 { "entity", "type", "value", "unit", "qualifier" }
+             )) {
+            const json& item = *item_value;
             const std::string where
                 = "measurements[" + std::to_string(index++) + "]";
             if (!item.is_object()) {
@@ -3026,6 +3217,33 @@ namespace {
             const std::string key = entity_id + "|" + type + "|"
                 + canonical_json(value) + "|" + unit + "|"
                 + qualifier.value_or("");
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO measurements"
+                    "(entity_id,measurement_type,value,unit,qualifier)"
+                    " VALUES(?1,?2,?3,?4,?5)"
+                );
+                insert.text(1, entity_id);
+                insert.text(2, type);
+                insert.real(3, value);
+                insert.text(4, unit);
+                insert.optional_text(5, qualifier);
+                insert.done();
+                statement verify(
+                    context.db,
+                    "SELECT 1 FROM measurements WHERE entity_id=?1 AND "
+                    "measurement_type=?2 AND value=?3 AND unit=?4 "
+                    "AND qualifier IS ?5"
+                );
+                verify.text(1, entity_id);
+                verify.text(2, type);
+                verify.real(3, value);
+                verify.text(4, unit);
+                verify.optional_text(5, qualifier);
+                require_matching_row(verify, where);
+                continue;
+            }
             statement insert(
                 context.db,
                 "INSERT OR IGNORE INTO measurements"
@@ -3057,8 +3275,12 @@ namespace {
 
     void import_financial_facts(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& item :
-             array_or_empty(batch, "financial_facts", "batch")) {
+        for (const json* item_value :
+             ordered_array_or_empty(
+                 batch, "financial_facts", "batch",
+                 { "work", "type", "amount", "currency", "value_year" }
+             )) {
+            const json& item = *item_value;
             const std::string where
                 = "financial_facts[" + std::to_string(index++) + "]";
             if (!item.is_object()) {
@@ -3107,6 +3329,41 @@ namespace {
                 + std::to_string(amount_min) + "|"
                 + (amount_max ? std::to_string(*amount_max) : "") + "|"
                 + currency + "|" + (year ? std::to_string(*year) : "");
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO financial_facts"
+                    "(work_id,fact_type,amount_min,amount_max,currency_code,"
+                    "value_year,is_estimate,confidence)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"
+                );
+                insert.text(1, work_id);
+                insert.text(2, type);
+                insert.integer(3, amount_min);
+                insert.optional_integer64(4, amount_max);
+                insert.text(5, currency);
+                insert.optional_integer(6, year);
+                insert.integer(7, estimate ? 1 : 0);
+                insert.optional_real(8, confidence);
+                insert.done();
+                statement verify(
+                    context.db,
+                    "SELECT 1 FROM financial_facts WHERE work_id=?1 "
+                    "AND fact_type=?2 AND amount_min=?3 AND amount_max IS ?4 "
+                    "AND currency_code=?5 AND value_year IS ?6 "
+                    "AND is_estimate=?7 AND confidence IS ?8"
+                );
+                verify.text(1, work_id);
+                verify.text(2, type);
+                verify.integer(3, amount_min);
+                verify.optional_integer64(4, amount_max);
+                verify.text(5, currency);
+                verify.optional_integer(6, year);
+                verify.integer(7, estimate ? 1 : 0);
+                verify.optional_real(8, confidence);
+                require_matching_row(verify, where);
+                continue;
+            }
             statement insert(
                 context.db,
                 "INSERT OR IGNORE INTO financial_facts"
@@ -3146,8 +3403,12 @@ namespace {
 
     void import_remote_assets(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& item :
-             array_or_empty(batch, "remote_assets", "batch")) {
+        for (const json* item_value :
+             ordered_array_or_empty(
+                 batch, "remote_assets", "batch",
+                 { "entity", "provider", "remote_key", "direct_url" }
+             )) {
+            const json& item = *item_value;
             const std::string where
                 = "remote_assets[" + std::to_string(index++) + "]";
             if (!item.is_object()) {
@@ -3165,6 +3426,45 @@ namespace {
             }
             const std::string key = entity_id + "|" + provider + "|"
                 + remote_key.value_or("") + "|" + direct_url.value_or("");
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO remote_assets"
+                    "(entity_id,provider,external_id_id,remote_key,direct_url,"
+                    "resolver_rule,rights_note)"
+                    " VALUES(?1,?2,NULL,?3,?4,?5,?6)"
+                );
+                insert.text(1, entity_id);
+                insert.text(2, provider);
+                insert.optional_text(3, remote_key);
+                insert.optional_text(4, direct_url);
+                insert.optional_text(
+                    5, optional_string(item, "resolver_rule", where)
+                );
+                insert.optional_text(
+                    6, optional_string(item, "rights_note", where)
+                );
+                insert.done();
+                statement verify(
+                    context.db,
+                    "SELECT 1 FROM remote_assets WHERE entity_id=?1 "
+                    "AND provider=?2 AND external_id_id IS NULL "
+                    "AND remote_key IS ?3 AND direct_url IS ?4 "
+                    "AND resolver_rule IS ?5 AND rights_note IS ?6"
+                );
+                verify.text(1, entity_id);
+                verify.text(2, provider);
+                verify.optional_text(3, remote_key);
+                verify.optional_text(4, direct_url);
+                verify.optional_text(
+                    5, optional_string(item, "resolver_rule", where)
+                );
+                verify.optional_text(
+                    6, optional_string(item, "rights_note", where)
+                );
+                require_matching_row(verify, where);
+                continue;
+            }
             statement insert(
                 context.db,
                 "INSERT OR IGNORE INTO remote_assets"
@@ -3228,6 +3528,51 @@ namespace {
             = optional_string(evidence, "translation", where);
         const std::string stance
             = evidence.value("stance", std::string("supports"));
+        const std::optional<std::string> source_archive_id
+            = context.source_archives.contains(reference)
+            ? std::optional<std::string> { context.source_archives.at(
+                  reference
+              ) }
+            : std::nullopt;
+        if (context.product_schema_version >= 4) {
+            statement insert(
+                context.db,
+                "INSERT OR IGNORE INTO evidence"
+                "(source_id,source_archive_id,exact_quote,quote_language,"
+                "quote_translation,locator_json,stance) "
+                "VALUES(?1,?2,?3,?4,?5,?6,?7)"
+            );
+            insert.text(1, source_id);
+            insert.optional_text(2, source_archive_id);
+            insert.text(3, quote);
+            insert.optional_text(4, language);
+            insert.optional_text(5, translation);
+            insert.optional_text(6, locator);
+            insert.text(7, stance);
+            insert.done();
+            statement find(
+                context.db,
+                "SELECT id FROM evidence WHERE source_id=?1 "
+                "AND source_archive_id IS ?2 AND exact_quote=?3 "
+                "AND quote_language IS ?4 AND quote_translation IS ?5 "
+                "AND locator_json IS ?6 AND stance=?7"
+            );
+            find.text(1, source_id);
+            find.optional_text(2, source_archive_id);
+            find.text(3, quote);
+            find.optional_text(4, language);
+            find.optional_text(5, translation);
+            find.optional_text(6, locator);
+            find.text(7, stance);
+            if (!find.row()) {
+                fail(
+                    std::string(where)
+                    + " conflicts with existing evidence at the same "
+                      "natural identity"
+                );
+            }
+            return std::to_string(sqlite3_column_int64(find.get(), 0));
+        }
         const std::string evidence_id = stable_id(
             "evd_",
             source_id + "|" + quote + "|" + locator.value_or("") + "|" + stance
@@ -3253,12 +3598,6 @@ namespace {
         insert.optional_text(7, locator);
         insert.text(8, stance);
         insert.done();
-        const std::optional<std::string> source_archive_id
-            = context.source_archives.contains(reference)
-            ? std::optional<std::string> { context.source_archives.at(
-                  reference
-              ) }
-            : std::nullopt;
         statement verify_evidence(
             context.db,
             "SELECT 1 FROM evidence WHERE id=?1 AND source_id=?2 AND "
@@ -3301,8 +3640,11 @@ namespace {
 
     void import_assertions(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& assertion :
-             array_or_empty(batch, "assertions", "batch")) {
+        for (const json* assertion_value :
+             ordered_array_or_empty(
+                 batch, "assertions", "batch", { "work", "tag", "relation" }
+             )) {
+            const json& assertion = *assertion_value;
             const std::string where
                 = "assertions[" + std::to_string(index++) + "]";
             if (!assertion.is_object()) {
@@ -3321,37 +3663,49 @@ namespace {
                 = optional_string(assertion, "historical_role", where);
             const auto confidence
                 = optional_number(assertion, "confidence", where);
-            const std::string assertion_id = stable_id(
-                "wca_", work_id + "|" + concept_id + "|" + relation
-            );
-            if (table_has_row(
-                    context.db, "SELECT 1 FROM work_concepts WHERE id=?1",
-                    assertion_id
-                )) {
+            std::string assertion_id;
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO work_concepts"
+                    "(work_id,concept_id,relation_type,centrality,"
+                    "historical_role,confidence) VALUES(?1,?2,?3,?4,?5,?6)"
+                );
+                insert.text(1, work_id);
+                insert.text(2, concept_id);
+                insert.text(3, relation);
+                insert.integer(4, centrality);
+                insert.optional_text(5, historical_role);
+                insert.optional_real(6, confidence);
+                insert.done();
                 statement verify(
                     context.db,
-                    "SELECT centrality,historical_role,confidence FROM "
-                    "work_concepts"
-                    " WHERE id=?1"
+                    "SELECT id,centrality,historical_role,confidence FROM "
+                    "work_concepts WHERE work_id=?1 AND concept_id=?2 "
+                    "AND relation_type=?3"
                 );
-                verify.text(1, assertion_id);
+                verify.text(1, work_id);
+                verify.text(2, concept_id);
+                verify.text(3, relation);
                 if (!verify.row()) {
                     fail(where + " disappeared during assertion verification");
                 }
-                const int old_centrality = sqlite3_column_int(verify.get(), 0);
+                assertion_id
+                    = std::to_string(sqlite3_column_int64(verify.get(), 0));
+                const int old_centrality = sqlite3_column_int(verify.get(), 1);
                 const std::optional<std::string> old_role
-                    = sqlite3_column_type(verify.get(), 1) == SQLITE_NULL
+                    = sqlite3_column_type(verify.get(), 2) == SQLITE_NULL
                     ? std::nullopt
                     : std::optional<std::string> {
                           reinterpret_cast<const char*>(
-                              sqlite3_column_text(verify.get(), 1)
+                              sqlite3_column_text(verify.get(), 2)
                           )
                       };
                 const std::optional<double> old_confidence
-                    = sqlite3_column_type(verify.get(), 2) == SQLITE_NULL
+                    = sqlite3_column_type(verify.get(), 3) == SQLITE_NULL
                     ? std::nullopt
                     : std::optional<double> {
-                          sqlite3_column_double(verify.get(), 2)
+                          sqlite3_column_double(verify.get(), 3)
                       };
                 if (old_centrality != centrality || old_role != historical_role
                     || old_confidence != confidence) {
@@ -3362,28 +3716,76 @@ namespace {
                     );
                 }
             } else {
-                statement insert(
-                    context.db,
-                    "INSERT INTO work_concepts"
-                    "(id,work_id,concept_id,relation_type,centrality,"
-                    "historical_role,"
-                    "confidence) VALUES(?1,?2,?3,?4,?5,?6,?7)"
+                assertion_id = stable_id(
+                    "wca_", work_id + "|" + concept_id + "|" + relation
                 );
-                insert.text(1, assertion_id);
-                insert.text(2, work_id);
-                insert.text(3, concept_id);
-                insert.text(4, relation);
-                insert.integer(5, centrality);
-                insert.optional_text(6, historical_role);
-                insert.optional_real(7, confidence);
-                insert.done();
+                if (table_has_row(
+                        context.db, "SELECT 1 FROM work_concepts WHERE id=?1",
+                        assertion_id
+                    )) {
+                    statement verify(
+                        context.db,
+                        "SELECT centrality,historical_role,confidence FROM "
+                        "work_concepts WHERE id=?1"
+                    );
+                    verify.text(1, assertion_id);
+                    if (!verify.row()) {
+                        fail(
+                            where
+                            + " disappeared during assertion verification"
+                        );
+                    }
+                    const int old_centrality
+                        = sqlite3_column_int(verify.get(), 0);
+                    const std::optional<std::string> old_role
+                        = sqlite3_column_type(verify.get(), 1) == SQLITE_NULL
+                        ? std::nullopt
+                        : std::optional<std::string> {
+                              reinterpret_cast<const char*>(
+                                  sqlite3_column_text(verify.get(), 1)
+                              )
+                          };
+                    const std::optional<double> old_confidence
+                        = sqlite3_column_type(verify.get(), 2) == SQLITE_NULL
+                        ? std::nullopt
+                        : std::optional<double> {
+                              sqlite3_column_double(verify.get(), 2)
+                          };
+                    if (old_centrality != centrality
+                        || old_role != historical_role
+                        || old_confidence != confidence) {
+                        fail(
+                            where
+                            + " conflicts with an existing accepted "
+                              "assertion; reconcile it first"
+                        );
+                    }
+                } else {
+                    statement insert(
+                        context.db,
+                        "INSERT INTO work_concepts"
+                        "(id,work_id,concept_id,relation_type,centrality,"
+                        "historical_role,"
+                        "confidence) VALUES(?1,?2,?3,?4,?5,?6,?7)"
+                    );
+                    insert.text(1, assertion_id);
+                    insert.text(2, work_id);
+                    insert.text(3, concept_id);
+                    insert.text(4, relation);
+                    insert.integer(5, centrality);
+                    insert.optional_text(6, historical_role);
+                    insert.optional_real(7, confidence);
+                    insert.done();
+                }
             }
-            const auto& evidence = array_or_empty(assertion, "evidence", where);
+            const auto evidence
+                = ordered_array_or_empty(assertion, "evidence", where);
             if (evidence.empty()) {
                 fail(where + " requires assertion-specific evidence");
             }
             std::size_t evidence_index = 0;
-            for (const auto& item : evidence) {
+            for (const json* evidence_value : evidence) {
+                const json& item = *evidence_value;
                 const std::string evidence_where = where + ".evidence["
                     + std::to_string(evidence_index++) + "]";
                 link_evidence(
@@ -3396,8 +3798,12 @@ namespace {
 
     void import_concept_relations(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& relation :
-             array_or_empty(batch, "concept_relations", "batch")) {
+        for (const json* relation_value :
+             ordered_array_or_empty(
+                 batch, "concept_relations", "batch",
+                 { "subject", "relation", "object" }
+             )) {
+            const json& relation = *relation_value;
             const std::string where
                 = "concept_relations[" + std::to_string(index++) + "]";
             if (!relation.is_object()) {
@@ -3420,26 +3826,70 @@ namespace {
             const auto region = optional_string(relation, "region_code", where);
             const auto confidence
                 = optional_number(relation, "confidence", where);
-            const std::string assertion_id
-                = stable_id("cra_", subject + "|" + type + "|" + object);
-            statement insert(
-                context.db,
-                "INSERT OR IGNORE INTO concept_relations"
-                "(id,subject_concept_id,relation_type,object_concept_id,"
-                "strength,"
-                "from_year,to_year,region_code,confidence)"
-                " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)"
-            );
-            insert.text(1, assertion_id);
-            insert.text(2, subject);
-            insert.text(3, type);
-            insert.text(4, object);
-            insert.optional_integer(5, strength);
-            insert.optional_integer(6, from_year);
-            insert.optional_integer(7, to_year);
-            insert.optional_text(8, region);
-            insert.optional_real(9, confidence);
-            insert.done();
+            std::string assertion_id;
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO concept_relations"
+                    "(subject_concept_id,relation_type,object_concept_id,"
+                    "strength,from_year,to_year,region_code,confidence)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"
+                );
+                insert.text(1, subject);
+                insert.text(2, type);
+                insert.text(3, object);
+                insert.optional_integer(4, strength);
+                insert.optional_integer(5, from_year);
+                insert.optional_integer(6, to_year);
+                insert.optional_text(7, region);
+                insert.optional_real(8, confidence);
+                insert.done();
+                statement find(
+                    context.db,
+                    "SELECT id FROM concept_relations WHERE "
+                    "subject_concept_id=?1 AND relation_type=?2 AND "
+                    "object_concept_id=?3 AND strength IS ?4 AND "
+                    "from_year IS ?5 AND to_year IS ?6 AND region_code IS ?7 "
+                    "AND confidence IS ?8"
+                );
+                find.text(1, subject);
+                find.text(2, type);
+                find.text(3, object);
+                find.optional_integer(4, strength);
+                find.optional_integer(5, from_year);
+                find.optional_integer(6, to_year);
+                find.optional_text(7, region);
+                find.optional_real(8, confidence);
+                if (!find.row()) {
+                    fail(
+                        where
+                        + " conflicts with an existing concept relation at "
+                          "the same natural identity"
+                    );
+                }
+                assertion_id
+                    = std::to_string(sqlite3_column_int64(find.get(), 0));
+            } else {
+                assertion_id
+                    = stable_id("cra_", subject + "|" + type + "|" + object);
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO concept_relations"
+                    "(id,subject_concept_id,relation_type,object_concept_id,"
+                    "strength,from_year,to_year,region_code,confidence)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+                );
+                insert.text(1, assertion_id);
+                insert.text(2, subject);
+                insert.text(3, type);
+                insert.text(4, object);
+                insert.optional_integer(5, strength);
+                insert.optional_integer(6, from_year);
+                insert.optional_integer(7, to_year);
+                insert.optional_text(8, region);
+                insert.optional_real(9, confidence);
+                insert.done();
+            }
             statement verify_relation(
                 context.db,
                 "SELECT 1 FROM concept_relations WHERE id=?1 AND "
@@ -3457,12 +3907,14 @@ namespace {
             verify_relation.optional_text(8, region);
             verify_relation.optional_real(9, confidence);
             require_matching_row(verify_relation, where);
-            const auto& evidence = array_or_empty(relation, "evidence", where);
+            const auto evidence
+                = ordered_array_or_empty(relation, "evidence", where);
             if (evidence.empty()) {
                 fail(where + " requires assertion-specific evidence");
             }
             std::size_t evidence_index = 0;
-            for (const auto& item : evidence) {
+            for (const json* evidence_value : evidence) {
+                const json& item = *evidence_value;
                 link_evidence(
                     context.db, "concept_relation_evidence", assertion_id,
                     import_evidence(
@@ -3477,8 +3929,11 @@ namespace {
 
     void import_parent_guides(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& assertion :
-             array_or_empty(batch, "parent_guide_assertions", "batch")) {
+        for (const json* assertion_value : ordered_array_or_empty(
+                 batch, "parent_guide_assertions", "batch",
+                 { "work", "tag", "category" }
+             )) {
+            const json& assertion = *assertion_value;
             const std::string where
                 = "parent_guide_assertions[" + std::to_string(index++) + "]";
             if (!assertion.is_object()) {
@@ -3492,33 +3947,89 @@ namespace {
             );
             const std::string category
                 = require_string(assertion, "category", where);
-            const std::string id = stable_id(
-                "pga_", work_id + "|" + concept_id + "|" + category
-            );
-            statement insert(
-                context.db,
-                "INSERT OR IGNORE INTO parent_guide_assertions"
-                "(id,work_id,concept_id,category,intensity,explicitness,"
-                "frequency,"
-                "centrality,realism,spoiler_level,confidence)"
-                " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
-            );
-            insert.text(1, id);
-            insert.text(2, work_id);
-            insert.text(3, concept_id);
-            insert.text(4, category);
-            insert.integer(5, require_integer(assertion, "intensity", where));
-            insert.integer(
-                6, require_integer(assertion, "explicitness", where)
-            );
-            insert.integer(7, require_integer(assertion, "frequency", where));
-            insert.integer(8, require_integer(assertion, "centrality", where));
-            insert.integer(9, require_integer(assertion, "realism", where));
-            insert.text(10, require_string(assertion, "spoiler_level", where));
-            insert.optional_real(
-                11, optional_number(assertion, "confidence", where)
-            );
-            insert.done();
+            const int intensity
+                = require_integer(assertion, "intensity", where);
+            const int explicitness
+                = require_integer(assertion, "explicitness", where);
+            const int frequency
+                = require_integer(assertion, "frequency", where);
+            const int centrality
+                = require_integer(assertion, "centrality", where);
+            const int realism = require_integer(assertion, "realism", where);
+            const std::string spoiler
+                = require_string(assertion, "spoiler_level", where);
+            const auto confidence
+                = optional_number(assertion, "confidence", where);
+            std::string id;
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO parent_guide_assertions"
+                    "(work_id,concept_id,category,intensity,explicitness,"
+                    "frequency,centrality,realism,spoiler_level,confidence)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+                );
+                insert.text(1, work_id);
+                insert.text(2, concept_id);
+                insert.text(3, category);
+                insert.integer(4, intensity);
+                insert.integer(5, explicitness);
+                insert.integer(6, frequency);
+                insert.integer(7, centrality);
+                insert.integer(8, realism);
+                insert.text(9, spoiler);
+                insert.optional_real(10, confidence);
+                insert.done();
+                statement find(
+                    context.db,
+                    "SELECT id FROM parent_guide_assertions WHERE "
+                    "work_id=?1 AND concept_id=?2 AND category=?3 "
+                    "AND intensity=?4 AND explicitness=?5 AND frequency=?6 "
+                    "AND centrality=?7 AND realism=?8 AND spoiler_level=?9 "
+                    "AND confidence IS ?10"
+                );
+                find.text(1, work_id);
+                find.text(2, concept_id);
+                find.text(3, category);
+                find.integer(4, intensity);
+                find.integer(5, explicitness);
+                find.integer(6, frequency);
+                find.integer(7, centrality);
+                find.integer(8, realism);
+                find.text(9, spoiler);
+                find.optional_real(10, confidence);
+                if (!find.row()) {
+                    fail(
+                        where
+                        + " conflicts with an existing parent-guide "
+                          "assertion at the same natural identity"
+                    );
+                }
+                id = std::to_string(sqlite3_column_int64(find.get(), 0));
+            } else {
+                id = stable_id(
+                    "pga_", work_id + "|" + concept_id + "|" + category
+                );
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO parent_guide_assertions"
+                    "(id,work_id,concept_id,category,intensity,explicitness,"
+                    "frequency,centrality,realism,spoiler_level,confidence)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
+                );
+                insert.text(1, id);
+                insert.text(2, work_id);
+                insert.text(3, concept_id);
+                insert.text(4, category);
+                insert.integer(5, intensity);
+                insert.integer(6, explicitness);
+                insert.integer(7, frequency);
+                insert.integer(8, centrality);
+                insert.integer(9, realism);
+                insert.text(10, spoiler);
+                insert.optional_real(11, confidence);
+                insert.done();
+            }
             statement verify_parent_guide(
                 context.db,
                 "SELECT 1 FROM parent_guide_assertions WHERE id=?1 AND "
@@ -3530,34 +4041,22 @@ namespace {
             verify_parent_guide.text(2, work_id);
             verify_parent_guide.text(3, concept_id);
             verify_parent_guide.text(4, category);
-            verify_parent_guide.integer(
-                5, require_integer(assertion, "intensity", where)
-            );
-            verify_parent_guide.integer(
-                6, require_integer(assertion, "explicitness", where)
-            );
-            verify_parent_guide.integer(
-                7, require_integer(assertion, "frequency", where)
-            );
-            verify_parent_guide.integer(
-                8, require_integer(assertion, "centrality", where)
-            );
-            verify_parent_guide.integer(
-                9, require_integer(assertion, "realism", where)
-            );
-            verify_parent_guide.text(
-                10, require_string(assertion, "spoiler_level", where)
-            );
-            verify_parent_guide.optional_real(
-                11, optional_number(assertion, "confidence", where)
-            );
+            verify_parent_guide.integer(5, intensity);
+            verify_parent_guide.integer(6, explicitness);
+            verify_parent_guide.integer(7, frequency);
+            verify_parent_guide.integer(8, centrality);
+            verify_parent_guide.integer(9, realism);
+            verify_parent_guide.text(10, spoiler);
+            verify_parent_guide.optional_real(11, confidence);
             require_matching_row(verify_parent_guide, where);
-            const auto& evidence = array_or_empty(assertion, "evidence", where);
+            const auto evidence
+                = ordered_array_or_empty(assertion, "evidence", where);
             if (evidence.empty()) {
                 fail(where + " requires assertion-specific evidence");
             }
             std::size_t evidence_index = 0;
-            for (const auto& item : evidence) {
+            for (const json* evidence_value : evidence) {
+                const json& item = *evidence_value;
                 link_evidence(
                     context.db, "parent_guide_evidence", id,
                     import_evidence(
@@ -3630,6 +4129,27 @@ namespace {
         }
     }
 
+    void validate_readable_canonical_id(
+        const json& value, std::string_view prefix, std::string_view context
+    ) {
+        validate_normalized_canonical_id(value, context);
+        const std::string id = require_string(value, "canonical_id", context);
+        const std::string expected_prefix = std::string(prefix) + "-";
+        const std::string_view suffix
+            = id.starts_with(expected_prefix)
+            ? std::string_view(id).substr(expected_prefix.size())
+            : std::string_view {};
+        if (suffix.size() < 6U
+            || !std::ranges::all_of(suffix, [](unsigned char character) {
+                   return std::isdigit(character) != 0;
+               })) {
+            fail(
+                std::string(context) + ".canonical_id must use "
+                + expected_prefix + " followed by at least six digits"
+            );
+        }
+    }
+
     std::string validate_safe_stable_id(
         const json& value, std::string_view key, std::string_view context
     ) {
@@ -3671,11 +4191,15 @@ namespace {
             const bool v2
                 = contract_name == normalized_product_import_v2_contract
                 && normalized_version == 2;
-            if (!v1 && !v2) {
+            const bool v3
+                = contract_name == normalized_product_import_v3_contract
+                && normalized_version == 3;
+            if (!v1 && !v2 && !v3) {
                 fail(
                     "normalized product manifest contract/format_version "
                     "must be normalized_product_import_v1/1 or "
-                    "normalized_product_import_v2/2"
+                    "normalized_product_import_v2/2 or "
+                    "normalized_product_import_v3/3"
                 );
             }
         } else {
@@ -3683,6 +4207,10 @@ namespace {
         }
         const bool normalized_v2
             = normalized_manifest && normalized_version == 2;
+        const bool normalized_v3
+            = normalized_manifest && normalized_version == 3;
+        const bool normalized_with_expanded_fields
+            = normalized_v2 || normalized_v3;
         static const std::set<std::string_view> legacy_top_level {
             "contract",
             "format_version",
@@ -3939,7 +4467,9 @@ namespace {
             validate_controlled_value(
                 value, "entity_type", agent_types, where, normalized_manifest
             );
-            if (normalized_manifest) {
+            if (normalized_v3) {
+                validate_readable_canonical_id(value, "agent", where);
+            } else if (normalized_manifest) {
                 validate_normalized_canonical_id(value, where);
             }
             std::size_t index = 0;
@@ -3978,7 +4508,9 @@ namespace {
             );
             validate_external_ids(value, where);
             validate_controlled_value(value, "medium", media, where, true);
-            if (normalized_manifest) {
+            if (normalized_v3) {
+                validate_readable_canonical_id(value, "work", where);
+            } else if (normalized_manifest) {
                 validate_normalized_canonical_id(value, where);
             }
             if (const auto date = value.find("date");
@@ -4022,6 +4554,13 @@ namespace {
                       "names", "type", "slug", "slug_aliases" },
                     where
                 );
+            } else if (normalized_v3) {
+                require_only_fields(
+                    value,
+                    { "local_id", "canonical_id", "external_ids", "name",
+                      "names", "type", "slug" },
+                    where
+                );
             } else {
                 require_only_fields(
                     value,
@@ -4036,12 +4575,17 @@ namespace {
             if (normalized_manifest) {
                 const std::string slug = require_string(value, "slug", where);
                 validate_slug(slug, where);
-                if (normalized_v2 && !concept_slugs.insert(slug).second) {
+                if (normalized_with_expanded_fields
+                    && !concept_slugs.insert(slug).second) {
                     fail(where + ".slug duplicates another canonical slug");
                 }
             }
-            if (normalized_v2) {
-                validate_normalized_canonical_id(value, where);
+            if (normalized_with_expanded_fields) {
+                if (normalized_v3) {
+                    validate_readable_canonical_id(value, "concept", where);
+                } else {
+                    validate_normalized_canonical_id(value, where);
+                }
                 std::size_t name_index = 0;
                 for (const auto& name : array_or_empty(value, "names", where)) {
                     const std::string name_where = where + ".names["
@@ -4063,19 +4607,23 @@ namespace {
                     }
                     (void)require_string(name, "value", name_where);
                 }
-                std::size_t alias_index = 0;
-                for (const auto& alias :
-                     array_or_empty(value, "slug_aliases", where)) {
-                    const std::string alias_where = where + ".slug_aliases["
-                        + std::to_string(alias_index++) + "]";
-                    if (!alias.is_string()
-                        || alias.get_ref<const std::string&>().empty()) {
-                        fail(alias_where + " must be a non-empty string");
-                    }
-                    const std::string alias_slug = alias.get<std::string>();
-                    validate_slug(alias_slug, alias_where);
-                    if (!concept_slug_aliases.insert(alias_slug).second) {
-                        fail(alias_where + " duplicates another slug alias");
+                if (normalized_v2) {
+                    std::size_t alias_index = 0;
+                    for (const auto& alias :
+                         array_or_empty(value, "slug_aliases", where)) {
+                        const std::string alias_where = where + ".slug_aliases["
+                            + std::to_string(alias_index++) + "]";
+                        if (!alias.is_string()
+                            || alias.get_ref<const std::string&>().empty()) {
+                            fail(alias_where + " must be a non-empty string");
+                        }
+                        const std::string alias_slug = alias.get<std::string>();
+                        validate_slug(alias_slug, alias_where);
+                        if (!concept_slug_aliases.insert(alias_slug).second) {
+                            fail(
+                                alias_where + " duplicates another slug alias"
+                            );
+                        }
                     }
                 }
             }
@@ -4103,7 +4651,11 @@ namespace {
                 validate_controlled_value(
                     value, "type", manifestation_types, where, true
                 );
-                if (normalized_manifest) {
+                if (normalized_v3) {
+                    validate_readable_canonical_id(
+                        value, "manifestation", where
+                    );
+                } else if (normalized_manifest) {
                     validate_normalized_canonical_id(value, where);
                 }
             }
@@ -4175,6 +4727,14 @@ namespace {
                     where
                 );
                 validate_normalized_canonical_id(value, where);
+            } else if (normalized_v3) {
+                require_only_fields(
+                    value,
+                    { "ref_id", "source_type", "title", "bibliography",
+                      "author", "publisher", "publication_date", "url",
+                      "alternate_urls", "doi", "isbn", "language", "archive" },
+                    where
+                );
             } else {
                 require_only_fields(
                     value,
@@ -4184,7 +4744,7 @@ namespace {
                     where
                 );
             }
-            if (normalized_v2) {
+            if (normalized_with_expanded_fields) {
                 if (const auto primary = optional_string(value, "url", where)) {
                     primary_source_urls.insert(*primary);
                 }
@@ -4242,7 +4802,7 @@ namespace {
                 value, "source_type", source_types, where, normalized_manifest
             );
         });
-        if (normalized_v2) {
+        if (normalized_with_expanded_fields) {
             for (const auto& alternate : alternate_source_urls) {
                 if (primary_source_urls.contains(alternate)) {
                     fail(
@@ -4482,7 +5042,7 @@ namespace {
         import_assertions(context, batch);
         import_concept_relations(context, batch);
         import_parent_guides(context, batch);
-        if (normalized_version >= 2) {
+        if (normalized_version == 2) {
             import_redirects(context, batch);
         }
     }
@@ -4503,7 +5063,12 @@ namespace {
 
     void import_credits(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& credit : array_or_empty(batch, "credits", "batch")) {
+        for (const json* credit_value :
+             ordered_array_or_empty(
+                 batch, "credits", "batch",
+                 { "work", "creator", "role", "credit_order", "credited_as" }
+             )) {
+            const json& credit = *credit_value;
             const std::string where
                 = "credits[" + std::to_string(index++) + "]";
             if (!credit.is_object()) {
@@ -4525,6 +5090,35 @@ namespace {
             const std::string key = work_id + "|" + agent_id + "|" + role + "|"
                 + (order ? std::to_string(*order) : "") + "|"
                 + credited_as.value_or("");
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO credits"
+                    "(work_id,agent_id,role,credit_order,importance,credited_as)"
+                    " VALUES(?1,?2,?3,?4,?5,?6)"
+                );
+                insert.text(1, work_id);
+                insert.text(2, agent_id);
+                insert.text(3, role);
+                insert.optional_integer(4, order);
+                insert.text(5, importance);
+                insert.optional_text(6, credited_as);
+                insert.done();
+                statement verify(
+                    context.db,
+                    "SELECT 1 FROM credits WHERE work_id=?1 AND agent_id=?2 "
+                    "AND role=?3 AND credit_order IS ?4 AND importance=?5 "
+                    "AND credited_as IS ?6"
+                );
+                verify.text(1, work_id);
+                verify.text(2, agent_id);
+                verify.text(3, role);
+                verify.optional_integer(4, order);
+                verify.text(5, importance);
+                verify.optional_text(6, credited_as);
+                require_matching_row(verify, where);
+                continue;
+            }
             statement insert(
                 context.db,
                 "INSERT OR IGNORE INTO credits"
@@ -4572,8 +5166,11 @@ namespace {
 
     void import_sources(batch_context& context, const json& batch) {
         std::size_t index = 0;
-        for (const auto& source :
-             array_or_empty(batch, "references", "batch")) {
+        for (const json* source_value :
+             ordered_array_or_empty(
+                 batch, "references", "batch", { "ref_id" }
+             )) {
+            const json& source = *source_value;
             const std::string where
                 = "references[" + std::to_string(index++) + "]";
             if (!source.is_object()) {
@@ -4583,41 +5180,91 @@ namespace {
                 = require_string(source, "ref_id", where);
             require_unique_local_id(context.sources, local_id, where);
             const std::string identity = source_identity(source, where);
-            const std::string source_id = context.normalized_version >= 2
-                ? require_string(source, "canonical_id", where)
-                : stable_id("src_", identity);
             const std::string source_type = source.value(
                 "source_type",
                 source.contains("url") ? std::string("web_page")
                                        : std::string("article")
             );
-            statement insert(
-                context.db,
-                "INSERT OR IGNORE INTO sources"
-                "(id,source_type,title,bibliography_text,author_text,publisher,"
-                "publication_date,url,doi,isbn,language_code)"
-                " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
-            );
-            insert.text(1, source_id);
-            insert.text(2, source_type);
-            insert.optional_text(3, optional_string(source, "title", where));
-            insert.optional_text(
-                4, optional_string(source, "bibliography", where)
-            );
-            insert.optional_text(5, optional_string(source, "author", where));
-            insert.optional_text(
-                6, optional_string(source, "publisher", where)
-            );
-            insert.optional_text(
-                7, optional_string(source, "publication_date", where)
-            );
-            insert.optional_text(8, optional_string(source, "url", where));
-            insert.optional_text(9, optional_string(source, "doi", where));
-            insert.optional_text(10, optional_string(source, "isbn", where));
-            insert.optional_text(
-                11, optional_string(source, "language", where)
-            );
-            insert.done();
+            const auto title = optional_string(source, "title", where);
+            const auto bibliography
+                = optional_string(source, "bibliography", where);
+            const auto author = optional_string(source, "author", where);
+            const auto publisher = optional_string(source, "publisher", where);
+            const auto publication_date
+                = optional_string(source, "publication_date", where);
+            const auto url = optional_string(source, "url", where);
+            const auto doi = optional_string(source, "doi", where);
+            const auto isbn = optional_string(source, "isbn", where);
+            const auto language = optional_string(source, "language", where);
+            std::string source_id;
+            if (context.product_schema_version >= 4) {
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO sources"
+                    "(source_type,title,bibliography_text,author_text,"
+                    "publisher,publication_date,url,doi,isbn,language_code)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+                );
+                insert.text(1, source_type);
+                insert.optional_text(2, title);
+                insert.optional_text(3, bibliography);
+                insert.optional_text(4, author);
+                insert.optional_text(5, publisher);
+                insert.optional_text(6, publication_date);
+                insert.optional_text(7, url);
+                insert.optional_text(8, doi);
+                insert.optional_text(9, isbn);
+                insert.optional_text(10, language);
+                insert.done();
+
+                const std::size_t separator = identity.find('|');
+                const std::string identity_type
+                    = identity.substr(0, separator);
+                const std::string column
+                    = identity_type == "bibliography"
+                    ? "bibliography_text"
+                    : identity_type;
+                statement find(
+                    context.db,
+                    "SELECT id FROM sources WHERE " + column + "=?1"
+                        + (identity_type == "bibliography"
+                               ? " AND doi IS NULL AND isbn IS NULL "
+                                 "AND url IS NULL"
+                               : "")
+                );
+                find.text(1, identity.substr(separator + 1U));
+                if (!find.row()) {
+                    fail(
+                        where
+                        + " conflicts with another source natural identity"
+                    );
+                }
+                source_id
+                    = std::to_string(sqlite3_column_int64(find.get(), 0));
+            } else {
+                source_id = context.normalized_version >= 2
+                    ? require_string(source, "canonical_id", where)
+                    : stable_id("src_", identity);
+                statement insert(
+                    context.db,
+                    "INSERT OR IGNORE INTO sources"
+                    "(id,source_type,title,bibliography_text,author_text,"
+                    "publisher,publication_date,url,doi,isbn,language_code)"
+                    " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
+                );
+                insert.text(1, source_id);
+                insert.text(2, source_type);
+                insert.optional_text(3, title);
+                insert.optional_text(4, bibliography);
+                insert.optional_text(5, author);
+                insert.optional_text(6, publisher);
+                insert.optional_text(7, publication_date);
+                insert.optional_text(8, url);
+                insert.optional_text(9, doi);
+                insert.optional_text(10, isbn);
+                insert.optional_text(11, language);
+                insert.done();
+            }
             statement verify_source(
                 context.db,
                 "SELECT 1 FROM sources WHERE id=?1 AND source_type=?2 AND "
@@ -4627,39 +5274,41 @@ namespace {
             );
             verify_source.text(1, source_id);
             verify_source.text(2, source_type);
-            verify_source.optional_text(
-                3, optional_string(source, "title", where)
-            );
-            verify_source.optional_text(
-                4, optional_string(source, "bibliography", where)
-            );
-            verify_source.optional_text(
-                5, optional_string(source, "author", where)
-            );
-            verify_source.optional_text(
-                6, optional_string(source, "publisher", where)
-            );
-            verify_source.optional_text(
-                7, optional_string(source, "publication_date", where)
-            );
-            verify_source.optional_text(
-                8, optional_string(source, "url", where)
-            );
-            verify_source.optional_text(
-                9, optional_string(source, "doi", where)
-            );
-            verify_source.optional_text(
-                10, optional_string(source, "isbn", where)
-            );
-            verify_source.optional_text(
-                11, optional_string(source, "language", where)
-            );
+            verify_source.optional_text(3, title);
+            verify_source.optional_text(4, bibliography);
+            verify_source.optional_text(5, author);
+            verify_source.optional_text(6, publisher);
+            verify_source.optional_text(7, publication_date);
+            verify_source.optional_text(8, url);
+            verify_source.optional_text(9, doi);
+            verify_source.optional_text(10, isbn);
+            verify_source.optional_text(11, language);
             require_matching_row(verify_source, where);
             context.sources.emplace(local_id, source_id);
 
-            for (const auto& alternate :
-                 array_or_empty(source, "alternate_urls", where)) {
+            for (const json* alternate_value :
+                 ordered_array_or_empty(source, "alternate_urls", where)) {
+                const json& alternate = *alternate_value;
                 const std::string url = alternate.get<std::string>();
+                if (context.product_schema_version >= 4) {
+                    statement insert_url(
+                        context.db,
+                        "INSERT OR IGNORE INTO source_urls(source_id,url) "
+                        "VALUES(?1,?2)"
+                    );
+                    insert_url.text(1, source_id);
+                    insert_url.text(2, url);
+                    insert_url.done();
+                    statement verify_url(
+                        context.db,
+                        "SELECT 1 FROM source_urls WHERE source_id=?1 "
+                        "AND url=?2"
+                    );
+                    verify_url.text(1, source_id);
+                    verify_url.text(2, url);
+                    require_matching_row(verify_url, where + ".alternate_urls");
+                    continue;
+                }
                 const std::string url_id
                     = stable_id("url_", source_id + "|" + url);
                 statement insert_url(
@@ -4685,6 +5334,63 @@ namespace {
                     require_string(*archive, "sha256", where + ".archive")
                 );
                 require_sha256(digest, where + ".archive.sha256");
+                const std::string media_type = archive->value(
+                    "media_type", archive->value("format", std::string("text"))
+                );
+                const std::string archive_scope
+                    = archive->value("scope", std::string("full"));
+                if (context.product_schema_version >= 4) {
+                    statement archive_insert(
+                        context.db,
+                        "INSERT OR IGNORE INTO source_archives"
+                        "(source_id,storage_ref,sha256,media_type,archive_scope,"
+                        "is_verbatim,rights_note)"
+                        " VALUES(?1,?2,?3,?4,?5,1,?6)"
+                    );
+                    archive_insert.text(1, source_id);
+                    archive_insert.text(2, storage_ref);
+                    archive_insert.text(3, digest);
+                    archive_insert.text(4, media_type);
+                    archive_insert.text(5, archive_scope);
+                    archive_insert.optional_text(
+                        6,
+                        optional_string(
+                            *archive, "rights_note", where + ".archive"
+                        )
+                    );
+                    archive_insert.done();
+                    statement find_archive(
+                        context.db,
+                        "SELECT id FROM source_archives WHERE source_id=?1 "
+                        "AND storage_ref=?2 AND sha256=?3 AND media_type=?4 "
+                        "AND archive_scope=?5 AND is_verbatim=1 "
+                        "AND rights_note IS ?6"
+                    );
+                    find_archive.text(1, source_id);
+                    find_archive.text(2, storage_ref);
+                    find_archive.text(3, digest);
+                    find_archive.text(4, media_type);
+                    find_archive.text(5, archive_scope);
+                    find_archive.optional_text(
+                        6,
+                        optional_string(
+                            *archive, "rights_note", where + ".archive"
+                        )
+                    );
+                    if (!find_archive.row()) {
+                        fail(
+                            where
+                            + ".archive conflicts with an existing archive"
+                        );
+                    }
+                    context.source_archives.emplace(
+                        local_id,
+                        std::to_string(
+                            sqlite3_column_int64(find_archive.get(), 0)
+                        )
+                    );
+                    continue;
+                }
                 const std::string archive_id = stable_id(
                     "arc_", source_id + "|" + storage_ref + "|" + digest
                 );
@@ -4713,11 +5419,6 @@ namespace {
                     optional_string(*archive, "rights_note", where + ".archive")
                 );
                 archive_insert.done();
-                const std::string media_type = archive->value(
-                    "media_type", archive->value("format", std::string("text"))
-                );
-                const std::string archive_scope
-                    = archive->value("scope", std::string("full"));
                 statement verify_archive(
                     context.db,
                     "SELECT 1 FROM source_archives WHERE id=?1 AND "
@@ -4811,6 +5512,7 @@ namespace {
             if (domain == graph_domain::product) {
                 const int schema_version = product_schema_version(db.get());
                 if (schema_version != 1 && schema_version != 2
+                    && schema_version != 3
                     && schema_version != current_product_schema_version) {
                     report.problems.push_back(
                         "unsupported product database schema version "
@@ -4862,6 +5564,13 @@ namespace {
                     " AND NOT EXISTS(SELECT 1 FROM parent_guide_evidence x"
                     " WHERE x.evidence_id=e.id) LIMIT 1",
                     "an evidence row is detached from every assertion"
+                );
+                add_problem_if(
+                    report, db.get(),
+                    "SELECT 1 FROM evidence e JOIN source_archives a "
+                    "ON a.id=e.source_archive_id "
+                    "WHERE a.source_id<>e.source_id LIMIT 1",
+                    "an evidence archive belongs to a different source"
                 );
                 add_problem_if(
                     report, db.get(),
@@ -4980,8 +5689,32 @@ namespace {
                         "'concept_slug_not_alias_update',"
                         "'concept_alias_not_canonical_insert',"
                         "'concept_alias_not_canonical_update') LIMIT 1",
-                        "product schema v3 contains retired compatibility "
+                        "current product schema contains retired compatibility "
                         "metadata"
+                    );
+                }
+                if (schema_version >= 4) {
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM sqlite_schema s "
+                        "JOIN pragma_table_info(s.name) p "
+                        "WHERE s.type='table' AND p.name='id' AND s.name IN("
+                        "'names','external_ids','credits','measurements',"
+                        "'financial_facts','remote_assets','sources',"
+                        "'source_urls','source_archives','evidence',"
+                        "'work_concepts','concept_relations',"
+                        "'work_concept_evidence','concept_relation_evidence',"
+                        "'parent_guide_assertions','parent_guide_evidence') "
+                        "AND (upper(p.type)<>'INTEGER' OR p.pk<>1) LIMIT 1",
+                        "product schema v4 contains a non-integer internal "
+                        "primary key"
+                    );
+                    add_problem_if(
+                        report, db.get(),
+                        "SELECT 1 FROM entities WHERE length(id)=64 "
+                        "OR id GLOB 'con_[0-9a-f]*' LIMIT 1",
+                        "product schema v4 contains a hash-shaped canonical "
+                        "entity ID"
                     );
                 }
             } else {
@@ -5258,6 +5991,402 @@ namespace {
         result.activated = changed;
         result.changed = changed;
         return result;
+    }
+
+    std::string projection_for_schema(
+        std::string value, std::string_view schema
+    ) {
+        constexpr std::string_view marker = "{db}";
+        std::size_t offset = 0;
+        while ((offset = value.find(marker, offset)) != std::string::npos) {
+            value.replace(offset, marker.size(), schema);
+            offset += schema.size();
+        }
+        return value;
+    }
+
+    void require_product_semantic_equivalence(
+        const database& rebuilt, const fs::path& previous_database
+    ) {
+        statement attach(
+            rebuilt.get(), "ATTACH DATABASE ?1 AS previous_product"
+        );
+        attach.text(1, previous_database.string());
+        attach.done();
+
+        struct semantic_projection final {
+            std::string_view name;
+            std::string_view sql;
+        };
+        static constexpr std::array projections {
+            semantic_projection {
+                "entities",
+                R"(SELECT DISTINCT
+                    CASE WHEN e.entity_type='concept'
+                         THEN 'concept:'||c.slug ELSE e.id END,
+                    e.entity_type
+                  FROM {db}.entities e
+                  LEFT JOIN {db}.concepts c ON c.entity_id=e.id)"
+            },
+            semantic_projection {
+                "works",
+                R"(SELECT DISTINCT entity_id,medium,year_start,year_end,
+                    date_precision,date_start_text,date_end_text,date_qualifier,
+                    language_code,country_code,production_info_json
+                  FROM {db}.works)"
+            },
+            semantic_projection {
+                "manifestations",
+                R"(SELECT DISTINCT entity_id,work_id,manifestation_type,
+                    release_year,region_code,language_code,label
+                  FROM {db}.manifestations)"
+            },
+            semantic_projection {
+                "agents",
+                R"(SELECT DISTINCT entity_id,agent_type,birth_year,death_year
+                  FROM {db}.agents)"
+            },
+            semantic_projection {
+                "concepts",
+                R"(SELECT DISTINCT slug,concept_type FROM {db}.concepts)"
+            },
+            semantic_projection {
+                "names",
+                R"(SELECT DISTINCT
+                    CASE WHEN e.entity_type='concept'
+                         THEN 'concept:'||c.slug ELSE e.id END,
+                    n.name_type,n.language_code,n.script_code,n.value,
+                    n.is_preferred
+                  FROM {db}.names n
+                  JOIN {db}.entities e ON e.id=n.entity_id
+                  LEFT JOIN {db}.concepts c ON c.entity_id=e.id)"
+            },
+            semantic_projection {
+                "external identifiers",
+                R"(SELECT DISTINCT
+                    CASE WHEN e.entity_type='concept'
+                         THEN 'concept:'||c.slug ELSE e.id END,
+                    x.scheme,x.value,x.canonical_url
+                  FROM {db}.external_ids x
+                  JOIN {db}.entities e ON e.id=x.entity_id
+                  LEFT JOIN {db}.concepts c ON c.entity_id=e.id)"
+            },
+            semantic_projection {
+                "credits",
+                R"(SELECT DISTINCT work_id,agent_id,role,credit_order,
+                    importance,credited_as FROM {db}.credits)"
+            },
+            semantic_projection {
+                "measurements",
+                R"(SELECT DISTINCT
+                    CASE WHEN e.entity_type='concept'
+                         THEN 'concept:'||c.slug ELSE e.id END,
+                    m.measurement_type,m.value,m.unit,m.qualifier
+                  FROM {db}.measurements m
+                  JOIN {db}.entities e ON e.id=m.entity_id
+                  LEFT JOIN {db}.concepts c ON c.entity_id=e.id)"
+            },
+            semantic_projection {
+                "financial facts",
+                R"(SELECT DISTINCT work_id,fact_type,amount_min,amount_max,
+                    currency_code,value_year,is_estimate,confidence
+                  FROM {db}.financial_facts)"
+            },
+            semantic_projection {
+                "remote assets",
+                R"(SELECT DISTINCT
+                    CASE WHEN e.entity_type='concept'
+                         THEN 'concept:'||c.slug ELSE e.id END,
+                    r.provider,x.scheme,x.value,r.remote_key,r.direct_url,
+                    r.resolver_rule,r.rights_note
+                  FROM {db}.remote_assets r
+                  JOIN {db}.entities e ON e.id=r.entity_id
+                  LEFT JOIN {db}.concepts c ON c.entity_id=e.id
+                  LEFT JOIN {db}.external_ids x ON x.id=r.external_id_id)"
+            },
+            semantic_projection {
+                "sources",
+                R"(SELECT DISTINCT source_type,title,bibliography_text,
+                    author_text,publisher,publication_date,url,doi,isbn,
+                    language_code FROM {db}.sources)"
+            },
+            semantic_projection {
+                "source URLs",
+                R"(SELECT DISTINCT
+                    CASE WHEN s.doi IS NOT NULL THEN 'doi|'||s.doi
+                         WHEN s.isbn IS NOT NULL THEN 'isbn|'||s.isbn
+                         WHEN s.url IS NOT NULL THEN 'url|'||s.url
+                         ELSE 'bibliography|'||s.bibliography_text END,
+                    u.url
+                  FROM {db}.source_urls u
+                  JOIN {db}.sources s ON s.id=u.source_id)"
+            },
+            semantic_projection {
+                "source archives",
+                R"(SELECT DISTINCT
+                    CASE WHEN s.doi IS NOT NULL THEN 'doi|'||s.doi
+                         WHEN s.isbn IS NOT NULL THEN 'isbn|'||s.isbn
+                         WHEN s.url IS NOT NULL THEN 'url|'||s.url
+                         ELSE 'bibliography|'||s.bibliography_text END,
+                    a.storage_ref,a.sha256,a.media_type,a.archive_scope,
+                    a.is_verbatim,a.rights_note
+                  FROM {db}.source_archives a
+                  JOIN {db}.sources s ON s.id=a.source_id)"
+            },
+            semantic_projection {
+                "evidence",
+                R"(SELECT DISTINCT
+                    CASE WHEN s.doi IS NOT NULL THEN 'doi|'||s.doi
+                         WHEN s.isbn IS NOT NULL THEN 'isbn|'||s.isbn
+                         WHEN s.url IS NOT NULL THEN 'url|'||s.url
+                         ELSE 'bibliography|'||s.bibliography_text END,
+                    CASE WHEN e.source_archive_id IS NULL THEN NULL
+                         WHEN archive_source.doi IS NOT NULL
+                           THEN 'doi|'||archive_source.doi
+                         WHEN archive_source.isbn IS NOT NULL
+                           THEN 'isbn|'||archive_source.isbn
+                         WHEN archive_source.url IS NOT NULL
+                           THEN 'url|'||archive_source.url
+                         ELSE 'bibliography|'||
+                           archive_source.bibliography_text END,
+                    a.storage_ref,a.sha256,a.media_type,a.archive_scope,
+                    a.is_verbatim,a.rights_note,
+                    e.exact_quote,e.quote_language,e.quote_translation,
+                    e.locator_json,e.stance
+                  FROM {db}.evidence e
+                  JOIN {db}.sources s ON s.id=e.source_id
+                  LEFT JOIN {db}.source_archives a
+                    ON a.id=e.source_archive_id
+                  LEFT JOIN {db}.sources archive_source
+                    ON archive_source.id=a.source_id)"
+            },
+            semantic_projection {
+                "work-concept assertions",
+                R"(SELECT DISTINCT w.work_id,c.slug,w.relation_type,
+                    w.centrality,w.historical_role,w.confidence
+                  FROM {db}.work_concepts w
+                  JOIN {db}.concepts c ON c.entity_id=w.concept_id)"
+            },
+            semantic_projection {
+                "concept relations",
+                R"(SELECT DISTINCT subject.slug,r.relation_type,object.slug,
+                    r.strength,r.from_year,r.to_year,r.region_code,r.confidence
+                  FROM {db}.concept_relations r
+                  JOIN {db}.concepts subject
+                    ON subject.entity_id=r.subject_concept_id
+                  JOIN {db}.concepts object
+                    ON object.entity_id=r.object_concept_id)"
+            },
+            semantic_projection {
+                "parent-guide assertions",
+                R"(SELECT DISTINCT p.work_id,c.slug,p.category,p.intensity,
+                    p.explicitness,p.frequency,p.centrality,p.realism,
+                    p.spoiler_level,p.confidence
+                  FROM {db}.parent_guide_assertions p
+                  JOIN {db}.concepts c ON c.entity_id=p.concept_id)"
+            },
+            semantic_projection {
+                "work-concept evidence links",
+                R"(SELECT DISTINCT w.work_id,c.slug,w.relation_type,
+                    CASE WHEN s.doi IS NOT NULL THEN 'doi|'||s.doi
+                         WHEN s.isbn IS NOT NULL THEN 'isbn|'||s.isbn
+                         WHEN s.url IS NOT NULL THEN 'url|'||s.url
+                         ELSE 'bibliography|'||s.bibliography_text END,
+                    CASE WHEN e.source_archive_id IS NULL THEN NULL
+                         WHEN archive_source.doi IS NOT NULL
+                           THEN 'doi|'||archive_source.doi
+                         WHEN archive_source.isbn IS NOT NULL
+                           THEN 'isbn|'||archive_source.isbn
+                         WHEN archive_source.url IS NOT NULL
+                           THEN 'url|'||archive_source.url
+                         ELSE 'bibliography|'||
+                           archive_source.bibliography_text END,
+                    a.storage_ref,a.sha256,a.media_type,a.archive_scope,
+                    a.is_verbatim,a.rights_note,
+                    e.exact_quote,e.quote_language,e.quote_translation,
+                    e.locator_json,e.stance
+                  FROM {db}.work_concept_evidence l
+                  JOIN {db}.work_concepts w ON w.id=l.assertion_id
+                  JOIN {db}.concepts c ON c.entity_id=w.concept_id
+                  JOIN {db}.evidence e ON e.id=l.evidence_id
+                  JOIN {db}.sources s ON s.id=e.source_id
+                  LEFT JOIN {db}.source_archives a
+                    ON a.id=e.source_archive_id
+                  LEFT JOIN {db}.sources archive_source
+                    ON archive_source.id=a.source_id)"
+            },
+            semantic_projection {
+                "concept-relation evidence links",
+                R"(SELECT DISTINCT subject.slug,r.relation_type,object.slug,
+                    CASE WHEN s.doi IS NOT NULL THEN 'doi|'||s.doi
+                         WHEN s.isbn IS NOT NULL THEN 'isbn|'||s.isbn
+                         WHEN s.url IS NOT NULL THEN 'url|'||s.url
+                         ELSE 'bibliography|'||s.bibliography_text END,
+                    CASE WHEN e.source_archive_id IS NULL THEN NULL
+                         WHEN archive_source.doi IS NOT NULL
+                           THEN 'doi|'||archive_source.doi
+                         WHEN archive_source.isbn IS NOT NULL
+                           THEN 'isbn|'||archive_source.isbn
+                         WHEN archive_source.url IS NOT NULL
+                           THEN 'url|'||archive_source.url
+                         ELSE 'bibliography|'||
+                           archive_source.bibliography_text END,
+                    a.storage_ref,a.sha256,a.media_type,a.archive_scope,
+                    a.is_verbatim,a.rights_note,
+                    e.exact_quote,e.quote_language,e.quote_translation,
+                    e.locator_json,e.stance
+                  FROM {db}.concept_relation_evidence l
+                  JOIN {db}.concept_relations r ON r.id=l.assertion_id
+                  JOIN {db}.concepts subject
+                    ON subject.entity_id=r.subject_concept_id
+                  JOIN {db}.concepts object
+                    ON object.entity_id=r.object_concept_id
+                  JOIN {db}.evidence e ON e.id=l.evidence_id
+                  JOIN {db}.sources s ON s.id=e.source_id
+                  LEFT JOIN {db}.source_archives a
+                    ON a.id=e.source_archive_id
+                  LEFT JOIN {db}.sources archive_source
+                    ON archive_source.id=a.source_id)"
+            },
+            semantic_projection {
+                "parent-guide evidence links",
+                R"(SELECT DISTINCT p.work_id,c.slug,p.category,
+                    CASE WHEN s.doi IS NOT NULL THEN 'doi|'||s.doi
+                         WHEN s.isbn IS NOT NULL THEN 'isbn|'||s.isbn
+                         WHEN s.url IS NOT NULL THEN 'url|'||s.url
+                         ELSE 'bibliography|'||s.bibliography_text END,
+                    CASE WHEN e.source_archive_id IS NULL THEN NULL
+                         WHEN archive_source.doi IS NOT NULL
+                           THEN 'doi|'||archive_source.doi
+                         WHEN archive_source.isbn IS NOT NULL
+                           THEN 'isbn|'||archive_source.isbn
+                         WHEN archive_source.url IS NOT NULL
+                           THEN 'url|'||archive_source.url
+                         ELSE 'bibliography|'||
+                           archive_source.bibliography_text END,
+                    a.storage_ref,a.sha256,a.media_type,a.archive_scope,
+                    a.is_verbatim,a.rights_note,
+                    e.exact_quote,e.quote_language,e.quote_translation,
+                    e.locator_json,e.stance
+                  FROM {db}.parent_guide_evidence l
+                  JOIN {db}.parent_guide_assertions p ON p.id=l.assertion_id
+                  JOIN {db}.concepts c ON c.entity_id=p.concept_id
+                  JOIN {db}.evidence e ON e.id=l.evidence_id
+                  JOIN {db}.sources s ON s.id=e.source_id
+                  LEFT JOIN {db}.source_archives a
+                    ON a.id=e.source_archive_id
+                  LEFT JOIN {db}.sources archive_source
+                    ON archive_source.id=a.source_id)"
+            },
+        };
+
+        const auto without_distinct = [](std::string value) {
+            constexpr std::string_view distinct = "SELECT DISTINCT";
+            const std::size_t found = value.find(distinct);
+            if (found == std::string::npos) {
+                fail(
+                    "internal migration projection is missing its DISTINCT "
+                    "marker"
+                );
+            }
+            value.replace(found, distinct.size(), "SELECT");
+            return value;
+        };
+        const auto semantic_rows = [&](const std::string& sql,
+                                       const bool collapse_duplicates) {
+            std::map<std::string, std::size_t, std::less<>> rows;
+            statement query(rebuilt.get(), sql);
+            const int column_count = sqlite3_column_count(query.get());
+            while (query.row()) {
+                std::string encoded;
+                const auto append = [&](const std::string_view value) {
+                    encoded += std::to_string(value.size());
+                    encoded.push_back(':');
+                    encoded.append(value);
+                    encoded.push_back(';');
+                };
+                for (int column = 0; column < column_count; ++column) {
+                    const int type = sqlite3_column_type(query.get(), column);
+                    switch (type) {
+                    case SQLITE_NULL:
+                        encoded += "N;";
+                        break;
+                    case SQLITE_INTEGER: {
+                        encoded.push_back('I');
+                        const std::string value = std::to_string(
+                            sqlite3_column_int64(query.get(), column)
+                        );
+                        append(value);
+                        break;
+                    }
+                    case SQLITE_FLOAT: {
+                        encoded.push_back('F');
+                        const std::string value = std::to_string(
+                            std::bit_cast<std::uint64_t>(
+                                sqlite3_column_double(query.get(), column)
+                            )
+                        );
+                        append(value);
+                        break;
+                    }
+                    case SQLITE_TEXT:
+                    case SQLITE_BLOB: {
+                        encoded.push_back(type == SQLITE_TEXT ? 'T' : 'B');
+                        const int byte_count
+                            = sqlite3_column_bytes(query.get(), column);
+                        const void* raw = type == SQLITE_TEXT
+                            ? static_cast<const void*>(
+                                  sqlite3_column_text(query.get(), column)
+                              )
+                            : sqlite3_column_blob(query.get(), column);
+                        if (byte_count < 0
+                            || (byte_count > 0 && raw == nullptr)) {
+                            fail("cannot encode a migration semantic row");
+                        }
+                        append(
+                            byte_count == 0
+                                ? std::string_view {}
+                                : std::string_view(
+                                      static_cast<const char*>(raw),
+                                      static_cast<std::size_t>(byte_count)
+                                  )
+                        );
+                        break;
+                    }
+                    default:
+                        fail(
+                            "migration semantic row has an unknown "
+                            "SQLite type"
+                        );
+                    }
+                }
+                if (collapse_duplicates) {
+                    rows.try_emplace(std::move(encoded), 1U);
+                } else {
+                    ++rows[std::move(encoded)];
+                }
+            }
+            return rows;
+        };
+
+        for (const auto& projection : projections) {
+            const std::string current = without_distinct(
+                projection_for_schema(std::string(projection.sql), "main")
+            );
+            const std::string previous = without_distinct(projection_for_schema(
+                std::string(projection.sql), "previous_product"
+            ));
+            const bool collapse_duplicates
+                = projection.name == std::string_view("names");
+            if (semantic_rows(current, collapse_duplicates)
+                != semantic_rows(previous, collapse_duplicates)) {
+                fail(
+                    "normalized migration manifest changes product data in "
+                    + std::string(projection.name)
+                );
+            }
+        }
+        rebuilt.exec("DETACH DATABASE previous_product");
     }
 
 } // namespace
@@ -5591,9 +6720,9 @@ normalized_product_import_result store::import_normalized_product(
     // Complete preflight happens before any staging or destination mutation.
     const int normalized_version
         = validate_batch_transfer_surface(manifest, true);
-    const int database_schema_version = normalized_version >= 2
+    const int database_schema_version = normalized_version == 3
         ? current_product_schema_version
-        : normalized_version;
+        : (normalized_version == 2 ? 3 : normalized_version);
 
     fs::create_directories(destination.parent_path());
     path_error.clear();
@@ -5682,6 +6811,7 @@ normalized_product_import_result store::import_normalized_product(
         import_batch(db.get(), manifest, {}, true);
         normalize_obvious_product_values(db, normalized_version < 2);
         import.commit();
+        db.exec("VACUUM");
     }
     seal_and_validate_database(graph_domain::product, staging_database);
 
@@ -5736,7 +6866,8 @@ normalized_product_import_result store::import_normalized_product(
 }
 
 product_database_migration_result store::migrate_product_database(
-    const fs::path& database_path
+    const fs::path& database_path,
+    const std::optional<fs::path>& normalized_manifest_path
 ) {
     if (database_path.empty()) {
         fail("product database migration requires a database path");
@@ -5835,7 +6966,7 @@ product_database_migration_result store::migrate_product_database(
         );
         previous_schema_version = product_schema_version(source.get());
     }
-    if (previous_schema_version != 2
+    if (previous_schema_version != 2 && previous_schema_version != 3
         && previous_schema_version != current_product_schema_version) {
         fail(
             "unsupported product database migration from schema version "
@@ -5868,6 +6999,30 @@ product_database_migration_result store::migrate_product_database(
         return result;
     }
 
+    std::optional<json> normalized_manifest;
+    if (normalized_manifest_path) {
+        const fs::path manifest
+            = fs::absolute(*normalized_manifest_path).lexically_normal();
+        if (manifest == destination) {
+            fail(
+                "product database migration manifest and database paths must "
+                "differ"
+            );
+        }
+        normalized_manifest = read_normalized_manifest(manifest);
+        if (validate_batch_transfer_surface(*normalized_manifest, true) != 3) {
+            fail(
+                "compact-ID migration requires normalized_product_import_v3/3"
+            );
+        }
+    }
+    if (previous_schema_version == 3 && !normalized_manifest) {
+        fail(
+            "schema-v3 compact-ID migration requires --manifest with an "
+            "equivalent normalized_product_import_v3 document"
+        );
+    }
+
     normalized_import_staging_guard staging {
         .path = make_normalized_import_staging_directory(destination),
         .expected_parent = destination.parent_path(),
@@ -5875,19 +7030,42 @@ product_database_migration_result store::migrate_product_database(
         = "." + destination.filename().string() + ".import-staging"
     };
     const fs::path staging_database = staging.path / "graph.sqlite";
-    copy_database(destination, staging_database);
-    {
-        database db(staging_database, SQLITE_OPEN_READWRITE);
-        configure_connection(db);
-        if (product_schema_version(db.get()) != 2) {
-            fail("staged product database changed schema version before migration");
+    int activated_schema_version = 0;
+    if (normalized_manifest) {
+        {
+            database db(
+                staging_database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+            );
+            configure_connection(db);
+            create_schema(
+                db, graph_domain::product, current_product_schema_version
+            );
+            transaction import(db);
+            import_batch(db.get(), *normalized_manifest, {}, true);
+            normalize_obvious_product_values(db, false);
+            import.commit();
+            require_product_semantic_equivalence(db, destination);
+            db.exec("VACUUM");
         }
-        db.exec(read_bytes(schema_path("migrations/product_v2_to_v3.sql")));
-        if (product_schema_version(db.get())
-            != current_product_schema_version) {
-            fail("product database migration did not set schema version 3");
+        activated_schema_version = current_product_schema_version;
+    } else {
+        copy_database(destination, staging_database);
+        {
+            database db(staging_database, SQLITE_OPEN_READWRITE);
+            configure_connection(db);
+            if (product_schema_version(db.get()) != 2) {
+                fail(
+                    "staged product database changed schema version before "
+                    "migration"
+                );
+            }
+            db.exec(read_bytes(schema_path("migrations/product_v2_to_v3.sql")));
+            if (product_schema_version(db.get()) != 3) {
+                fail("product database migration did not set schema version 3");
+            }
+            db.exec("VACUUM");
         }
-        db.exec("VACUUM");
+        activated_schema_version = 3;
     }
     seal_and_validate_database(graph_domain::product, staging_database);
     remove_staging_sqlite_sidecars(staging_database, staging.path);
@@ -5911,7 +7089,7 @@ product_database_migration_result store::migrate_product_database(
         );
     }
 
-    result.schema_version = current_product_schema_version;
+    result.schema_version = activated_schema_version;
     result.changed = true;
     return result;
 }

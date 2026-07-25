@@ -99,6 +99,80 @@ def check_artifacts(root: Path) -> None:
         require(example.get("format_version") == 1,
                 f"{example_path}: wrong format_version")
 
+    normalized_name = "normalized_product_import_v3"
+    normalized_path = directory / f"{normalized_name}.schema.json"
+    normalized = load_json(normalized_path)
+    normalized_properties = normalized.get("properties", {})
+    normalized_defs = normalized.get("$defs", {})
+    require(normalized.get("$schema") == "https://json-schema.org/draft/2020-12/schema",
+            f"{normalized_path}: expected JSON Schema Draft 2020-12")
+    require(normalized.get("type") == "object",
+            f"{normalized_path}: root must be an object")
+    require(normalized.get("additionalProperties") is False,
+            f"{normalized_path}: normalized import root must be closed")
+    require(normalized_properties.get("contract", {}).get("const") == normalized_name,
+            f"{normalized_path}: wrong contract const")
+    require(normalized_properties.get("format_version", {}).get("const") == 3,
+            f"{normalized_path}: wrong format version")
+    require(
+        not {"entity_redirects", "source_redirects"} & normalized_properties.keys(),
+        f"{normalized_path}: legacy redirects are forbidden",
+    )
+
+    expected_id_patterns = {
+        "agent_id": r"^agent-[0-9]{6,}$",
+        "work_id": r"^work-[0-9]{6,}$",
+        "concept_id": r"^concept-[0-9]{6,}$",
+        "manifestation_id": r"^manifestation-[0-9]{6,}$",
+    }
+    for definition, pattern in expected_id_patterns.items():
+        require(normalized_defs.get(definition, {}).get("pattern") == pattern,
+                f"{normalized_path}: wrong {definition} pattern")
+
+    entity_id_definitions = {
+        "creator": "agent_id",
+        "work": "work_id",
+        "manifestation": "manifestation_id",
+    }
+    for entity, identifier_definition in entity_id_definitions.items():
+        all_of = normalized_defs.get(entity, {}).get("allOf", [])
+        overrides = (
+            all_of[1].get("properties", {})
+            if isinstance(all_of, list)
+            and len(all_of) > 1
+            and isinstance(all_of[1], dict)
+            else {}
+        )
+        expected_ref = f"#/$defs/{identifier_definition}"
+        require(overrides.get("local_id", {}).get("$ref") == expected_ref,
+                f"{normalized_path}: {entity} local_id is not readable")
+        require(overrides.get("canonical_id", {}).get("$ref") == expected_ref,
+                f"{normalized_path}: {entity} canonical_id is not readable")
+
+    concept = normalized_defs.get("concept", {})
+    concept_properties = concept.get("properties", {})
+    require("canonical_id" in concept.get("required", ()),
+            f"{normalized_path}: concepts require canonical_id")
+    require(concept_properties.get("local_id", {}).get("$ref") == "#/$defs/concept_id",
+            f"{normalized_path}: concept local_id is not readable")
+    require(concept_properties.get("canonical_id", {}).get("$ref") == "#/$defs/concept_id",
+            f"{normalized_path}: concept canonical_id is not readable")
+    require("names" in concept_properties,
+            f"{normalized_path}: concept names are missing")
+    require("slug_aliases" not in concept_properties,
+            f"{normalized_path}: concept slug aliases are forbidden")
+
+    reference = normalized_defs.get("reference", {})
+    reference_properties = reference.get("properties", {})
+    require({"ref_id", "source_type"} <= set(reference.get("required", ())),
+            f"{normalized_path}: references require ref_id and source_type")
+    require("canonical_id" not in reference_properties,
+            f"{normalized_path}: source canonical IDs are forbidden")
+    require("alternate_urls" in reference_properties,
+            f"{normalized_path}: alternate source URLs are missing")
+    require("archive" in reference_properties,
+            f"{normalized_path}: source archive metadata is missing")
+
 
 def check_configuration(root: Path) -> None:
     path = root / "config" / "arachne.example.json"

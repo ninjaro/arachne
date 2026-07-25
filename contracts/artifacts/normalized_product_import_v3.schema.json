@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/normalized_product_import_v3.schema.json",
+  "title": "Corpus-normalized product import v3",
+  "description": "Closed, corpus-derived transfer artifact consumed by Penelope after normalization and reconciliation. Version 3 requires readable category-specific canonical entity identifiers and removes retired-identity redirects, concept slug aliases, and canonical source identifiers. This is not a public miner intake contract.",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "creators",
+    "works",
+    "tags",
+    "manifestations",
+    "measurements",
+    "financial_facts",
+    "remote_assets",
+    "credits",
+    "references",
+    "assertions",
+    "concept_relations",
+    "parent_guide_assertions"
+  ],
+  "properties": {
+    "contract": {
+      "const": "normalized_product_import_v3"
+    },
+    "format_version": {
+      "const": 3
+    },
+    "creators": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/creator"
+      }
+    },
+    "works": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/work"
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/concept"
+      }
+    },
+    "manifestations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/manifestation"
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/measurement"
+      }
+    },
+    "financial_facts": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/financial_fact"
+      }
+    },
+    "remote_assets": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/remote_asset"
+      }
+    },
+    "credits": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/credit"
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reference"
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/work_concept_assertion"
+      }
+    },
+    "concept_relations": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/concept_relation"
+      }
+    },
+    "parent_guide_assertions": {
+      "type": "array",
+      "items": {
+        "$ref": "normalized_product_import_v1.schema.json#/$defs/parent_guide_assertion"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "agent_id": {
+      "type": "string",
+      "pattern": "^agent-[0-9]{6,}$"
+    },
+    "work_id": {
+      "type": "string",
+      "pattern": "^work-[0-9]{6,}$"
+    },
+    "concept_id": {
+      "type": "string",
+      "pattern": "^concept-[0-9]{6,}$"
+    },
+    "manifestation_id": {
+      "type": "string",
+      "pattern": "^manifestation-[0-9]{6,}$"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "concept_type": {
+      "enum": [
+        "genre",
+        "style",
+        "theme",
+        "keyword",
+        "motif",
+        "trope",
+        "phobia",
+        "taboo",
+        "technique",
+        "movement",
+        "setting",
+        "mood",
+        "content_warning"
+      ]
+    },
+    "creator": {
+      "allOf": [
+        {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/creator"
+        },
+        {
+          "properties": {
+            "local_id": {
+              "$ref": "#/$defs/agent_id"
+            },
+            "canonical_id": {
+              "$ref": "#/$defs/agent_id"
+            }
+          }
+        }
+      ]
+    },
+    "work": {
+      "allOf": [
+        {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/work"
+        },
+        {
+          "properties": {
+            "local_id": {
+              "$ref": "#/$defs/work_id"
+            },
+            "canonical_id": {
+              "$ref": "#/$defs/work_id"
+            }
+          }
+        }
+      ]
+    },
+    "concept": {
+      "type": "object",
+      "required": [
+        "local_id",
+        "canonical_id",
+        "name",
+        "type",
+        "slug"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/concept_id"
+        },
+        "canonical_id": {
+          "$ref": "#/$defs/concept_id"
+        },
+        "external_ids": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/external_ids"
+        },
+        "name": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "$ref": "normalized_product_import_v1.schema.json#/$defs/name"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/concept_type"
+        },
+        "slug": {
+          "$ref": "#/$defs/slug"
+        }
+      },
+      "additionalProperties": false
+    },
+    "manifestation": {
+      "allOf": [
+        {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/manifestation"
+        },
+        {
+          "properties": {
+            "local_id": {
+              "$ref": "#/$defs/manifestation_id"
+            },
+            "canonical_id": {
+              "$ref": "#/$defs/manifestation_id"
+            }
+          }
+        }
+      ]
+    },
+    "reference": {
+      "type": "object",
+      "required": [
+        "ref_id",
+        "source_type"
+      ],
+      "properties": {
+        "ref_id": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "source_type": {
+          "enum": [
+            "book",
+            "article",
+            "catalogue",
+            "web_page",
+            "interview",
+            "database",
+            "video",
+            "audio",
+            "PDF"
+          ]
+        },
+        "title": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "bibliography": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "publisher": {
+          "type": "string"
+        },
+        "publication_date": {
+          "type": "string"
+        },
+        "url": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "alternate_urls": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+          }
+        },
+        "doi": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "isbn": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/non_empty_string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "archive": {
+          "$ref": "normalized_product_import_v1.schema.json#/$defs/archive"
+        }
+      },
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": [
+                "doi"
+              ]
+            },
+            {
+              "required": [
+                "isbn"
+              ]
+            },
+            {
+              "required": [
+                "url"
+              ]
+            },
+            {
+              "required": [
+                "bibliography"
+              ]
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "required": [
+                "title"
+              ]
+            },
+            {
+              "required": [
+                "bibliography"
+              ]
+            },
+            {
+              "required": [
+                "url"
+              ]
+            }
+          ]
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

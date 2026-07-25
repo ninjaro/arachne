@@ -2,7 +2,13 @@ import { useCallback, useRef, useState } from "react";
 import type { Domain, EntityId, Ratings } from "../lib/types";
 import type { RateHandler } from "./common";
 import { ConceptChips, RatingButtons } from "./common";
-import { dateLabel, humanize, moneyLabel } from "../lib/format";
+import {
+  dateLabel,
+  externalUrl,
+  humanize,
+  moneyLabel,
+  schemeLabel,
+} from "../lib/format";
 
 interface WindowState {
   id: EntityId;
@@ -247,19 +253,31 @@ export function FloatingEntityWindows({
                 <section>
                   <h3>Identifiers</h3>
                   <ul className="plain-list">
-                    {work.identifiers.map((identifier) => (
-                      <li key={`${identifier.scheme}:${identifier.value}`}>
-                        {identifier.url ? (
-                          <a href={identifier.url} target="_blank" rel="noreferrer">
-                            {humanize(identifier.scheme)}: {identifier.value}
-                          </a>
-                        ) : (
-                          <>
-                            {humanize(identifier.scheme)}: {identifier.value}
-                          </>
-                        )}
-                      </li>
-                    ))}
+                    {work.identifiers.map((identifier) => {
+                      const url = externalUrl(
+                        identifier.scheme,
+                        identifier.value,
+                        identifier.url,
+                      );
+                      return (
+                        <li key={`${identifier.scheme}:${identifier.value}`}>
+                          {url ? (
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              {schemeLabel(identifier.scheme)}: {identifier.value}
+                            </a>
+                          ) : (
+                            <>
+                              {schemeLabel(identifier.scheme)}: {identifier.value}
+                            </>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 </section>
               ) : null}

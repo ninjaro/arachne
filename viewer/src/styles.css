@@ -651,3 +651,234 @@ tbody tr:focus {
     margin-left: 0;
   }
 }
+
+
+/* Research queue */
+.tab-count {
+  display: inline-grid;
+  min-width: 1.3rem;
+  height: 1.3rem;
+  margin-left: 0.4rem;
+  padding: 0 0.3rem;
+  place-items: center;
+  border-radius: 999px;
+  color: #ffe3e3;
+  background: #6a3035;
+  font-size: 0.7rem;
+}
+
+.tab.active .tab-count {
+  color: #fff;
+  background: #7b3036;
+}
+
+.research-view {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.research-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  gap: 0.65rem;
+  margin-bottom: 0.8rem;
+}
+
+.research-summary > div {
+  display: flex;
+  flex-direction: column;
+  padding: 0.85rem;
+  border: 1px solid #30373a;
+  border-radius: 0.6rem;
+  background: #171b1d;
+}
+
+.research-summary strong {
+  font-size: 1.45rem;
+}
+
+.research-summary span {
+  color: #9da7aa;
+  font-size: 0.8rem;
+}
+
+.research-summary .problem {
+  border-color: #6a383c;
+  background: #24191b;
+}
+
+.research-filters {
+  display: grid;
+  grid-template-columns: minmax(260px, 2fr) repeat(3, minmax(140px, 0.8fr)) auto auto;
+  gap: 0.55rem;
+  margin-bottom: 0.75rem;
+}
+
+.research-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.55rem;
+  white-space: nowrap;
+}
+
+.research-count {
+  color: #9da7aa;
+  font-size: 0.84rem;
+}
+
+.research-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.research-card {
+  padding: 0.85rem;
+  border: 1px solid #343c40;
+  border-left-width: 4px;
+  border-radius: 0.65rem;
+  background: #151a1c;
+}
+
+.research-card.severity-problem {
+  border-left-color: #cf6d73;
+}
+
+.research-card.severity-weak {
+  border-left-color: #cfaa5d;
+}
+
+.research-card.severity-info {
+  border-left-color: #6a9caf;
+}
+
+.research-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.research-card h3 {
+  margin: 0.45rem 0 0.25rem;
+}
+
+.research-card p {
+  margin: 0.2rem 0;
+  color: #b9c1c4;
+}
+
+.research-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.research-badge {
+  padding: 0.18rem 0.42rem;
+  border-radius: 999px;
+  color: #c5ccce;
+  background: #262d30;
+  font-size: 0.72rem;
+}
+
+.research-badge.kind-conflict,
+.research-badge.severity-problem {
+  color: #ffd6d8;
+  background: #51282c;
+}
+
+.research-badge.kind-remainder,
+.research-badge.severity-weak {
+  color: #f2ddb1;
+  background: #4b3a20;
+}
+
+.research-badge.kind-quality_gap {
+  color: #c9e1e8;
+  background: #263f48;
+}
+
+.quality-meter {
+  position: relative;
+  height: 1.45rem;
+  margin: 0.75rem 0;
+  overflow: hidden;
+  border: 1px solid #343c40;
+  border-radius: 999px;
+  background: #0f1315;
+}
+
+.quality-meter > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #844047, #c5a45d, #4b9b70);
+}
+
+.quality-meter > strong {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.72rem;
+  text-shadow: 0 1px 2px #000;
+}
+
+.research-field {
+  color: #aab3b6;
+}
+
+.research-details {
+  margin: 0.6rem 0;
+  padding-left: 1.25rem;
+  color: #c1c8ca;
+}
+
+.research-card details {
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #2e3639;
+  border-radius: 0.45rem;
+  background: #111618;
+}
+
+.research-card summary {
+  cursor: pointer;
+  color: #b9c5c8;
+}
+
+.research-card pre {
+  max-height: 24rem;
+  margin: 0.55rem 0 0;
+  padding: 0.65rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #d7dcde;
+  background: #0c1012;
+  border-radius: 0.35rem;
+}
+
+@media (max-width: 950px) {
+  .research-summary {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .research-filters {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+
+  .research-filters input[type="search"] {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .research-summary,
+  .research-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .research-card-header {
+    flex-direction: column;
+  }
+}

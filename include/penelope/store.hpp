@@ -126,11 +126,17 @@ public:
 
     /**
      * Atomically migrate a standalone canonical product database to the current
-     * schema. The source is never modified before a migrated, vacuumed sibling
-     * staging copy passes all integrity checks.
+     * schema. Schema-v3 databases require the equivalent normalized-product-v3
+     * manifest so compact keys can be rebuilt without retaining legacy-ID
+     * mappings. The source is never modified before a migrated, vacuumed
+     * sibling staging database passes semantic and structural checks.
      */
     [[nodiscard]] static product_database_migration_result
-    migrate_product_database(const std::filesystem::path& database_path);
+    migrate_product_database(
+        const std::filesystem::path& database_path,
+        const std::optional<std::filesystem::path>& normalized_manifest_path
+        = std::nullopt
+    );
 
     [[nodiscard]] snapshot_result
     replace_candidate_snapshot(const candidate_snapshot_request& request);

@@ -12,6 +12,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <filesystem>
@@ -344,6 +345,35 @@ json normalized_product_manifest_v2() {
     result["references"][0]["canonical_id"] = "source_example_article";
     result["references"][0]["alternate_urls"]
         = json::array({ "https://example.test/source/1?view=full" });
+    return result;
+}
+
+json normalized_product_manifest_v3() {
+    json result = normalized_product_manifest_v2();
+    result["contract"] = "normalized_product_import_v3";
+    result["format_version"] = 3;
+    result.erase("entity_redirects");
+    result.erase("source_redirects");
+
+    result["creators"][0]["canonical_id"] = "agent-000001";
+    result["works"][0]["canonical_id"] = "work-000001";
+    result["manifestations"][0]["canonical_id"] = "manifestation-000001";
+    result["tags"][0]["canonical_id"] = "concept-000001";
+    result["tags"][1]["canonical_id"] = "concept-000002";
+    for (auto& tag : result["tags"]) {
+        tag.erase("slug_aliases");
+    }
+    for (auto& source : result["references"]) {
+        source.erase("canonical_id");
+    }
+    return result;
+}
+
+json normalized_product_manifest_v2_with_readable_top_level_ids() {
+    json result = normalized_product_manifest_v2();
+    result["creators"][0]["canonical_id"] = "agent-000001";
+    result["works"][0]["canonical_id"] = "work-000001";
+    result["manifestations"][0]["canonical_id"] = "manifestation-000001";
     return result;
 }
 
@@ -804,6 +834,401 @@ TEST(
 }
 
 TEST(
+    PenelopeStore, DirectNormalizedV3UsesReadableEntitiesAndIntegerInternalKeys
+) {
+    temporary_tree tree;
+    json manifest = normalized_product_manifest_v3();
+    manifest["references"][0]["archive"] = {
+        { "storage_ref", "archives/example-source.html" },
+        { "sha256", std::string(64, 'a') },
+        { "media_type", "text/html" },
+        { "scope", "full" },
+        { "rights_note", "test fixture" },
+    };
+
+    const fs::path manifest_path = tree.path / "v3.json";
+    const fs::path database_path = tree.path / "canonical-v4.sqlite";
+    write_file(manifest_path, manifest.dump());
+    const auto imported = store::import_normalized_product(
+        { .manifest_path = manifest_path, .database_path = database_path }
+    );
+
+    EXPECT_EQ(imported.entity_count, 5U);
+    EXPECT_EQ(imported.work_count, 1U);
+    EXPECT_EQ(imported.assertion_count, 3U);
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA user_version"), "4");
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT group_concat(id,'|') FROM "
+            "(SELECT id FROM entities ORDER BY id)"
+        ),
+        "agent-000001|concept-000001|concept-000002|"
+        "manifestation-000001|work-000001"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT entity_id FROM concepts WHERE slug='test-concept-1'"
+        ),
+        "concept-000001"
+    );
+
+    static constexpr std::array<std::string_view, 16> internal_tables {
+        "names",
+        "external_ids",
+        "credits",
+        "measurements",
+        "financial_facts",
+        "remote_assets",
+        "sources",
+        "source_urls",
+        "source_archives",
+        "evidence",
+        "work_concepts",
+        "concept_relations",
+        "work_concept_evidence",
+        "concept_relation_evidence",
+        "parent_guide_assertions",
+        "parent_guide_evidence",
+    };
+    for (const std::string_view table : internal_tables) {
+        const std::string primary_key_query
+            = "SELECT upper(type)||'|'||pk FROM pragma_table_info('"
+            + std::string(table) + "') WHERE name='id'";
+        EXPECT_EQ(
+            scalar_text(database_path, primary_key_query.c_str()), "INTEGER|1"
+        ) << table;
+
+        const std::string stored_key_query = "SELECT count(*) FROM "
+            + std::string(table) + " WHERE typeof(id)<>'integer'";
+        EXPECT_EQ(scalar_text(database_path, stored_key_query.c_str()), "0")
+            << table;
+
+        const std::string logical_unique_query
+            = "SELECT count(*) FROM pragma_index_list('" + std::string(table)
+            + "') WHERE [unique]=1";
+        EXPECT_NE(scalar_text(database_path, logical_unique_query.c_str()), "0")
+            << table;
+    }
+
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT typeof(e.id)||'|'||typeof(e.source_id)||'|'||"
+            "typeof(wce.assertion_id)||'|'||typeof(wce.evidence_id) "
+            "FROM evidence e JOIN work_concept_evidence wce "
+            "ON wce.evidence_id=e.id LIMIT 1"
+        ),
+        "integer|integer|integer|integer"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT typeof(id)||'|'||typeof(source_id)||'|'||length(sha256) "
+            "FROM source_archives"
+        ),
+        "integer|integer|64"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM entities WHERE length(id)=64 "
+            "OR id GLOB 'con_*'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE name IN "
+            "('entity_redirects','source_redirects','concept_slug_aliases') "
+            "OR lower(COALESCE(sql,'')) LIKE '%entity_redirects%' "
+            "OR lower(COALESCE(sql,'')) LIKE '%source_redirects%' "
+            "OR lower(COALESCE(sql,'')) LIKE '%concept_slug_aliases%'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE type='index' "
+            "AND name='sources_url_unique'"
+        ),
+        "1"
+    );
+
+    EXPECT_THROW(
+        execute_sql(
+            database_path,
+            "INSERT INTO names"
+            "(entity_id,name_type,language_code,script_code,value,is_preferred)"
+            " "
+            "SELECT entity_id,name_type,language_code,script_code,value,0 "
+            "FROM names ORDER BY id LIMIT 1"
+        ),
+        std::runtime_error
+    );
+    EXPECT_THROW(
+        execute_sql(
+            database_path,
+            "INSERT INTO sources(source_type,title,url) "
+            "SELECT source_type,'Duplicate natural source',url "
+            "FROM sources WHERE url IS NOT NULL LIMIT 1"
+        ),
+        std::runtime_error
+    );
+    EXPECT_THROW(
+        execute_sql(
+            database_path,
+            "INSERT INTO work_concepts"
+            "(work_id,concept_id,relation_type,centrality,historical_role,"
+            "confidence) "
+            "SELECT work_id,concept_id,relation_type,centrality,"
+            "historical_role,confidence FROM work_concepts LIMIT 1"
+        ),
+        std::runtime_error
+    );
+    EXPECT_THROW(
+        execute_sql(
+            database_path,
+            "INSERT INTO evidence"
+            "(source_id,source_archive_id,exact_quote,quote_language,"
+            "quote_translation,locator_json,stance) "
+            "SELECT source_id,source_archive_id,exact_quote,quote_language,"
+            "quote_translation,locator_json,stance FROM evidence LIMIT 1"
+        ),
+        std::runtime_error
+    );
+    EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA integrity_check"), "ok");
+    expect_no_sqlite_sidecars(database_path);
+}
+
+TEST(PenelopeStore, ProductV4RejectsEvidenceArchiveFromDifferentSource) {
+    temporary_tree tree;
+    json manifest = normalized_product_manifest_v3();
+    manifest["references"][0]["archive"] = {
+        { "storage_ref", "archives/primary-source.html" },
+        { "sha256", std::string(64, 'a') },
+        { "media_type", "text/html" },
+        { "scope", "full" },
+    };
+    manifest["references"].push_back(
+        { { "ref_id", "ref-2" },
+          { "source_type", "book" },
+          { "bibliography", "Independent archive source" },
+          { "archive",
+            { { "storage_ref", "archives/independent-source.txt" },
+              { "sha256", std::string(64, 'b') },
+              { "media_type", "text/plain" },
+              { "scope", "full" } } } }
+    );
+
+    const fs::path manifest_path = tree.path / "v3.json";
+    const fs::path database_path = tree.path / "canonical-v4.sqlite";
+    write_file(manifest_path, manifest.dump());
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = manifest_path, .database_path = database_path }
+    ));
+    ASSERT_EQ(
+        scalar_text(database_path, "SELECT count(*) FROM source_archives"), "2"
+    );
+
+    static constexpr std::string_view mismatched_archive {
+        "(SELECT archive.id FROM source_archives archive "
+        "JOIN sources source ON source.id=archive.source_id "
+        "WHERE source.bibliography_text='Independent archive source')"
+    };
+    EXPECT_THROW(
+        execute_sql(
+            database_path,
+            "INSERT INTO evidence"
+            "(source_id,source_archive_id,exact_quote,stance) VALUES("
+            "(SELECT id FROM sources WHERE "
+            "url='https://example.test/source/1'),"
+                + std::string(mismatched_archive)
+                + ",'Cross-source archive insertion','supports')"
+        ),
+        std::runtime_error
+    );
+    EXPECT_THROW(
+        execute_sql(
+            database_path,
+            "UPDATE evidence SET source_archive_id="
+                + std::string(mismatched_archive)
+                + " WHERE exact_quote='Verbatim support 1'"
+        ),
+        std::runtime_error
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM evidence WHERE "
+            "exact_quote='Cross-source archive insertion'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM evidence e JOIN source_archives a "
+            "ON a.id=e.source_archive_id WHERE e.source_id<>a.source_id"
+        ),
+        "0"
+    );
+    EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA integrity_check"), "ok");
+    expect_no_sqlite_sidecars(database_path);
+}
+
+TEST(PenelopeStore, DirectNormalizedV3RejectsLegacyAndHashedIdentifiers) {
+    temporary_tree tree;
+    std::vector<std::pair<std::string, json>> invalid;
+    const auto add = [&](std::string name, const auto& mutate) {
+        json manifest = normalized_product_manifest_v3();
+        mutate(manifest);
+        invalid.emplace_back(std::move(name), std::move(manifest));
+    };
+    add("hashed-concept-id", [](json& value) {
+        value["tags"][0]["canonical_id"] = "con_" + std::string(64, 'a');
+    });
+    add("short-agent-id", [](json& value) {
+        value["creators"][0]["canonical_id"] = "agent-00001";
+    });
+    add("missing-work-id",
+        [](json& value) { value["works"][0].erase("canonical_id"); });
+    add("source-canonical-id", [](json& value) {
+        value["references"][0]["canonical_id"] = "source-000001";
+    });
+    add("concept-slug-alias", [](json& value) {
+        value["tags"][0]["slug_aliases"] = json::array({ "legacy-concept" });
+    });
+    add("entity-redirects",
+        [](json& value) { value["entity_redirects"] = json::array(); });
+
+    for (const auto& [name, manifest] : invalid) {
+        const fs::path manifest_path = tree.path / (name + ".json");
+        const fs::path database_path = tree.path / (name + ".sqlite");
+        write_file(manifest_path, manifest.dump());
+        EXPECT_THROW(
+            static_cast<void>(store::import_normalized_product(
+                { .manifest_path = manifest_path,
+                  .database_path = database_path }
+            )),
+            arachne::penelope::store_error
+        ) << name;
+        EXPECT_FALSE(fs::exists(database_path)) << name;
+        expect_no_sqlite_sidecars(database_path);
+    }
+}
+
+TEST(PenelopeStore, DirectNormalizedV3RebuildIsOrderIndependent) {
+    temporary_tree tree;
+    store persistence(tree.path / "store");
+    json first_manifest = normalized_product_manifest_v3();
+    first_manifest["references"][0]["alternate_urls"].push_back(
+        "https://example.test/source/1?view=reader"
+    );
+    first_manifest["references"].push_back(
+        { { "ref_id", "ref-2" },
+          { "source_type", "book" },
+          { "title", "Second deterministic source" },
+          { "bibliography", "Second deterministic source, 2026" },
+          { "alternate_urls",
+            json::array(
+                { "https://example.test/source/2?view=full",
+                  "https://example.test/source/2?view=reader" }
+            ) } }
+    );
+    json second_assertion = first_manifest["assertions"][0];
+    second_assertion["tag"] = "tag-2";
+    second_assertion["relation"] = "contains";
+    second_assertion["weight"] = 55;
+    second_assertion["historical_role"] = "peripheral";
+    second_assertion["evidence"] = json::array(
+        { { { "ref_id", "ref-2" },
+            { "quote", "Second source support" },
+            { "locator", { { "page", 7 } } },
+            { "stance", "supports" } },
+          { { "ref_id", "ref-1" },
+            { "quote", "Additional first-source support" },
+            { "locator", { { "paragraph", 4 } } },
+            { "stance", "contextualizes" } } }
+    );
+    first_manifest["assertions"].push_back(std::move(second_assertion));
+    json second_credit = first_manifest["credits"][0];
+    second_credit["role"] = "producer";
+    second_credit["importance"] = "supporting";
+    first_manifest["credits"].push_back(std::move(second_credit));
+
+    json reordered_manifest = first_manifest;
+    for (const std::string_view family :
+         { "creators", "works", "tags", "manifestations", "measurements",
+           "financial_facts", "remote_assets", "credits", "references",
+           "assertions", "concept_relations", "parent_guide_assertions" }) {
+        std::ranges::reverse(reordered_manifest[family]);
+    }
+    for (auto& creator : reordered_manifest["creators"]) {
+        if (creator.contains("names")) {
+            std::ranges::reverse(creator["names"]);
+        }
+    }
+    for (auto& work : reordered_manifest["works"]) {
+        std::ranges::reverse(work["titles"]);
+    }
+    for (auto& tag : reordered_manifest["tags"]) {
+        if (tag.contains("names")) {
+            std::ranges::reverse(tag["names"]);
+        }
+    }
+    for (auto& source : reordered_manifest["references"]) {
+        if (source.contains("alternate_urls")) {
+            std::ranges::reverse(source["alternate_urls"]);
+        }
+    }
+    for (const std::string_view family :
+         { "assertions", "concept_relations", "parent_guide_assertions" }) {
+        for (auto& assertion : reordered_manifest[family]) {
+            std::ranges::reverse(assertion["evidence"]);
+        }
+    }
+
+    const fs::path first_manifest_path = tree.path / "first.json";
+    const fs::path second_manifest_path = tree.path / "reordered.json";
+    const fs::path first_database = tree.path / "first.sqlite";
+    const fs::path second_database = tree.path / "second.sqlite";
+    write_file(first_manifest_path, first_manifest.dump());
+    write_file(second_manifest_path, reordered_manifest.dump());
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = first_manifest_path,
+          .database_path = first_database }
+    ));
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = second_manifest_path,
+          .database_path = second_database }
+    ));
+
+    const fs::path first_export = tree.path / "first.jsonl";
+    const fs::path second_export = tree.path / "second.jsonl";
+    static_cast<void>(persistence.export_jsonl(
+        graph_domain::product, first_database, first_export
+    ));
+    static_cast<void>(persistence.export_jsonl(
+        graph_domain::product, second_database, second_export
+    ));
+    EXPECT_EQ(read_file(first_export), read_file(second_export));
+    EXPECT_TRUE(
+        persistence.integrity_check(graph_domain::product, first_database).ok
+    );
+    EXPECT_TRUE(
+        persistence.integrity_check(graph_domain::product, second_database).ok
+    );
+    expect_no_sqlite_sidecars(first_database);
+    expect_no_sqlite_sidecars(second_database);
+}
+
+TEST(
     PenelopeStore,
     ProductV2ToV3MigrationDropsOnlyLegacyCompatibilityMetadata
 ) {
@@ -951,6 +1376,144 @@ INSERT INTO concept_slug_aliases(slug,concept_id)
     EXPECT_TRUE(
         persistence.integrity_check(graph_domain::product, database_path).ok
     );
+    expect_no_sqlite_sidecars(database_path);
+}
+
+TEST(
+    PenelopeStore, ProductV3ToV4MigrationRekeysRowsWithoutCompatibilityMappings
+) {
+    temporary_tree tree;
+    const fs::path v2_manifest_path = tree.path / "normalized-v2.json";
+    const fs::path v3_manifest_path = tree.path / "normalized-v3.json";
+    const fs::path database_path = tree.path / "canonical.sqlite";
+    write_file(
+        v2_manifest_path,
+        normalized_product_manifest_v2_with_readable_top_level_ids().dump()
+    );
+    write_file(v3_manifest_path, normalized_product_manifest_v3().dump());
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = v2_manifest_path, .database_path = database_path }
+    ));
+
+    ASSERT_EQ(scalar_text(database_path, "PRAGMA user_version"), "3");
+    ASSERT_EQ(scalar_text(database_path, "SELECT count(*) FROM entities"), "5");
+    ASSERT_EQ(scalar_text(database_path, "SELECT count(*) FROM evidence"), "3");
+    ASSERT_EQ(
+        scalar_text(
+            database_path, "SELECT count(*) FROM work_concept_evidence"
+        ),
+        "1"
+    );
+
+    const auto migrated
+        = store::migrate_product_database(database_path, v3_manifest_path);
+    EXPECT_EQ(migrated.database_path, fs::absolute(database_path));
+    EXPECT_EQ(migrated.previous_schema_version, 3);
+    EXPECT_EQ(migrated.schema_version, 4);
+    EXPECT_TRUE(migrated.changed);
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA user_version"), "4");
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT group_concat(id,'|') FROM "
+            "(SELECT id FROM entities ORDER BY id)"
+        ),
+        "agent-000001|concept-000001|concept-000002|"
+        "manifestation-000001|work-000001"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT work_id||'|'||concept_id||'|'||relation_type "
+            "FROM work_concepts"
+        ),
+        "work-000001|concept-000001|exemplifies"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT typeof(wc.id)||'|'||typeof(e.id)||'|'||"
+            "typeof(e.source_id)||'|'||typeof(link.assertion_id)||'|'||"
+            "typeof(link.evidence_id) "
+            "FROM work_concepts wc "
+            "JOIN work_concept_evidence link ON link.assertion_id=wc.id "
+            "JOIN evidence e ON e.id=link.evidence_id"
+        ),
+        "integer|integer|integer|integer|integer"
+    );
+    EXPECT_EQ(scalar_text(database_path, "SELECT count(*) FROM entities"), "5");
+    EXPECT_EQ(scalar_text(database_path, "SELECT count(*) FROM names"), "6");
+    EXPECT_EQ(
+        scalar_text(database_path, "SELECT count(*) FROM external_ids"), "4"
+    );
+    EXPECT_EQ(scalar_text(database_path, "SELECT count(*) FROM evidence"), "3");
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM sqlite_schema WHERE name IN "
+            "('entity_redirects','source_redirects','concept_slug_aliases') "
+            "OR lower(COALESCE(sql,'')) LIKE '%entity_redirects%' "
+            "OR lower(COALESCE(sql,'')) LIKE '%source_redirects%' "
+            "OR lower(COALESCE(sql,'')) LIKE '%concept_slug_aliases%'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(
+        scalar_text(
+            database_path,
+            "SELECT count(*) FROM entities WHERE length(id)=64 "
+            "OR id GLOB 'con_*'"
+        ),
+        "0"
+    );
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA freelist_count"), "0");
+    EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA integrity_check"), "ok");
+
+    const auto repeated
+        = store::migrate_product_database(database_path, v3_manifest_path);
+    EXPECT_EQ(repeated.previous_schema_version, 4);
+    EXPECT_EQ(repeated.schema_version, 4);
+    EXPECT_FALSE(repeated.changed);
+    EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA integrity_check"), "ok");
+    expect_no_sqlite_sidecars(database_path);
+}
+
+TEST(PenelopeStore, ProductV3ToV4MigrationRejectsMismatchAtomically) {
+    temporary_tree tree;
+    const fs::path v2_manifest_path = tree.path / "normalized-v2.json";
+    const fs::path bad_manifest_path = tree.path / "mismatched-v3.json";
+    const fs::path database_path = tree.path / "canonical.sqlite";
+    write_file(
+        v2_manifest_path,
+        normalized_product_manifest_v2_with_readable_top_level_ids().dump()
+    );
+    static_cast<void>(store::import_normalized_product(
+        { .manifest_path = v2_manifest_path, .database_path = database_path }
+    ));
+    ASSERT_EQ(scalar_text(database_path, "PRAGMA user_version"), "3");
+    const std::string original_bytes = read_file(database_path);
+
+    EXPECT_THROW(
+        static_cast<void>(store::migrate_product_database(database_path)),
+        arachne::penelope::store_error
+    );
+    EXPECT_EQ(read_file(database_path), original_bytes);
+
+    json mismatched = normalized_product_manifest_v3();
+    mismatched["concept_relations"] = json::array();
+    write_file(bad_manifest_path, mismatched.dump());
+    EXPECT_THROW(
+        static_cast<void>(
+            store::migrate_product_database(database_path, bad_manifest_path)
+        ),
+        arachne::penelope::store_error
+    );
+    EXPECT_EQ(read_file(database_path), original_bytes);
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA user_version"), "3");
+    EXPECT_TRUE(scalar_text(database_path, "PRAGMA foreign_key_check").empty());
+    EXPECT_EQ(scalar_text(database_path, "PRAGMA integrity_check"), "ok");
     expect_no_sqlite_sidecars(database_path);
 }
 

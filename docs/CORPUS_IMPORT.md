@@ -62,41 +62,50 @@ read-only.
 
 ## Normalization surface
 
-The initial whole-corpus adapter emits
-[`normalized_product_import_v1`](../contracts/artifacts/normalized_product_import_v1.schema.json).
-Reviewed identity consolidation upgrades that artifact to
-[`normalized_product_import_v2`](../contracts/artifacts/normalized_product_import_v2.schema.json).
-Both are internal, corpus-derived data-file formats consumed by Penelope. They
-are not `mining_batch_v1`, future Arachne batch manifests, or a reason to force
-later miner submissions into the legacy corpus's shapes.
+The whole-corpus adapter, reviewed consolidation, and inbox cleanup now emit
+[`normalized_product_import_v3`](../contracts/artifacts/normalized_product_import_v3.schema.json).
+The older
+[`normalized_product_import_v1`](../contracts/artifacts/normalized_product_import_v1.schema.json)
+and
+[`normalized_product_import_v2`](../contracts/artifacts/normalized_product_import_v2.schema.json)
+remain accepted as legacy inputs, but newly normalized, consolidated, or
+cleaned artifacts use v3. These are internal, corpus-derived data-file formats
+consumed by Penelope. They are not `mining_batch_v1`, future Arachne batch
+manifests, or a reason to force later miner submissions into the legacy
+corpus's shapes.
 
-The v2 root contains only:
+The v3 root contains only:
 
-- `contract: "normalized_product_import_v2"` and `format_version: 2`;
+- `contract: "normalized_product_import_v3"` and `format_version: 3`;
 - canonical arrays named `creators`, `works`, `tags`, `manifestations`,
   `measurements`, `financial_facts`, `remote_assets`, `credits`, `references`,
-  `assertions`, `concept_relations`, and `parent_guide_assertions`;
-- direct `entity_redirects` and `source_redirects` for reviewed retired
-  identities.
+  `assertions`, `concept_relations`, and `parent_guide_assertions`.
 
-Every creator, work, manifestation, concept, and source carries an explicit safe
-`canonical_id`. Concepts retain nonpreferred names and old slugs; sources retain
-alternate URLs. Redirect aliases cannot remain live, target another redirect,
-cross entity types, or point outside the active graph. Local IDs are
-transfer-local references only. The manifest does not contain batch names,
-filenames, run IDs, miner/model data, timestamps, input-container or batch
-hashes, queue state, or integration history.
+Creators, works, concepts, and manifestations carry explicit readable
+category-specific `canonical_id` values identical to their transfer-local IDs:
+`agent-000001`, `work-000001`, `concept-000001`, and
+`manifestation-000001`. Sources use only their `ref_id` transfer handle.
+Concepts retain nonpreferred human-readable names, and sources retain alternate
+URLs. The manifest contains no redirect arrays, source compatibility IDs,
+concept slug aliases, batch names, filenames, run IDs, miner/model data,
+timestamps, input-container or batch hashes, queue state, or integration
+history.
 Scholarly archive checksums remain permitted on a source archive when the
 underlying captured artifact actually exists; they are evidence fields, not an
 input identity or import prerequisite.
 
-The v2 manifest remains a consolidation and rebase artifact, so it preserves
-reviewed retired IDs and old slugs even though they are not product records.
-Penelope validates those compatibility fields before mutation but deliberately
-does not materialize them in product schema v3. The final database therefore has
-no `entity_redirects`, `source_redirects`, or `concept_slug_aliases` tables.
-Human-readable aliases in `names` and additional checked locators in
-`source_urls` are canonical research data and remain.
+Those transfer identifiers do not imply that every product table has a text
+primary key. Product schema v4 preserves the four readable canonical entity
+families as text. It assigns row-local integer primary keys to sources and to
+internal, assertion, evidence, archive, and relationship records. Composite
+`UNIQUE` constraints preserve their logical identities, and all foreign keys
+reference the new keys directly.
+
+When a v1 or v2 manifest is rebased, the cleanup path matches records using
+direct natural identity evidence, rewrites every relationship to the surviving
+readable IDs, and discards compatibility-only IDs and mappings. Human-readable
+aliases in `names` and additional checked locators in `alternate_urls` are
+canonical research data and remain.
 
 The adapter applies only mechanical aliases whose meaning is unchanged:
 
@@ -149,14 +158,17 @@ Records are never merged on a person name or work title alone. A trusted
 creator object without an authority ID remains a distinct submitted entity;
 repeated names are not collapsed or treated as uniqueness keys. Conflicting
 authority identifiers, incomplete work composites, manual-review
-reconciliation entries, and deferred mappings stay unresolved. V1 derives
-concepts from a stable normalized slug with an exact canonical concept type.
-Sources join transitively on exact DOI, ISBN, or URL identities; bibliographic
-prose is used only when neither record supplies one of those stronger
-identifiers. This prevents distinct web pages from collapsing merely because
-they share a generic citation. V2 freezes accepted identities as explicit IDs.
-It never performs new implicit semantic source coalescing: later identity
-changes require a reviewed plan, retained aliases, and redirects.
+reconciliation entries, and deferred mappings stay unresolved. The historical
+v1 adapter derived concepts from a stable normalized slug with an exact
+canonical concept type. Sources join transitively on exact DOI, ISBN, or URL
+identities; bibliographic prose is used only when neither record supplies one
+of those stronger identifiers. This prevents distinct web pages from
+collapsing merely because they share a generic citation. Historical v2 froze
+accepted concepts and sources as explicit hash-based IDs and carried reviewed
+redirect and slug-alias metadata. V3 replaces that compatibility surface with
+final readable concept IDs, source transfer references, and direct
+relationships. Later semantic identity changes still require an explicit
+reviewed merge plan.
 
 All documents are staged before dependency resolution. The temporary graph is
 resolved independent of container and array order, then serialized in stable
@@ -210,9 +222,11 @@ python3 scripts/normalize_legacy_batches.py \
   --unresolved corpus-import/consolidated-unresolved.json
 ```
 
-Compile the reviewed audits once against the pre-consolidation v1 manifest. The
+Compile the reviewed audits once against the pre-consolidation manifest. The
 resulting plan is a durable semantic input: it must be retained because retired
-local IDs cannot be reconstructed from the consolidated graph.
+local IDs cannot be reconstructed from the consolidated graph. Existing plans
+compiled from v2 reports remain valid because the plan records readable local
+IDs; newly authored reports should name those readable concept IDs directly.
 
 ```sh
 python3 scripts/build_canonical_merge_plan.py \
@@ -257,37 +271,49 @@ The command requires no run ID, configuration file, input checksum, cocoon,
 ledger, or backup. Its JSON result reports the activated database path and
 aggregate entity, work, and assertion counts.
 
-Normalized v2 imports materialize product schema v3. All relationships reference
-the live canonical entity or source IDs directly. Schema v3 removes the three
-legacy compatibility tables, their indexes and triggers, and the redundant
-`entities(id, entity_type)` uniqueness constraint that existed only for the
-entity-redirect foreign key. It retains `sources_url_unique`, because distinct
-source IDs must not claim the same primary URL, as well as the `source_urls`
-uniqueness and primary/alternate collision guards.
+The current normalized v3 import materializes product schema v4 directly.
+Canonical entities keep readable text IDs. Internal rows—including sources,
+names, external identifiers, credits, measurements, financial facts, remote
+assets, source archives, evidence, work-concept assertions, concept relations,
+parent-guide assertions, and their junction rows—use integer primary keys.
+Natural and composite uniqueness indexes replace identity hashes.
+`sources_url_unique`, DOI/ISBN/fallback source uniqueness, alternate-URL
+uniqueness, and primary/alternate URL collision guards remain because they
+enforce product deduplication rather than backward compatibility.
 
-Migrate an existing standalone v2 product database through the same boundary:
+Migrating an existing schema-v3 product database to compact schema v4 requires
+the equivalent normalized v3 manifest:
 
 ```sh
 <arachne-binary> product migrate-database \
-  --database database/art-islands.sqlite
+  --database database/art-islands.sqlite \
+  --manifest corpus-import/normalized-product-import.json
 ```
 
 The result reports the previous and activated schema versions and whether it
-changed the database. The v2-to-v3 migration runs only inside Penelope's
-database boundary, preserves every surviving row and stable ID, sets
-`PRAGMA user_version` to `3`, and runs `VACUUM` before the final foreign-key,
-integrity, checkpoint, and atomic activation checks. Do not remove these objects
-manually from a canonical database.
+changed the database. Penelope builds a fresh schema-v4 staging database from
+the manifest, verifies semantic equivalence with the schema-v3 source, runs
+`VACUUM`, and performs foreign-key, integrity, checkpoint, and atomic activation
+checks. It creates no compatibility or old-ID mapping tables.
+
+Schema v2 has two explicit paths. Without `--manifest`, `migrate-database`
+performs only the historical v2-to-v3 metadata cleanup: it drops redirect and
+slug-alias structures, preserves surviving text IDs, sets `PRAGMA user_version`
+to `3`, and vacuums. With an equivalent normalized v3 manifest, a schema-v2
+database can instead be rebuilt directly as schema v4. Schema-v4 migration is a
+no-op, and schema-v1 databases are not accepted by this migration command. Do
+not edit canonical schema objects manually.
 
 Explicitly authorized cleanup of an Arachne-owned migrated inbox uses the
 guarded wrapper below. It is a write-free dry run unless `--apply` is present.
-The wrapper accepts either the initial v1 normalized surface or the activated
-v2 canonical manifest. A v2 rebase preserves local endpoint IDs separately
-from canonical IDs, retains redirects and aliases in the transfer artifact,
-resolves only exact
-authority, slug/slug-alias, DOI/ISBN/URL/alternate-URL identities, and assigns
-fresh transport IDs above the activated namespaces. Name-only creator matches
-and multi-target identities are quarantined with their dependent rows.
+The wrapper accepts normalized v1, v2, or v3 as existing input but always emits
+v3. During a legacy v2 rebase it may use an old slug alias or alternate URL as
+exact matching evidence, but it does not generate hash IDs, consult redirect
+mappings, or copy compatibility metadata into the result. V2 and v3 rebases
+resolve only exact authority, slug, DOI/ISBN/URL/alternate-URL identities and
+assign fresh readable transport IDs above the live namespaces. Name-only
+creator matches and multi-target identities are quarantined with their
+dependent rows.
 
 ```sh
 python3 scripts/cleanup_merged_inbox.py \
@@ -303,12 +329,11 @@ python3 scripts/cleanup_merged_inbox.py \
 The wrapper consolidates every unresolved fragment and conflict as deterministic
 JSONL, adds canonical entity and relationship context where resolution is known,
 and losslessly includes unimportable container or archive-member bytes as UTF-8
-or base64. Previous canonical IDs, redirects, and accepted records are
-preservation gates, while exact matches and truly new records may be added.
-Semantic synonyms and identities that cannot be resolved mechanically still
-require an explicit reviewed plan or remain in JSONL; the rebase never revives
-a retired canonical ID. The wrapper invokes Penelope through the Arachne CLI;
-it never opens SQLite itself.
+or base64. Existing live records and exact natural identities are preservation
+gates, while exact matches and truly new records may be added. Semantic synonyms
+and identities that cannot be resolved mechanically still require an explicit
+reviewed plan or remain in JSONL. The wrapper invokes Penelope through the
+Arachne CLI; it never opens SQLite itself.
 
 Only after a successful transactional database activation does the wrapper
 rename the entire inbox to a fixed transient sibling, recreate an empty inbox,

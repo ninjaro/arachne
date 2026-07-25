@@ -122,6 +122,8 @@ class NormalizeLegacyBatchesTests(unittest.TestCase):
         manifest, unresolved = normalize_corpus(self.inbox)
 
         self.assertEqual(set(MANIFEST_ARRAYS), set(manifest) - {"contract", "format_version"})
+        self.assertEqual(manifest["contract"], "normalized_product_import_v3")
+        self.assertEqual(manifest["format_version"], 3)
         self.assertEqual(len(manifest["creators"]), 1)
         self.assertEqual(len(manifest["works"]), 1)
         self.assertEqual(len(manifest["credits"]), 1)
@@ -136,6 +138,8 @@ class NormalizeLegacyBatchesTests(unittest.TestCase):
         work = manifest["works"][0]
         self.assertEqual(work["production_info"], {"processes": ["stop motion"]})
         self.assertEqual(work["titles"][0]["script"], "Latn")
+        concept = manifest["tags"][0]
+        self.assertEqual(concept["canonical_id"], concept["local_id"])
         assertion = manifest["assertions"][0]
         self.assertEqual(assertion["weight"], 80)
         self.assertEqual(assertion["evidence"][0]["stance"], "supports")

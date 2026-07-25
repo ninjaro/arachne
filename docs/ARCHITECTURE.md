@@ -16,11 +16,11 @@ Ambiguous semantic content is not guessed or rewritten by automation.
 No strict public Arachne intake manifest exists. The boundary name
 `mining_batch_v1` remains an open, non-normative legacy compatibility marker and
 is never an intake gate. The complete installed corpus has now been observed,
-and that evidence supports the migration-only `normalized_product_import_v1`
-transfer surface, its reviewed `normalized_product_import_v2` consolidation
-successor, and the external consolidated unresolved format described in [Corpus
-Import](CORPUS_IMPORT.md). Those formats do not constrain future miner
-submissions.
+and that evidence supports legacy `normalized_product_import_v1` and
+`normalized_product_import_v2` input formats, the final-record
+`normalized_product_import_v3` transfer surface, and the external consolidated
+unresolved format described in [Corpus Import](CORPUS_IMPORT.md). Those formats
+do not constrain future miner submissions.
 
 ## Actor boundaries
 
@@ -58,7 +58,7 @@ falls back to stale bytes.
 | Internal queue | Arachne | Temporary accumulated working input; earlier arrival normally comes first |
 | Remainders | Arachne | Reserved for future untransferred portions; currently unused because no schema exists |
 | Operational state | Arachne | Queue/run coordination; permanent per-batch audit metadata is not required |
-| Product SQLite | Penelope | Immutable snapshot under `paths.graph_store`; schema v3 contains active canonical records only, and the active snapshot is the durable accepted result versioned through Git LFS |
+| Product SQLite | Penelope | Immutable snapshot under `paths.graph_store`; schema v4 keeps readable canonical entity IDs and compact integer internal keys, and the active snapshot is the durable accepted result versioned through Git LFS |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
 
@@ -112,14 +112,25 @@ simple and deterministic; it never uses LLM or machine-learning inference and mi
 identity gives no semantic priority. Penelope stages a transaction and atomically
 activates the new product SQLite only after structural checks.
 
-Product schema v3 does not retain deleted-ID compatibility structures. Entity
-redirects, source redirects, and old concept slugs may remain in a reviewed
-normalization artifact so later inbox rebases cannot resurrect them, but Penelope
-does not materialize them as product tables. Relationships already point to live
-canonical IDs. Descriptive aliases in `names` and alternate checked source URLs
-remain research data. Primary source URLs stay unique for identity deduplication.
-The v2-to-v3 migration preserves all surviving rows and stable IDs, vacuums the
-staged database, validates foreign keys and integrity, and only then activates it.
+`normalized_product_import_v3` is a transfer format, not the SQLite schema
+version. Its readable `agent-*`, `work-*`, `concept-*`, and `manifestation-*`
+IDs become the canonical text IDs in product schema v4. Names, external
+identifiers, credits, measurements, financial facts, assets, sources, archives,
+evidence, assertions, and relationship rows use SQLite `INTEGER PRIMARY KEY`
+values with natural or composite uniqueness constraints. Foreign keys point
+directly to those current keys; no legacy-ID mapping, redirect, or concept-slug
+alias tables exist. Descriptive names and alternate checked source URLs remain
+research data. SHA-256 remains only where it verifies actual content, snapshots,
+or immutable artifacts.
+
+Product schema migrations deliberately distinguish two historical steps.
+Schema v2 to v3 is the metadata-removal migration: without a manifest it drops
+redirect and slug-alias structures while preserving the surviving text IDs.
+Schema v3 to v4 is the compact-ID migration and requires an equivalent
+`normalized_product_import_v3` manifest; Penelope rebuilds a fresh schema-v4
+database, checks semantic equivalence, vacuums it, validates foreign keys and
+integrity, and only then activates it. A schema-v2 database may also be rebuilt
+directly to v4 when that v3 manifest is supplied.
 
 Routine queued processing retains whole-batch fail-before-mutation semantics. The
 separate evidence-derived corpus migration can accept non-conflicting fields while

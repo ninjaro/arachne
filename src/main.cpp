@@ -1324,8 +1324,13 @@ int command_product_migrate_database(const options& arguments) {
     const fs::path database = resolved_path(
         fs::path(arguments.require("--database")), repository_root()
     );
-    const auto result
-        = arachne::penelope::store::migrate_product_database(database);
+    std::optional<fs::path> manifest;
+    if (const auto value = arguments.optional("--manifest")) {
+        manifest = resolved_path(fs::path(*value), repository_root());
+    }
+    const auto result = arachne::penelope::store::migrate_product_database(
+        database, manifest
+    );
     emit(
         ordered_json {
             { "status", "ok" },
@@ -2469,7 +2474,7 @@ int dispatch(const std::vector<std::string>& arguments) {
     if (arguments[1] == "product" && arguments.size() >= 3U
         && arguments[2] == "migrate-database") {
         return command_product_migrate_database(
-            options(arguments, 3U, { "--database" })
+            options(arguments, 3U, { "--database", "--manifest" })
         );
     }
     if (arguments[1] == "candidate" && arguments.size() >= 3U

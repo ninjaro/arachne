@@ -115,6 +115,55 @@ export interface Domain {
   mediumOptions: Array<{ value: string; count: number }>;
 }
 
+export type ResearchKind = "quality_gap" | "conflict" | "remainder";
+export type ResearchSeverity = "info" | "weak" | "problem";
+
+export interface ResearchSource {
+  batchId?: string;
+  container: string;
+  member?: string;
+}
+
+export interface ResearchOccurrence {
+  source: ResearchSource;
+  jsonPointer: string;
+  value?: unknown;
+}
+
+export interface ResearchItem {
+  id: string;
+  kind: ResearchKind;
+  severity: ResearchSeverity;
+  category: string;
+  title: string;
+  message: string;
+  workId?: EntityId;
+  workLabel?: string;
+  field?: string;
+  score?: number;
+  details?: string[];
+  occurrences?: ResearchOccurrence[];
+  dependencies?: unknown[];
+  value?: unknown;
+}
+
+export interface ResearchSummary {
+  total: number;
+  qualityGaps: number;
+  conflicts: number;
+  remainders: number;
+  problems: number;
+  weak: number;
+  info: number;
+}
+
+export interface ResearchData {
+  formatVersion: 1;
+  productSnapshotId: string;
+  summary: ResearchSummary;
+  items: ResearchItem[];
+}
+
 export interface RecommendationSettings {
   likeWeight: number;
   dislikeWeight: number;
