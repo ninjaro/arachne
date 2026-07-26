@@ -47,6 +47,8 @@ from scripts.normalize_legacy_batches import (
     NormalizationError,
     Normalizer,
     _canonical_isni,
+    _decode_json,
+    _is_batch,
     _safe_member,
     load_documents,
 )
@@ -1325,6 +1327,12 @@ def _non_json_lines(
             names = [info.filename for info in infos]
             if len(names) != len(set(names)):
                 raise CleanupError(f"ZIP has duplicate members: {entry.relative_path}")
+            for info in infos:
+                safe, reason = _safe_member(info)
+                if not safe:
+                    raise CleanupError(
+                        f"unsafe ZIP member in {entry.relative_path}: {reason}"
+                    )
             oversized_json = [
                 info
                 for info in infos
@@ -1332,6 +1340,26 @@ def _non_json_lines(
                 and Path(info.filename).suffix.lower() == ".json"
                 and info.file_size > limits.maximum_json_bytes
             ]
+            candidate_members: list[str] = []
+            for info in infos:
+                if (
+                    info.is_dir()
+                    or Path(info.filename).suffix.lower() != ".json"
+                    or info.file_size > limits.maximum_json_bytes
+                ):
+                    continue
+                content = archive.read(info)
+                if len(content) != info.file_size:
+                    raise CleanupError(
+                        f"ZIP member size changed: "
+                        f"{entry.relative_path}:{info.filename}"
+                    )
+                try:
+                    value = _decode_json(content)
+                except NormalizationError:
+                    continue
+                if _is_batch(value):
+                    candidate_members.append(info.filename)
             if oversized_json:
                 encoding, value = _encoded_bytes(entry.content)
                 result.append(
@@ -1348,12 +1376,21 @@ def _non_json_lines(
                         "value": value,
                     }
                 )
+            elif len(candidate_members) != 1:
+                encoding, value = _encoded_bytes(entry.content)
+                result.append(
+                    {
+                        "record_type": "archive_container_bytes",
+                        "format_version": 1,
+                        "category": "ambiguous_archive_container",
+                        "source": {"container": entry.relative_path},
+                        "byte_length": len(entry.content),
+                        "candidate_members": sorted(candidate_members),
+                        "encoding": encoding,
+                        "value": value,
+                    }
+                )
             for info in infos:
-                safe, reason = _safe_member(info)
-                if not safe:
-                    raise CleanupError(
-                        f"unsafe ZIP member in {entry.relative_path}: {reason}"
-                    )
                 if info.is_dir():
                     continue
                 is_json = Path(info.filename).suffix.lower() == ".json"

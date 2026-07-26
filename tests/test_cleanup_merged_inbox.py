@@ -1376,6 +1376,33 @@ print(json.dumps({{'activated': str(database)}}))
         )
         self.assertEqual(container_line["oversized_members"], ["large.json"])
 
+    def test_ambiguous_archive_preserves_exact_container_bytes(self) -> None:
+        archive_stream = io.BytesIO()
+        with zipfile.ZipFile(archive_stream, "w") as archive:
+            archive.writestr("first.json", json.dumps(sample_batch()))
+            archive.writestr("second.json", json.dumps(distinct_batch()))
+        captured = archive_stream.getvalue()
+
+        lines = _non_json_lines(
+            (SnapshotEntry("ambiguous.zip", captured),)
+        )
+
+        container = next(
+            line
+            for line in lines
+            if line["category"] == "ambiguous_archive_container"
+        )
+        self.assertEqual(container["byte_length"], len(captured))
+        self.assertEqual(
+            container["candidate_members"], ["first.json", "second.json"]
+        )
+        restored = (
+            container["value"].encode("utf-8")
+            if container["encoding"] == "utf-8"
+            else base64.b64decode(container["value"])
+        )
+        self.assertEqual(restored, captured)
+
     def test_normalization_collisions_are_exported_with_entity_context(self) -> None:
         (self.inbox / "collisions.json").write_text(
             json.dumps(normalization_collision_batch()), encoding="utf-8"
