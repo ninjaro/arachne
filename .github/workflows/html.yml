@@ -47,13 +47,14 @@ jobs:
           cache: npm
           cache-dependency-path: viewer/package-lock.json
 
-      - name: Install documentation and build dependencies
+            - name: Install documentation and build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             clang \
             graphviz \
             libcurl4-openssl-dev \
++           librapidfuzz-cpp-dev \
             libsqlite3-dev \
             libutf8proc-dev \
             nlohmann-json3-dev
