@@ -4,7 +4,7 @@ PROJECT_BRIEF          = "Arachne - the perpetual stitcher of Wikidata entities.
 PROJECT_ICON           = assets/favicon.ico
 PROJECT_LOGO           = assets/logo.svg
 
-INPUT                  = readme.md include src docs/coverage.dox #tests
+INPUT                  = readme.md include src docs
 IMAGE_PATH             = assets
 EXCLUDE_PATTERNS       = build/*
 RECURSIVE              = YES

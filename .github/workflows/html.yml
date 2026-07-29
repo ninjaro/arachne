@@ -9,6 +9,7 @@ on:
       - 'include/**/*.hpp'
       - 'tests/**'
       - 'scripts/compact_merge_hints.py'
+      - 'scripts/patch_doxygen_pages.py'
       - 'viewer/**'
       - 'database/art-islands.sqlite'
       - 'database/merge-hints-review.json'
@@ -36,6 +37,7 @@ jobs:
         with:
           lfs: true
       - uses: actions/configure-pages@v5
+      - uses: MarkusJx/googletest-installer@28c5d4102d9d57b46254be19a940bf038a9c850a
       - uses: ssciwr/doxygen-install@501e53b879da7648ab392ee226f5b90e42148449
         with:
           version: "1.15.0"
@@ -45,13 +47,41 @@ jobs:
           cache: npm
           cache-dependency-path: viewer/package-lock.json
 
-      - name: Install documentation dependencies
+      - name: Install documentation and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y \
+            clang \
+            graphviz \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
 
       - name: Generate Doxygen
         run: doxygen Doxyfile
+
+      - name: Build coverage report
+        env:
+          LLVM_PROFILE_FILE: ${{ runner.temp }}/arachne-%p.profraw
+        run: |
+          cmake -S . -B build-coverage \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DBUILD_TESTS=ON \
+            -DBUILD_LEGACY_CLIENT=OFF \
+            -DCOVERAGE=ON
+          cmake --build build-coverage --target core_tests --parallel
+          ctest --test-dir build-coverage --output-on-failure
+          llvm-profdata merge -sparse \
+            "${RUNNER_TEMP}"/arachne-*.profraw \
+            -o "${RUNNER_TEMP}/arachne.profdata"
+          llvm-cov show build-coverage/core_tests \
+            -instr-profile="${RUNNER_TEMP}/arachne.profdata" \
+            -format=html \
+            -output-dir=cov \
+            -ignore-filename-regex='/(tests|build-coverage|usr)/'
 
       - name: Build static viewer
         working-directory: viewer
@@ -66,30 +96,14 @@ jobs:
           mkdir -p doc/viewer
           cp -a viewer/dist/. doc/viewer/
 
-      - name: Install coverage status page
+      - name: Install coverage report
         run: |
-          if [[ -d cov ]]; then
-            rm -rf doc/cov
-            cp -a cov doc/cov
-          elif [[ ! -f doc/cov/index.html ]]; then
-            mkdir -p doc/cov
-            cat > doc/cov/index.html <<'EOF'
-          <!doctype html>
-          <html lang="en">
-            <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width,initial-scale=1">
-              <title>Coverage unavailable</title>
-            </head>
-            <body>
-              <main>
-                <h1>Coverage report unavailable</h1>
-                <p>The current Pages build did not produce a coverage report.</p>
-              </main>
-            </body>
-          </html>
-          EOF
-          fi
+          test -f cov/index.html
+          rm -rf doc/cov
+          cp -a cov doc/cov
+
+      - name: Link standalone sites from Doxygen
+        run: python3 scripts/patch_doxygen_pages.py doc
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

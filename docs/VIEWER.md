@@ -3,7 +3,10 @@
 The static viewer is built from the canonical product database and the bounded
 merge-hint review export.
 
-[Open the Arachne viewer](viewer/index.html)
+The viewer is deployed as a standalone site rather than embedded in the
+Doxygen frame.
+
+<a href="../../viewer/" target="_top">Open the Arachne viewer</a>
 
 Generated browser data is disposable. The canonical SQLite database and the
 reviewed merge decisions remain the sources of truth.
