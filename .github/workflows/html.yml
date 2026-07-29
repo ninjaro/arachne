@@ -7,10 +7,16 @@ on:
     paths:
       - 'src/**/*.cpp'
       - 'include/**/*.hpp'
-      - 'tests/**/*.cpp'
+      - 'tests/**'
+      - 'scripts/compact_merge_hints.py'
+      - 'viewer/**'
+      - 'database/art-islands.sqlite'
+      - 'database/merge-hints-review.json'
+      - 'docs/**'
       - 'readme.md'
       - 'Doxyfile'
       - 'CMakeLists.txt'
+      - '.github/workflows/html.yml'
   workflow_dispatch:
 
 permissions:
@@ -27,55 +33,63 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: actions/configure-pages@v5
-      - uses: MarkusJx/googletest-installer@28c5d4102d9d57b46254be19a940bf038a9c850a
       - uses: ssciwr/doxygen-install@501e53b879da7648ab392ee226f5b90e42148449
         with:
           version: "1.15.0"
-      - uses: KyleMayes/install-llvm-action@98e68e10c96dffcb7bfed8b2144541a66b49aa02
+      - uses: actions/setup-node@v4
         with:
-          version: "20.1.8"
-          env: true
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
 
-      - name: Install apt dependencies
+      - name: Install documentation dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            graphviz lcov libclang-20-dev \
-            libcxxopts-dev \
-            nlohmann-json3-dev \
-            libsqlite3-dev \
-            libutf8proc-dev \
-            libcurl4-openssl-dev
+          sudo apt-get install -y graphviz
 
       - name: Generate Doxygen
         run: doxygen Doxyfile
 
-      - name: Build with coverage
+      - name: Build static viewer
+        working-directory: viewer
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DCOVERAGE=ON
-          cmake --build build --target coverage --parallel $(nproc)
+          npm ci
+          npm run data
+          npm run build
 
-      - name: Upload results to Codecov
-        if: ${{ hashFiles('build/coverage.info') != '' }}
-        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7
-        continue-on-error: true
-        with:
-          files: build/coverage.info
-          fail_ci_if_error: false
-          use_oidc: true
-          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Install viewer into Pages site
+        run: |
+          rm -rf doc/viewer
+          mkdir -p doc/viewer
+          cp -a viewer/dist/. doc/viewer/
 
-      - name: Upload coverage to Codacy
-        if: ${{ hashFiles('build/coverage.info') != '' }}
-        uses: codacy/codacy-coverage-reporter-action@a38818475bb21847788496e9f0fddaa4e84955ba
-        continue-on-error: true
-        with:
-          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-          coverage-reports: build/coverage.info
-
-      - name: Clean build
-        run: rm -rf build/
+      - name: Install coverage status page
+        run: |
+          if [[ -d cov ]]; then
+            rm -rf doc/cov
+            cp -a cov doc/cov
+          elif [[ ! -f doc/cov/index.html ]]; then
+            mkdir -p doc/cov
+            cat > doc/cov/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width,initial-scale=1">
+              <title>Coverage unavailable</title>
+            </head>
+            <body>
+              <main>
+                <h1>Coverage report unavailable</h1>
+                <p>The current Pages build did not produce a coverage report.</p>
+              </main>
+            </body>
+          </html>
+          EOF
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

@@ -52,5 +52,8 @@ __pycache__/
 .*.import-lock/
 .*.import-staging*/
 
+# Generated legacy viewer projections
+/viewer/data/projection.json
+
 CMakeLists.txt.user
 CMakeLists.txt.user.*

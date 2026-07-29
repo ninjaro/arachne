@@ -1,0 +1,19 @@
+{
+  "artifactType": "arachne_merge_hint_review_v1",
+  "formatVersion": 1,
+  "items": [],
+  "selection": {
+    "minimumScore": 0.65,
+    "perEntity": 5,
+    "perType": 500
+  },
+  "source": {
+    "ignoredHints": 0,
+    "openHints": 0,
+    "schemaVersion": 5
+  },
+  "summary": {
+    "selected": 0,
+    "selectedByType": {}
+  }
+}

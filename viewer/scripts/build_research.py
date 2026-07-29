@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 
 PRODUCT_SCHEMA_VERSION = 5
+MERGE_HINT_ARTIFACT_TYPE = "arachne_merge_hint_review_v1"
 
 
 def rows(
@@ -87,7 +88,7 @@ def issue_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     return items
 
 
-def hint_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+def database_hint_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     labels = entity_labels(connection)
     items: list[dict[str, Any]] = []
     for row in rows(
@@ -131,6 +132,26 @@ def hint_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     return items
 
 
+def exported_hint_items(path: Path) -> list[dict[str, Any]]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if document.get("artifactType") != MERGE_HINT_ARTIFACT_TYPE:
+        raise ValueError(
+            f"merge hint export must use artifact type {MERGE_HINT_ARTIFACT_TYPE}"
+        )
+    if document.get("formatVersion") != 1:
+        raise ValueError("merge hint export must use format version 1")
+    items = document.get("items")
+    if not isinstance(items, list):
+        raise ValueError("merge hint export items must be an array")
+
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or item.get("kind") != "merge_hint":
+            raise ValueError(f"merge hint export item {index} is invalid")
+        result.append(dict(item))
+    return result
+
+
 def summary(items: list[dict[str, Any]]) -> dict[str, int]:
     return {
         "total": len(items),
@@ -145,7 +166,11 @@ def summary(items: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def build_research(database: Path, catalog: dict[str, Any]) -> dict[str, Any]:
+def build_research(
+    database: Path,
+    catalog: dict[str, Any],
+    merge_hints: Path | None = None,
+) -> dict[str, Any]:
     if catalog.get("formatVersion") != 1 or not isinstance(
         catalog.get("productSnapshotId"), str
     ):
@@ -167,7 +192,12 @@ def build_research(database: Path, catalog: dict[str, Any]) -> dict[str, Any]:
                 f"(found v{user_version})"
             )
 
-        items = issue_items(connection) + hint_items(connection)
+        hints = (
+            exported_hint_items(merge_hints)
+            if merge_hints is not None and merge_hints.is_file()
+            else database_hint_items(connection)
+        )
+        items = issue_items(connection) + hints
     finally:
         connection.close()
 
@@ -188,6 +218,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("database", type=Path)
     result.add_argument("catalog", type=Path)
     result.add_argument("output", type=Path)
+    result.add_argument("--merge-hints", type=Path)
     result.add_argument("--pretty", action="store_true")
     return result
 
@@ -197,8 +228,13 @@ def main() -> int:
     database = arguments.database.resolve(strict=True)
     catalog_path = arguments.catalog.resolve(strict=True)
     output_path = arguments.output.resolve(strict=False)
+    merge_hints = (
+        arguments.merge_hints.resolve(strict=False)
+        if arguments.merge_hints is not None
+        else None
+    )
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    research = build_research(database, catalog)
+    research = build_research(database, catalog, merge_hints)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if arguments.pretty:
@@ -213,7 +249,7 @@ def main() -> int:
     print(
         f"Wrote {output_path}: "
         f"{research['summary']['ingestIssues']} open ingest issues, "
-        f"{research['summary']['mergeHints']} open merge hints"
+        f"{research['summary']['mergeHints']} review merge hints"
     )
     return 0
 

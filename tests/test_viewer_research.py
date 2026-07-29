@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -122,6 +123,51 @@ class ViewerResearchTests(unittest.TestCase):
         self.assertEqual(hint["rightLabel"], "Work, The")
         self.assertEqual(hint["similarityScore"], 0.91)
         self.assertEqual(hint["signals"], {"same_year": True})
+
+    def test_prefers_external_review_export(self) -> None:
+        export = self.root / "merge-hints-review.json"
+        export.write_text(
+            json.dumps(
+                {
+                    "artifactType": "arachne_merge_hint_review_v1",
+                    "formatVersion": 1,
+                    "items": [
+                        {
+                            "id": "merge-hint:agent:agent-000001:agent-000002",
+                            "kind": "merge_hint",
+                            "severity": "info",
+                            "category": "agent_duplicate_candidate",
+                            "title": "Possible agent duplicate",
+                            "message": "One external review candidate.",
+                            "entityType": "agent",
+                            "leftId": "agent-000001",
+                            "leftLabel": "Open Agent",
+                            "rightId": "agent-000002",
+                            "rightLabel": "Ignored Agent",
+                            "similarityScore": 0.88,
+                            "textScore": 0.9,
+                            "graphScore": 0.7,
+                            "contextScore": 0.8,
+                            "signals": {"external": True},
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        output = build_research(
+            self.database,
+            {"formatVersion": 1, "productSnapshotId": "product-1"},
+            export,
+        )
+
+        self.assertEqual(output["summary"]["mergeHints"], 1)
+        hint = output["items"][1]
+        self.assertEqual(hint["entityType"], "agent")
+        self.assertEqual(hint["similarityScore"], 0.88)
+        self.assertEqual(hint["signals"], {"external": True})
 
     def test_rejects_old_product_schema(self) -> None:
         connection = sqlite3.connect(self.database)
