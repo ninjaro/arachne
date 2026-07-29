@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a GitHub mining-batch issue event into inert intake-request JSON."""
+"""Turn a GitHub Arachne-batch issue event into inert intake-request JSON."""
 
 from __future__ import annotations
 

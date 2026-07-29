@@ -10,9 +10,9 @@
 
 namespace arachnespace::contracts {
 
-/** Supported version-one actor-boundary contracts. */
+/** Supported active actor-boundary and product-inbox contracts. */
 enum class contract_name {
-    mining_batch,
+    arachne_batch,
     batch_envelope,
     fetch_plan,
     fetch_request,
@@ -52,14 +52,14 @@ parse_contract_name(std::string_view name) noexcept;
 /** Whether the contract necessarily carries or references artifact bytes. */
 [[nodiscard]] bool is_artifact_bearing(contract_name name) noexcept;
 
-/** Validate a document after discovering its type from the `contract` field. */
+/**
+ * Validate a document after discovering its type from `contract`, or from
+ * `format` for an Arachne product-inbox batch.
+ */
 [[nodiscard]] validation_result validate(const nlohmann::json& document);
 
 /**
  * Validate a document and require the supplied contract type.
- *
- * The authoritative MINER encoding may omit `contract` when @p expected is
- * `contract_name::mining_batch`. Every control contract still requires it.
  */
 [[nodiscard]] validation_result
 validate(contract_name expected, const nlohmann::json& document);

@@ -1,124 +1,57 @@
-name: Product graph integration
+name: Product inbox application
 
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "17 3 * * *"
   workflow_dispatch:
-    inputs:
-      force:
-        description: Run for today's configured logical date even outside the scheduled hour
-        required: false
-        type: boolean
-        default: true
   workflow_call:
-    inputs:
-      force:
-        required: false
-        type: boolean
-        default: false
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 concurrency:
-  group: product-graph-write
+  group: product-database-write
   cancel-in-progress: false
 
 jobs:
-  integrate:
+  apply-inbox:
     if: vars.ARACHNE_OPERATIONS_ENABLED == 'true'
     runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Require persistent-state settings
-        env:
-          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
-          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
-          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
-        run: |
-          test -n "${STATE_REPOSITORY}"
-          test -n "${STATE_BASE_BRANCH}"
-          test -n "${STATE_TOKEN}"
-      - name: Checkout protected persistent state
-        uses: actions/checkout@v4
         with:
-          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
-          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
-          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
-          path: .arachne-state
           lfs: true
-      - name: Materialize runner-local configuration
-        run: |
-          python3 scripts/materialize_ci_config.py \
-            --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
-            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
-            --source-root "${GITHUB_WORKSPACE}" \
-            --runner-temp "${RUNNER_TEMP}" \
-            --output "${RUNNER_TEMP}/arachne-config.json"
-      - name: Evaluate configured local schedule
-        id: schedule
-        env:
-          FORCE_RUN: ${{ inputs.force || false }}
-        run: |
-          arguments=()
-          if [[ "${FORCE_RUN}" == "true" ]]; then
-            arguments+=(--force)
-          fi
-          python3 scripts/schedule_gate.py \
-            --config "${RUNNER_TEMP}/arachne-config.json" \
-            "${arguments[@]}"
-      - name: Authorize threshold bypass
-        if: steps.schedule.outputs.due == 'true' && inputs.force
-        env:
-          FORCE_ACTOR: ${{ vars.ARACHNE_FORCE_ACTOR || github.repository_owner }}
-          REQUEST_ACTOR: ${{ github.actor }}
-        run: test "${REQUEST_ACTOR}" = "${FORCE_ACTOR}"
+
       - name: Install application dependencies
-        if: steps.schedule.outputs.due == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libcurl4-openssl-dev \
             libsqlite3-dev \
+            libutf8proc-dev \
             nlohmann-json3-dev
-      - name: Build Arachne operations binary
-        if: steps.schedule.outputs.due == 'true'
+
+      - name: Build Arachne
         env:
           ARACHNE_BUILD_TESTS: "OFF"
           ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
-      - name: Process accumulated queue
-        id: integrate
-        if: steps.schedule.outputs.due == 'true'
-        continue-on-error: true
+
+      - name: Validate strict inbox batches
+        run: build/arachne product check-inbox
+
+      - name: Apply strict inbox batches
+        run: build/arachne product apply-inbox
+
+      - name: Propose the database change for review
         env:
-          FORCE_RUN: ${{ inputs.force || false }}
-        run: |
-          arguments=(
-            --config "${RUNNER_TEMP}/arachne-config.json"
-            --binary "${GITHUB_WORKSPACE}/build/arachne"
-            product-integrate
-            --logical-date "${{ steps.schedule.outputs.logical_date }}"
-            --run-id "product-${{ steps.schedule.outputs.logical_date }}"
-          )
-          if [[ "${FORCE_RUN}" == "true" ]]; then
-            arguments+=(--force)
-          fi
-          python3 scripts/arachne_ops.py "${arguments[@]}"
-      - name: Stop after integration failure
-        if: steps.schedule.outputs.due == 'true' && steps.integrate.outcome != 'success'
-        run: exit 1
-      - name: Propose product state for review
-        if: steps.schedule.outputs.due == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
-          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
-          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/propose_state_change.py \
-            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
-            --repository "${STATE_REPOSITORY}" \
-            --base "${STATE_BASE_BRANCH}" \
-            --branch "arachne/product-${{ steps.schedule.outputs.logical_date }}" \
-            --title "Arachne product ${{ steps.schedule.outputs.logical_date }}" \
-            --body "Atomic product integration from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Review manifests and structural reports before merge."
+            --state-root "${GITHUB_WORKSPACE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --branch "arachne/inbox-${GITHUB_RUN_ID}" \
+            --title "Apply Arachne inbox batches" \
+            --body "Applied validated arachne_batch_v2 files from inbox/ in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."

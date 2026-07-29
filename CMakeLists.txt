@@ -33,6 +33,9 @@ endif()
 find_package(CURL REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(rapidfuzz CONFIG REQUIRED)
+find_path(UTF8PROC_INCLUDE_DIR utf8proc.h REQUIRED)
+find_library(UTF8PROC_LIBRARY utf8proc REQUIRED)
 
 if(TARGET SQLite3::SQLite3)
     set(ARACHNE_SQLITE_TARGET SQLite3::SQLite3)
@@ -78,12 +81,23 @@ target_link_libraries(
 target_compile_features(ariadne_engine PUBLIC cxx_std_23)
 
 # Penelope alone owns graph schemas, staging, activation, and exports.
-add_library(penelope_store STATIC src/penelope/store.cpp)
-target_include_directories(penelope_store PUBLIC include)
+add_library(penelope_store STATIC
+    src/penelope/store.cpp
+    src/penelope/inbox.cpp
+)
+target_include_directories(
+    penelope_store
+    PUBLIC include
+    PRIVATE
+        ${UTF8PROC_INCLUDE_DIR}
+)
 target_link_libraries(
     penelope_store
     PUBLIC arachne_common arachne_contracts nlohmann_json::nlohmann_json
-    PRIVATE ${ARACHNE_SQLITE_TARGET}
+    PRIVATE
+        ${ARACHNE_SQLITE_TARGET}
+        ${UTF8PROC_LIBRARY}
+        rapidfuzz::rapidfuzz
 )
 target_compile_features(penelope_store PUBLIC cxx_std_23)
 target_compile_definitions(
@@ -165,8 +179,11 @@ if(BUILD_TESTS)
         tests/ariadne_tests.cpp
         tests/viewer_tests.cpp
     )
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/penelope_store_tests.cpp")
-        list(APPEND ARACHNE_CORE_TEST_SOURCES tests/penelope_store_tests.cpp)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/candidate_store_tests.cpp")
+        list(APPEND ARACHNE_CORE_TEST_SOURCES tests/candidate_store_tests.cpp)
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/product_inbox_tests.cpp")
+        list(APPEND ARACHNE_CORE_TEST_SOURCES tests/product_inbox_tests.cpp)
     endif()
 
     add_executable(core_tests ${ARACHNE_CORE_TEST_SOURCES})
@@ -192,30 +209,8 @@ if(BUILD_TESTS)
     )
 
     add_test(
-        NAME safe_archive_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_safe_extract -v
-    )
-    add_test(
         NAME actor_boundary_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_actor_boundaries -v
-    )
-    add_test(
-        NAME legacy_corpus_analysis_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_analyze_legacy_corpus -v
-    )
-    add_test(
-        NAME legacy_corpus_normalization_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_normalize_legacy_batches -v
-    )
-    add_test(
-        NAME merged_inbox_cleanup_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_cleanup_merged_inbox -v
-    )
-    add_test(
-        NAME legacy_inbox_manifest_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_inbox_manifest -v
     )
     add_test(
         NAME intake_adapter_tests
@@ -239,9 +234,14 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_source_refresh -v
     )
     add_test(
-        NAME canonical_consolidation_tests
+        NAME product_v5_migration_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_consolidate_canonical_manifest -v
+            tests.test_product_v5_migration -v
+    )
+    add_test(
+        NAME viewer_research_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_viewer_research -v
     )
     add_test(
         NAME operations_cli_tests
@@ -250,12 +250,10 @@ if(BUILD_TESTS)
             ${Python3_EXECUTABLE} -m unittest tests.test_cli -v
     )
     set_tests_properties(
-        safe_archive_tests actor_boundary_tests legacy_corpus_analysis_tests
-        legacy_corpus_normalization_tests merged_inbox_cleanup_tests
-        legacy_inbox_manifest_tests
-        intake_adapter_tests workflow_yaml_tests publication_adapter_tests
+        actor_boundary_tests intake_adapter_tests workflow_yaml_tests
+        publication_adapter_tests
         wikidata_hpc_worker_tests source_refresh_tests
-        canonical_consolidation_tests operations_cli_tests
+        product_v5_migration_tests viewer_research_tests operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 

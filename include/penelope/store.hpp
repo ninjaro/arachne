@@ -15,43 +15,6 @@
 
 namespace arachne::penelope {
 
-/** A human-approved mining payload presented to Penelope by Arachne. */
-struct accepted_batch_descriptor final {
-    std::string envelope_id;
-    std::filesystem::path payload_path;
-    std::string payload_sha256;
-};
-
-/** Inputs for one atomic, incremental product-graph materialization. */
-struct product_snapshot_request final {
-    std::string run_id;
-    std::vector<accepted_batch_descriptor> batches;
-};
-
-/** A corpus-wide, already-normalized product import transfer artifact. */
-struct normalized_product_import_request final {
-    /** `normalized_product_import_v1` JSON produced after corpus analysis. */
-    std::filesystem::path manifest_path;
-    /** Canonical SQLite file atomically replaced only after validation. */
-    std::filesystem::path database_path;
-};
-
-/** Aggregate result of one direct canonical product import. */
-struct normalized_product_import_result final {
-    std::filesystem::path database_path;
-    std::size_t entity_count { 0 };
-    std::size_t work_count { 0 };
-    std::size_t assertion_count { 0 };
-};
-
-/** Result of bringing one canonical product database to the current schema. */
-struct product_database_migration_result final {
-    std::filesystem::path database_path;
-    int previous_schema_version { 0 };
-    int schema_version { 0 };
-    bool changed { false };
-};
-
 /** A complete research_candidate_graph_plan_v1 artifact. */
 struct candidate_plan_descriptor final {
     /** Validated research_candidate_graph_plan_v1 control contract. */
@@ -66,7 +29,7 @@ struct candidate_snapshot_request final {
     candidate_plan_descriptor plan;
 };
 
-enum class graph_domain { product, candidate };
+enum class graph_domain { candidate };
 
 struct integrity_report final {
     bool ok { false };
@@ -75,7 +38,7 @@ struct integrity_report final {
 
 /** Paths and content identities of an immutable snapshot. */
 struct snapshot_result final {
-    graph_domain domain { graph_domain::product };
+    graph_domain domain { graph_domain::candidate };
     std::string snapshot_id;
     std::filesystem::path database_path;
     std::filesystem::path export_path;
@@ -96,47 +59,18 @@ public:
 /**
  * Penelope's isolated SQLite persistence boundary.
  *
- * Product builds copy the current immutable snapshot into private staging,
- * apply accepted MINER-v1 batches in one transaction, validate and checkpoint
- * it, write a deterministic JSONL export, then atomically replace only the
- * ACTIVE pointer. Candidate builds always start from an empty database and
- * therefore cannot carry grey/group/greedy state from an older build.
+ * Candidate builds always start from an empty database and therefore cannot
+ * carry grey/group/greedy state from an older build. Product data is maintained
+ * directly by the dedicated inbox importer; it is deliberately outside this
+ * immutable candidate-snapshot store.
  *
- * Canonical SQLite files contain research data only. Run IDs, cocoon IDs,
- * payload paths, and payload hashes are written exclusively to metadata.json
- * beside the database.
+ * Canonical SQLite files contain research data only. Run IDs, payload paths,
+ * and artifact hashes are written exclusively to metadata.json beside the
+ * database.
  */
 class store final {
 public:
     explicit store(std::filesystem::path root);
-
-    [[nodiscard]] snapshot_result
-    build_product_snapshot(const product_snapshot_request& request);
-
-    /**
-     * Build a fresh canonical product database from one normalized manifest.
-     *
-     * This path deliberately has no cocoon, ledger, backup, run-ID, or input-
-     * hash dependency. The manifest is imported into private sibling staging
-     * in one transaction, structurally checked, checkpointed, and only then
-     * atomically activated at `database_path`.
-     */
-    [[nodiscard]] static normalized_product_import_result
-    import_normalized_product(const normalized_product_import_request& request);
-
-    /**
-     * Atomically migrate a standalone canonical product database to the current
-     * schema. Schema-v3 databases require the equivalent normalized-product-v3
-     * manifest so compact keys can be rebuilt without retaining legacy-ID
-     * mappings. The source is never modified before a migrated, vacuumed
-     * sibling staging database passes semantic and structural checks.
-     */
-    [[nodiscard]] static product_database_migration_result
-    migrate_product_database(
-        const std::filesystem::path& database_path,
-        const std::optional<std::filesystem::path>& normalized_manifest_path
-        = std::nullopt
-    );
 
     [[nodiscard]] snapshot_result
     replace_candidate_snapshot(const candidate_snapshot_request& request);

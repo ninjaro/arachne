@@ -50,14 +50,6 @@ export interface Identifier {
   url: string | null;
 }
 
-export interface RemoteAsset {
-  provider: string;
-  remoteKey: string | null;
-  directUrl: string | null;
-  resolverRule: string | null;
-  rightsNote: string | null;
-}
-
 export interface Manifestation {
   id: EntityId;
   type: string;
@@ -95,7 +87,6 @@ export interface Work {
   advisories: Advisory[];
   measurements: Measurement[];
   identifiers: Identifier[];
-  assets: RemoteAsset[];
   manifestations: Manifestation[];
   financialFacts: FinancialFact[];
 }
@@ -115,20 +106,8 @@ export interface Domain {
   mediumOptions: Array<{ value: string; count: number }>;
 }
 
-export type ResearchKind = "quality_gap" | "conflict" | "remainder";
+export type ResearchKind = "quality_gap" | "ingest_issue" | "merge_hint";
 export type ResearchSeverity = "info" | "weak" | "problem";
-
-export interface ResearchSource {
-  batchId?: string;
-  container: string;
-  member?: string;
-}
-
-export interface ResearchOccurrence {
-  source: ResearchSource;
-  jsonPointer: string;
-  value?: unknown;
-}
 
 export interface ResearchItem {
   id: string;
@@ -139,19 +118,28 @@ export interface ResearchItem {
   message: string;
   workId?: EntityId;
   workLabel?: string;
-  field?: string;
   score?: number;
   details?: string[];
-  occurrences?: ResearchOccurrence[];
-  dependencies?: unknown[];
+  batchId?: string;
+  jsonPath?: string;
   value?: unknown;
+  entityType?: "agent" | "work" | "concept";
+  leftId?: EntityId;
+  leftLabel?: string;
+  rightId?: EntityId;
+  rightLabel?: string;
+  similarityScore?: number;
+  textScore?: number | null;
+  graphScore?: number | null;
+  contextScore?: number | null;
+  signals?: unknown;
 }
 
 export interface ResearchSummary {
   total: number;
   qualityGaps: number;
-  conflicts: number;
-  remainders: number;
+  ingestIssues: number;
+  mergeHints: number;
   problems: number;
   weak: number;
   info: number;

@@ -5,42 +5,37 @@ The files in `schemas/` are JSON Schema Draft 2020-12 contracts. The files in
 `artifacts/` contains schemas and examples for large resolved payloads that are
 referenced by boundary contracts rather than treated as additional contracts.
 
-`normalized_product_import_v1`, `normalized_product_import_v2`, and
-`normalized_product_import_v3` are narrow discriminator exceptions inside that
-directory. Penelope consumes these transfer artifacts directly after
-whole-corpus normalization or reviewed consolidation, so their roots use
-`contract` rather than `artifact_type`. They are still data-file formats, are
-not members of the C++ `contract_name` enumeration, and are not public miner
-intake contracts. Their suffixes are independent of SQLite
-`PRAGMA user_version`; an import-artifact version and a product-schema version
-describe different boundaries.
+`arachne_batch_v2` is the one active product-inbox format. It is a direct,
+transactional mutation request for the product database rather than a generic
+actor message or a universal normalized transfer manifest.
 
 ## Version header
 
-Control payloads have two mutually reinforcing identifiers:
+Actor control payloads have two mutually reinforcing identifiers:
 
 - `contract` is the functional contract name with a major suffix, such as
   `fetch_request_v1`.
-- `format_version` is the integer major version and is `1` for every contract
-  documented here.
+- `format_version` is the integer major version and is `1` for every active
+  actor contract documented here.
 
-A consumer must reject a known contract with an unsupported major suffix, an
-unsupported `format_version`, or disagreement between the expected contract and
-the payload's `contract`. It must not guess at a compatible interpretation.
+A consumer must reject a known actor contract with an unsupported major suffix,
+an unsupported `format_version`, or disagreement between the expected contract
+and the payload's `contract`. It must not guess at a compatible interpretation.
 
-The authoritative MINER corpus is the deliberate exception. Existing
-`mining_batch_v1` files identify themselves with `format_version: 1` and their
-`batch_type`, and normally omit `contract`. Explicit validation as
-`contract_name::mining_batch` accepts that encoding. Generic contract discovery
-still requires `contract`, so an unlabelled mining batch cannot be mistaken for
-a control payload.
+Product-inbox batches instead use the single discriminator:
 
-Minor, backward-compatible additions to control contracts belong under
+```json
+{ "format": "arachne_batch_v2" }
+```
+
+They do not carry `contract`, `format_version`, `batch_type`, or extensions.
+Their root, operation sections, and every record are closed with
+`additionalProperties: false`. A batch must be upgraded explicitly when its
+shape changes.
+
+Minor, backward-compatible additions to actor control contracts belong under
 `extensions`. Extension keys use a namespaced form such as `org.example.trace`.
-A control producer must not add unversioned top-level fields to a v1 payload.
-MINER remains open as required by its guide and corpus: additional research
-tables and operational review/follow-up metadata may appear at top level.
-Consumers may retain but must not silently reinterpret extension values.
+An actor producer must not add unversioned top-level fields to a v1 payload.
 
 ## Artifact convention
 
@@ -66,9 +61,9 @@ artifacts always use the original referenced bytes instead.
 
 ## Supported contracts
 
-| Contract | Producer | Consumer | v1 notes |
+| Contract | Producer | Consumer | Notes |
 |---|---|---|---|
-| `mining_batch_v1` | Miner | Arachne | Opaque legacy compatibility marker only. No fields are mandatory and it is not the future Arachne manifest; corpus discovery and real conflict evidence must precede that design. |
+| `arachne_batch_v2` | Research bot or reviewer | Arachne product inbox | Closed create/update/merge request. New records use batch-local IDs; existing records use canonical database IDs. Assertions require explicit source-backed evidence, exact quotes, and stances. |
 | `batch_envelope_v1` | Arachne | Arachne, Penelope | Stable cocoon identity and immutable payload reference. `status` is a ledger projection; transitions do not mutate payload bytes or identity fields. |
 | `fetch_plan_v1` | Ariadne | Arachne | Declarative external-data needs; never an executable request. |
 | `fetch_request_v1` | Arachne | Pheidippides | Concrete door/endpoint GET or POST with transport mode, freshness, bounded independent timeouts/retries, optional body/checksum or verified resume artifact, and exact output custody. |
@@ -99,56 +94,16 @@ members of the C++ `contract_name` enumeration:
   human-authored, externally derived, or a build-time projection. Every edge
   includes a human-readable explanation, and optional `attributes` carry
   medium/year/evidence, soft-guidance, or UI-style data.
-- `normalized_product_import_v1` is the closed, corpus-derived transfer surface
-  consumed by Penelope for the one-file legacy migration. It contains canonical
-  research fields only, requires explicit creator/work/manifestation IDs, and
-  carries no batch, run, hash, backup, or operational-metadata dependency. It
-  does not replace the deliberately open `mining_batch_v1` compatibility marker.
-- `normalized_product_import_v2` is the reviewed-consolidation successor. It
-  requires explicit hash-based concept and source IDs, preserves concept names
-  and slug aliases plus alternate source URLs, and carries direct
-  retired-identity redirects. Redirects cannot chain, cross entity types, or
-  coexist with a live alias ID. It is accepted only as legacy upgrade input;
-  new normalization, consolidation, and cleanup artifacts must not emit it.
-- `normalized_product_import_v3` is the final-record transfer successor.
-  Creators, works, concepts, and manifestations use readable category-specific
-  canonical IDs identical to their local transfer IDs. Sources use `ref_id`
-  only. It contains no redirect arrays, source canonical compatibility IDs, or
-  concept slug aliases. Nonpreferred concept names, alternate source URLs, and
-  archive SHA-256 values for actual captured bytes remain ordinary research and
-  integrity data. Product schema v4 retains the readable entity IDs but assigns
-  sources and other internal records integer primary keys.
-- `consolidated_corpus_unresolved_v1` preserves exact conflicting or
-  non-transferable JSON outside the product database, with source pointers,
-  reasons, and dependency context. Its envelope and locator records are closed,
-  while preserved values and aggregate summary keys remain intentionally
-  flexible for evidence-derived later analysis.
 
-## Normalized import and product schema versions
-
-The current direct-import mapping is explicit:
-
-| Normalized artifact | Product schema | Meaning |
-|---|---:|---|
-| `normalized_product_import_v1` | 1 | Historical one-file import behavior. |
-| `normalized_product_import_v2` | 3 | Legacy compatibility fields are validated but not materialized. |
-| `normalized_product_import_v3` | 4 | Readable canonical entities and compact integer internal keys. |
-
-Database migration is a separate operation. Schema v2 contains the historical
-redirect and concept-slug-alias structures. Migrating v2 without a manifest
-removes only that metadata and activates schema v3, preserving surviving text
-IDs. Schema v3 has no compatibility tables but still carries the v2 hash-era
-concept, source, and internal text keys. Migrating schema v3 to v4 requires an
-equivalent `normalized_product_import_v3` manifest and performs a fresh rebuild
-plus semantic-equivalence validation. Supplying that manifest also permits a
-direct schema-v2-to-v4 rebuild. Schema v4 is already current and migration is a
-no-op; schema v1 is not accepted by the standalone migration command.
+Legacy normalized imports and unresolved JSONL formats are not active contracts.
+Routine inbox processing mutates product schema v5 directly and records
+idempotency, ingest issues, and review-only merge hints in that database.
 
 ## Compatibility policy
 
-- A v1 control-contract producer may add only namespaced `extensions` entries
-  without a major version change. MINER additions follow the human mining guide
-  and remain mechanically, not semantically, validated.
+- A v1 actor-contract producer may add only namespaced `extensions` entries
+  without a major version change.
+- `arachne_batch_v2` admits no extensions or undeclared fields.
 - Removing a field, changing a field's meaning or type, broadening execution
   authority, or changing hash semantics requires a new major contract.
 - Consumers validate before performing transport, database mutation, graph

@@ -1,14 +1,14 @@
 # Operations
 
-GitHub workflows and local commands invoke the same executable and versioned
-contracts through `scripts/arachne_ops.py`. The adapter fails closed: the binary
-must return `{"format_version":1,"commands":[...]}` from
-`arachne --capabilities-json` and advertise the requested capability.
+GitHub workflows and local commands invoke the same executable. General
+operations may use `scripts/arachne_ops.py`; product inbox commands are fixed,
+configuration-free executable commands.
 
 ## Local setup
 
-Install CMake 3.28+, a C++23 compiler, libcurl, SQLite, nlohmann-json and GoogleTest
-for test builds. Run the local equivalent of validation:
+Install CMake 3.28+, a C++23 compiler, libcurl, SQLite, utf8proc,
+nlohmann-json and GoogleTest for test builds. Run the local equivalent of
+validation:
 
 ```sh
 scripts/run_checks.sh
@@ -24,10 +24,6 @@ python3 scripts/arachne_ops.py preflight
 python3 scripts/arachne_ops.py capabilities
 ```
 
-`paths.queue` is Arachne's temporary accumulated queue. `paths.legacy_inbox` is
-optional and must point only to the separate read-only legacy corpus when a
-migration/analysis command explicitly needs it. Normal runtime operations do not.
-
 ## Capability contract
 
 | Capability | Core executable argv |
@@ -37,11 +33,9 @@ migration/analysis command explicitly needs it. Normal runtime operations do not
 | `fetch-plan-translate` | `arachne fetch plan --config CONFIG --plan FETCH_PLAN_JSON --output-directory DIRECTORY` |
 | `intake` | `arachne intake --config CONFIG --payload FILE --submission-ref REF --title TITLE [--supersedes ID]` |
 | `cocoon-transition` | `arachne cocoon transition --config CONFIG --envelope-id ID --to STATUS --actor-ref REF [--reason TEXT]` |
-| `inbox-baseline` | `arachne inbox baseline --config CONFIG` (external legacy inbox only) |
-| `inbox-verify` | `arachne inbox verify --config CONFIG` (external legacy inbox only) |
-| `product-integrate` | `arachne product integrate --config CONFIG --logical-date DATE --run-id ID [--force]` |
-| `product-import-normalized` | `arachne product import-normalized --manifest FILE --database FILE` |
-| `product-migrate-database` | `arachne product migrate-database --database FILE` |
+| `product-check-inbox` | `arachne product check-inbox` |
+| `product-apply-inbox` | `arachne product apply-inbox` |
+| `product-rebuild-merge-hints` | `arachne product rebuild-merge-hints` |
 | `candidate-plan` | `arachne candidate plan --config CONFIG --external-graph JSON --product-snapshot PRODUCT_SNAPSHOT_CONTROL --output-artifact PATH --output-control PATH` |
 | `candidate-rebuild` | `arachne candidate rebuild --config CONFIG --plan-control FILE --run-id ID` |
 | `viewer-build` | `arachne viewer build --config CONFIG --product-snapshot CONTROL [--candidate-snapshot CONTROL]` |
@@ -77,9 +71,15 @@ repeated requests reuse a shared connection pool.
 
 ## Intake behavior
 
-The repository includes an experimental Issue Form because later GitHub-side
-intake is required, but the exact UX is deliberately not fixed. Local intake is
-the stable minimum path:
+The repository Issue Form accepts one strict `.json` product batch. The intake
+workflow downloads it through the configured Pheidippides door, materializes
+the verified bytes in the fixed repository `inbox/`, runs
+`build/arachne product check-inbox`, and proposes the file for review. It does
+not apply database changes. The serialized product-integration workflow does
+that only after the inbox pull request is merged.
+
+The generic local opaque-byte intake path remains available for non-product
+operational payloads:
 
 ```sh
 python3 scripts/arachne_ops.py intake \
@@ -88,56 +88,54 @@ python3 scripts/arachne_ops.py intake \
   --title "July research batch"
 ```
 
-Receipt queues opaque bytes. `mining_batch_v1` is an open legacy marker, not a
-strict public manifest and not an intake gate. The installed legacy corpus has now
-been analyzed; its deliberately narrow migration format and commands are documented
-in [Corpus Import](CORPUS_IMPORT.md) and do not change ordinary intake semantics.
+Product-database submissions are not opaque packages. A bot or maintainer writes
+exactly one strict, plain UTF-8 `arachne_batch_v2` object per `.json` file and
+moves it into repository `inbox/`. ZIP files, sidecars, old mining variants, and
+arbitrary metadata are rejected.
 
-The provisional remote path performs these boundary-safe steps:
+## Product inbox
 
-1. parse exactly one `.json` attachment reference as inert issue data (ZIP package
-   semantics remain deferred);
-2. construct a policy-bounded `fetch_request_v1` without performing transport;
-3. delegate bytes to Pheidippides through `fetch`;
-4. validate the delivered control, containment, byte count and SHA-256;
-5. queue the opaque payload through `intake`, remove the verified acquisition
-   duplicate, and publish the serialized queue/ledger commit.
+The product paths are part of the repository contract:
 
-Its sole author-facing response is the literal `ok` or `fail`. `ok` means received
-and queued, never integrated. Product workflows do not later notify submitters.
-
-## Scheduling and product integration
-
-The Actions schedule evaluates the reviewed IANA timezone hourly and becomes due
-at approximately 03:00 local time. `product_integration.queued_batch_threshold`
-defaults to exactly `15`. The core command counts the queue and a normal due run
-with 0–14 batches performs no processing. A logical run ID such as
-`product-2026-07-18` makes repeated schedule checks idempotent.
-
-Only the configured force actor may bypass the threshold remotely:
-
-```sh
-python3 scripts/arachne_ops.py product-integrate \
-  --logical-date 2026-07-18 \
-  --run-id product-2026-07-18 \
-  --force
+```text
+inbox/
+database/art-islands.sqlite
+build/arachne
 ```
 
-The owner gate is enforced by the workflow before `--force`; a local operator is
-responsible for coordinating any local force run with official GitHub writes.
+Validate every pending batch before proposing a database change:
 
-A successful whole-batch transfer may delete that content from the internal queue
-and must not retain accepted raw duplicates solely for audit. Routine queued
-integration does not split a batch: failure occurs before database mutation and
-leaves the complete raw queue file in place. The separate corpus migration described
-in [Corpus Import](CORPUS_IMPORT.md) is evidence-based and may retain only
-untransferred portions in its consolidated external artifact. Conflicts are not
-auto-resolved. Run output gives aggregate successful, partial and
-problematic/conflicting counts, but reports need not be permanent.
+```sh
+build/arachne product check-inbox
+```
 
-Penelope stores immutable SQLite snapshots under `paths.graph_store`. The active
-product snapshot there is the durable accepted result and must be tracked through
-Git LFS. Before initializing a state repository:
+The authorized writer applies the same validated set directly:
+
+```sh
+build/arachne product apply-inbox
+```
+
+Neither command accepts positional arguments, path options, or `--apply`.
+`check-inbox` never writes. `apply-inbox` uses one immediate transaction per
+batch, records the batch ID in that transaction, checks foreign keys before
+commit, and deletes the source file only after commit. Rejected files move to
+`inbox/rejected/`, with concrete problems stored in `ingest_issues`.
+
+Explicit merge operations are authoritative after validation. Similarity
+calculations only maintain review candidates in `merge_hints`; they never mutate
+entity identity. See [Product inbox](PRODUCT_INBOX.md) for the closed format and
+operation details.
+
+Routine batches refresh only affected derived block memberships and hints. After
+direct/offline product SQL edits, reconstruct the complete derived block index
+and all open hints (ignored decisions are retained):
+
+```sh
+build/arachne product rebuild-merge-hints
+```
+
+The canonical product database must be tracked through Git LFS. Before
+initializing a repository:
 
 ```sh
 git lfs install
@@ -145,30 +143,8 @@ cp /path/to/arachne/.gitattributes .gitattributes
 git add .gitattributes
 ```
 
-Direct normalized v2 imports and the v2-to-v3 migration produce product schema
-v3, which contains final canonical records but no entity/source redirect or
-concept-slug-alias tables. Penelope retains primary-source URL uniqueness and
-requires clean foreign-key and integrity checks before activation. The migration
-also preserves every non-compatibility row and stable ID and runs `VACUUM`. Use
-Penelope's import or migration path; do not edit a canonical database schema by
-hand.
-
 `propose_state_change.py` refuses to publish a staged `.sqlite`, `.sqlite3`, or
 `.db` file unless Git reports `filter=lfs` for that path.
-
-Received batches do not count toward the threshold until explicitly accepted.
-After inspecting a cocoon, record the maintainer and reason before integration:
-
-```sh
-python3 scripts/arachne_ops.py cocoon-transition \
-  --envelope-id env_0123456789abcdef0123456789abcdef \
-  --to accepted \
-  --actor-ref maintainer:example \
-  --reason "reviewed for mechanical integration"
-```
-
-The `cocoon-decision` option in `manual-dispatch.yml` performs the same audited
-accept/reject transition against serialized official state.
 
 ## Candidate planning and rebuild
 
@@ -228,7 +204,7 @@ Remote writes remain disabled until `ARACHNE_OPERATIONS_ENABLED` is exactly
 
 Initialize the state repository with `.gitattributes` and a reviewed
 `config/arachne.json` copied from the example. Workflows materialize runner-local
-absolute paths while preserving its timezone, threshold, candidate and security
+absolute paths while preserving its timezone, candidate and security
 policy. Every state checkout enables Git LFS. Globally serialized intake commits
 only queue and ledger paths directly to the official base; configure branch rules
 to allow that bot identity. Product and candidate database changes go to review
@@ -239,8 +215,8 @@ branches and never push the base directly.
 | Workflow | Remote behavior | Local equivalent |
 |---|---|---|
 | `validation.yml` | Read-only contracts, scripts, unit/build tests | `scripts/run_checks.sh` |
-| `intake.yml` | Provisional issue attachment receipt | `issue_fetch_request.py`, `arachne_ops.py fetch`, `arachne_ops.py intake` |
-| `product-integration.yml` | 03:00 schedule gate, threshold 15, owner force | `schedule_gate.py`, `arachne_ops.py product-integrate` |
+| `intake.yml` | Acquire one issue attachment, materialize and validate a strict product batch, then propose the inbox file | `issue_fetch_request.py`, `arachne_ops.py fetch`, `materialize_product_batch.py`, `build/arachne product check-inbox` |
+| `product-integration.yml` | Validate and transactionally apply repository inbox batches, then propose the database change | `build/arachne product check-inbox`, then `build/arachne product apply-inbox` |
 | `candidate-rebuild.yml` | Ariadne plan or HPC handoff; Penelope rebuild | `arachne_ops.py candidate-plan/candidate-rebuild` |
 | `source-refresh.yml` | Cadence-gated bulk acquisition, streaming HPC graph, full candidate rebuild | `source_refresh_gate.py`, `fetch-plan-translate`, `hpc/wikidata/build_external_graph.py` |
 | `publication.yml` | Protected, verified immutable Pages artifact | `arachne_ops.py viewer-build`, then `resolve_site_bundle.py` |
@@ -248,30 +224,6 @@ branches and never push the base directly.
 
 Product and candidate concurrency groups are separate. Penelope remains the only
 writer. Candidate staleness is allowed; cross-graph transactions are not required.
-
-## Legacy corpus observation
-
-Legacy projects are optional inputs, never runtime dependencies. To record evidence
-for future format work without writing into the legacy inbox:
-
-```sh
-python3 scripts/analyze_legacy_corpus.py \
-  --legacy-inbox /absolute/path/to/art-lineages/inbox \
-  --output /separate/path/legacy-corpus-observation.json
-
-python3 scripts/inbox_manifest.py snapshot \
-  --legacy-inbox /absolute/path/to/art-lineages/inbox \
-  --manifest /separate/path/legacy-inbox-baseline.json
-
-python3 scripts/inbox_manifest.py verify \
-  --legacy-inbox /absolute/path/to/art-lineages/inbox \
-  --manifest /separate/path/legacy-inbox-baseline.json
-```
-
-The analyzer inventories paths and raw hashes, observed JSON top-level key/type
-signatures, and safe ZIP member shapes. It does not extract, modify, normalize,
-rank, infer semantics, or produce a manifest. Reports and baselines are refused if
-their output path lies inside the legacy inbox.
 
 ## Publication and recovery
 
@@ -285,11 +237,6 @@ byte length before uploading only the selected immutable directory. A failed
 build, verification, or deploy leaves the previous Pages site valid.
 
 Back up the Git-LFS product SQLite and operational state. Candidate state and HPC
-intermediates are independently replaceable. Recovery does not depend on permanent
-retention of every processed Arachne batch, but any configured external legacy
-inbox remains read-only and can be checked with its independent baseline.
-
-Successful product and candidate commands persist immutable manifests under
-`graphs/<domain>/runs/<run-id>.json`. On retry, the run ID must bind the same
-input set and manifest bytes. Product recovery reconciles already-activated
-snapshots with queue and ledger state without applying a batch twice.
+intermediates are independently replaceable. Product idempotency depends only on
+`applied_batches`; recovery does not require old manifests, hashes, backups, or
+per-batch operational metadata.

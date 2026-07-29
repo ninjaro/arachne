@@ -3,6 +3,7 @@
 #include "arachne/crypto.hpp"
 #include "ariadne/candidates.hpp"
 #include "ariadne/viewer.hpp"
+#include "penelope/inbox.hpp"
 #include "penelope/store.hpp"
 #include "pheidippides/hardened_transport.hpp"
 #include "pheidippides/transport.hpp"
@@ -577,10 +578,7 @@ envelope_json(const arachne::coordination::envelope_record& envelope) {
 [[nodiscard]] ordered_json
 snapshot_json(const arachne::penelope::snapshot_result& snapshot) {
     return {
-        { "domain",
-          snapshot.domain == arachne::penelope::graph_domain::product
-              ? "product_graph"
-              : "research_candidate_graph" },
+        { "domain", "research_candidate_graph" },
         { "snapshot_id", snapshot.snapshot_id },
         { "database_path", snapshot.database_path.generic_string() },
         { "export_path", snapshot.export_path.generic_string() },
@@ -655,7 +653,7 @@ struct written_run_manifest final {
             { "penelope", "penelope-store-2.0.0" } } },
         { "contract_versions",
           { { "controls",
-              { "mining_batch_v1", "batch_envelope_v1", "fetch_plan_v1",
+              { "arachne_batch_v2", "batch_envelope_v1", "fetch_plan_v1",
                 "fetch_request_v1", "acquired_artifact_v1",
                 "research_candidate_graph_plan_v1", "product_graph_snapshot_v1",
                 "research_candidate_graph_snapshot_v1", "viewer_projection_v1",
@@ -1296,368 +1294,61 @@ int command_inbox_verify(const options& arguments) {
     return 0;
 }
 
-int command_product_import_normalized(const options& arguments) {
-    const fs::path manifest = resolved_path(
-        fs::path(arguments.require("--manifest")), repository_root()
-    );
-    const fs::path database = resolved_path(
-        fs::path(arguments.require("--database")), repository_root()
-    );
-    const auto result
-        = arachne::penelope::store::import_normalized_product(
-            { .manifest_path = manifest, .database_path = database }
+int command_product_inbox(const bool apply) {
+    const auto result = apply
+        ? arachne::penelope::apply_product_inbox(repository_root())
+        : arachne::penelope::check_product_inbox(repository_root());
+    ordered_json batches = ordered_json::array();
+    for (const auto& batch : result.batches) {
+        ordered_json issues = ordered_json::array();
+        for (const auto& issue : batch.issues) {
+            ordered_json item {
+                { "code", issue.code },
+                { "json_path", issue.json_path },
+                { "message", issue.message },
+            };
+            if (!issue.value_json.empty()) {
+                item["value"] = json::parse(issue.value_json);
+            }
+            issues.push_back(std::move(item));
+        }
+        batches.push_back(
+            ordered_json {
+                { "path",
+                  batch.path.lexically_relative(repository_root())
+                      .generic_string() },
+                { "batch_id", batch.batch_id },
+                { "status", arachne::penelope::to_string(batch.status) },
+                { "issues", std::move(issues) },
+            }
         );
+    }
+    emit(
+        ordered_json {
+            { "status", result.ok ? "ok" : "fail" },
+            { "command",
+              apply ? "product-apply-inbox" : "product-check-inbox" },
+            { "valid_count", result.valid_count },
+            { "applied_count", result.applied_count },
+            { "already_applied_count", result.already_applied_count },
+            { "rejected_count", result.rejected_count },
+            { "batches", std::move(batches) },
+        }
+    );
+    return result.ok ? 0 : 3;
+}
+
+int command_product_rebuild_merge_hints() {
+    const std::size_t count
+        = arachne::penelope::rebuild_product_merge_hints(repository_root());
     emit(
         ordered_json {
             { "status", "ok" },
-            { "command", "product-import-normalized" },
-            { "database_path", result.database_path.generic_string() },
-            { "entity_count", result.entity_count },
-            { "work_count", result.work_count },
-            { "assertion_count", result.assertion_count },
+            { "command", "product-rebuild-merge-hints" },
+            { "candidate_count", count },
         }
     );
     return 0;
-}
-
-int command_product_migrate_database(const options& arguments) {
-    const fs::path database = resolved_path(
-        fs::path(arguments.require("--database")), repository_root()
-    );
-    std::optional<fs::path> manifest;
-    if (const auto value = arguments.optional("--manifest")) {
-        manifest = resolved_path(fs::path(*value), repository_root());
-    }
-    const auto result = arachne::penelope::store::migrate_product_database(
-        database, manifest
-    );
-    emit(
-        ordered_json {
-            { "status", "ok" },
-            { "command", "product-migrate-database" },
-            { "database_path", result.database_path.generic_string() },
-            { "previous_schema_version", result.previous_schema_version },
-            { "schema_version", result.schema_version },
-            { "changed", result.changed },
-        }
-    );
-    return 0;
-}
-
-[[nodiscard]] std::vector<arachne::coordination::envelope_record>
-product_pending(arachne::coordination::operational_ledger& ledger) {
-    std::vector<arachne::coordination::envelope_record> result
-        = ledger.list(cocoon_status::accepted);
-    auto waiting = ledger.list(cocoon_status::waiting_processing);
-    result.insert(
-        result.end(), std::make_move_iterator(waiting.begin()),
-        std::make_move_iterator(waiting.end())
-    );
-    auto failed = ledger.list(cocoon_status::failed);
-    result.insert(
-        result.end(), std::make_move_iterator(failed.begin()),
-        std::make_move_iterator(failed.end())
-    );
-    std::ranges::sort(
-        result, {}, &arachne::coordination::envelope_record::envelope_id
-    );
-    return result;
-}
-
-void fail_processing_envelopes(
-    arachne::coordination::operational_ledger& ledger,
-    const std::vector<std::string>& envelope_ids
-) noexcept {
-    for (const std::string& envelope_id : envelope_ids) {
-        try {
-            auto envelope = ledger.get(envelope_id);
-            if (envelope.status == cocoon_status::waiting_processing) {
-                envelope = ledger.transition(
-                    envelope_id, cocoon_status::processing,
-                    "arachne:product-integrate",
-                    "operation failed while preparing graph materialization"
-                );
-            }
-            if (envelope.status == cocoon_status::processing) {
-                static_cast<void>(ledger.transition(
-                    envelope_id, cocoon_status::failed,
-                    "arachne:product-integrate",
-                    "Penelope build or post-build ledger transition failed; "
-                    "the cocoon remains retriable"
-                ));
-            }
-        } catch (const std::exception& error) {
-            std::cerr << "warning: cannot mark " << envelope_id
-                      << " retriable after failure: " << error.what() << '\n';
-        }
-    }
-}
-
-struct queue_cleanup_result final {
-    std::size_t removed = 0;
-    ordered_json issues = ordered_json::array();
-};
-
-[[nodiscard]] queue_cleanup_result cleanup_integrated_queue(
-    arachne::coordination::operational_ledger& ledger,
-    const configuration& config
-) {
-    queue_cleanup_result result;
-    for (const auto& envelope : ledger.list(cocoon_status::integrated)) {
-        try {
-            if (ledger.retire_queued_payload(
-                    envelope.envelope_id, config.queue, config.legacy_inbox
-                )) {
-                ++result.removed;
-            }
-        } catch (const std::exception& error) {
-            result.issues.push_back(
-                { { "envelope_id", envelope.envelope_id },
-                  { "path", envelope.payload_ref.generic_string() },
-                  { "message", error.what() } }
-            );
-        }
-    }
-    return result;
-}
-
-int command_product_integrate(const options& arguments) {
-    const configuration config
-        = load_configuration(arguments.require("--config"));
-    const std::string& logical_date = arguments.require("--logical-date");
-    if (!valid_logical_date(logical_date)) {
-        throw cli_error("--logical-date must be a valid YYYY-MM-DD date");
-    }
-    const std::string& run_id = arguments.require("--run-id");
-    const bool force = arguments.flag("--force");
-    arachne::coordination::operational_ledger ledger(
-        config.ledger, config.legacy_inbox
-    );
-    const json& product_config
-        = required_object(config.document, "product_integration");
-    const std::size_t threshold
-        = size_value(product_config, "queued_batch_threshold", 15U);
-    queue_cleanup_result cleanup = cleanup_integrated_queue(ledger, config);
-    const auto accumulation = ledger.accumulation();
-    std::vector<arachne::coordination::envelope_record> bound_inputs;
-    bool known_run = false;
-    try {
-        bound_inputs = ledger.product_run_inputs(run_id);
-        known_run = true;
-    } catch (const std::out_of_range&) {
-        // A new run has no ledger row until the queue threshold is satisfied.
-    }
-    const auto retryable = product_pending(ledger);
-    const bool has_failed_input
-        = std::ranges::any_of(retryable, [](const auto& envelope) {
-              return envelope.status == cocoon_status::failed;
-          });
-    if (!force && !known_run && !has_failed_input
-        && accumulation.accepted_count < threshold) {
-        emit(
-            ordered_json {
-                { "status", "ok" },
-                { "processed", false },
-                { "reason", "queued_batch_threshold_not_met" },
-                { "queued", accumulation.accepted_count },
-                { "threshold", threshold },
-                { "queue_files_removed", cleanup.removed },
-                { "cleanup_issues", cleanup.issues },
-                { "aggregate",
-                  { { "successful", 0 },
-                    { "partial", 0 },
-                    { "problematic", cleanup.issues.size() } } },
-            }
-        );
-        return 0;
-    }
-
-    arachne::coordination::domain_lock lock(
-        config.lock_root, "product_graph", run_id, config.product_lock_stale
-    );
-    const std::string configuration_hash
-        = policy_configuration_hash(config, "product_integration");
-    if (bound_inputs.empty()) {
-        bound_inputs = product_pending(ledger);
-    }
-    if (bound_inputs.empty() && !known_run) {
-        emit(
-            ordered_json {
-                { "status", "ok" },
-                { "processed", false },
-                { "reason", "queue_empty" },
-                { "queued", 0 },
-                { "threshold", threshold },
-                { "queue_files_removed", cleanup.removed },
-                { "cleanup_issues", cleanup.issues },
-                { "aggregate",
-                  { { "successful", 0 },
-                    { "partial", 0 },
-                    { "problematic", cleanup.issues.size() } } },
-            }
-        );
-        return 0;
-    }
-    if (!ledger.claim_logical_run(
-            run_id, "product_graph", logical_date, configuration_hash, true,
-            true
-        )) {
-        emit(
-            ordered_json {
-                { "status", "ok" },
-                { "processed", false },
-                { "reason", "run_already_succeeded" },
-                { "run_id", run_id },
-                { "queue_files_removed", cleanup.removed },
-                { "cleanup_issues", cleanup.issues },
-                { "aggregate",
-                  { { "successful", 0 },
-                    { "partial", 0 },
-                    { "problematic", cleanup.issues.size() } } },
-            }
-        );
-        return 0;
-    }
-    if (bound_inputs.empty()) {
-        ledger.finish_run(run_id, "failed");
-        throw cli_error(
-            "resumed product run has no bound or retryable queue inputs", 3
-        );
-    }
-    std::vector<std::string> selected_ids;
-    selected_ids.reserve(bound_inputs.size());
-    for (const auto& envelope : bound_inputs) {
-        selected_ids.push_back(envelope.envelope_id);
-    }
-    std::vector<arachne::coordination::envelope_record> envelopes;
-    try {
-        ledger.bind_product_run_inputs(run_id, selected_ids);
-        envelopes = ledger.product_run_inputs(run_id);
-        for (const auto& envelope : envelopes) {
-            if (!arachne::coordination::path_is_within(
-                    envelope.payload_ref, config.queue
-                )
-                || (envelope.status != cocoon_status::integrated
-                    && !fs::is_regular_file(envelope.payload_ref))) {
-                throw cli_error(
-                    "eligible cocoon payload is not an immutable "
-                    "internal-queue "
-                    "file: "
-                    + envelope.envelope_id
-                );
-            }
-        }
-    } catch (...) {
-        const std::exception_ptr failure = std::current_exception();
-        try {
-            ledger.finish_run(run_id, "failed");
-        } catch (const std::exception& error) {
-            std::cerr << "warning: cannot finish invalid product run " << run_id
-                      << ": " << error.what() << '\n';
-        }
-        std::rethrow_exception(failure);
-    }
-
-    std::vector<std::string> transitioned;
-    std::optional<written_run_manifest> run_manifest;
-    bool reconciled = false;
-    try {
-        std::vector<arachne::penelope::accepted_batch_descriptor> batches;
-        batches.reserve(envelopes.size());
-        for (auto& envelope : envelopes) {
-            if (envelope.status == cocoon_status::accepted
-                || envelope.status == cocoon_status::failed) {
-                envelope = ledger.transition(
-                    envelope.envelope_id, cocoon_status::waiting_processing,
-                    "arachne:product-integrate",
-                    "accepted cocoon selected for product integration"
-                );
-            }
-            if (envelope.status == cocoon_status::waiting_processing) {
-                envelope = ledger.transition(
-                    envelope.envelope_id, cocoon_status::processing,
-                    "arachne:product-integrate",
-                    "Penelope product snapshot build started"
-                );
-            }
-            if (envelope.status == cocoon_status::processing) {
-                transitioned.push_back(envelope.envelope_id);
-            }
-            batches.push_back(
-                { .envelope_id = envelope.envelope_id,
-                  .payload_path = envelope.payload_ref,
-                  .payload_sha256 = envelope.payload_sha256 }
-            );
-        }
-        arachne::penelope::store persistence(config.graph_store);
-        arachne::penelope::product_snapshot_request request {
-            .run_id = run_id, .batches = std::move(batches)
-        };
-        const auto snapshot = persistence.build_product_snapshot(request);
-        ordered_json manifest_inputs = ordered_json::array();
-        for (const auto& envelope : envelopes) {
-            manifest_inputs.push_back(
-                { { "kind", "mining-cocoon" },
-                  { "identity", envelope.envelope_id },
-                  { "sha256", envelope.payload_sha256 },
-                  { "byte_length", envelope.byte_length } }
-            );
-        }
-        run_manifest = write_graph_run_manifest(
-            config, "product", "product_graph", run_id,
-            { { "operations", configuration_hash } },
-            std::move(manifest_inputs), snapshot
-        );
-        ledger.finish_integrated_product_run(run_id, run_manifest->storage_ref);
-        reconciled = true;
-        queue_cleanup_result after = cleanup_integrated_queue(ledger, config);
-        cleanup.removed += after.removed;
-        for (auto& issue : after.issues) {
-            cleanup.issues.push_back(std::move(issue));
-        }
-        ordered_json ids = ordered_json::array();
-        for (const auto& envelope : envelopes) {
-            ids.push_back(envelope.envelope_id);
-        }
-        emit(
-            ordered_json {
-                { "status", "ok" },
-                { "processed", true },
-                { "command", "product-integrate" },
-                { "logical_date", logical_date },
-                { "run_id", run_id },
-                { "forced", force },
-                { "cocoon_ids", std::move(ids) },
-                { "snapshot", snapshot_json(snapshot) },
-                { "run_manifest_path", run_manifest->path.generic_string() },
-                { "run_manifest", run_manifest->document },
-                { "queue_files_removed", cleanup.removed },
-                { "cleanup_issues", cleanup.issues },
-                { "aggregate",
-                  { { "successful", envelopes.size() },
-                    { "partial", 0 },
-                    { "problematic", cleanup.issues.size() } } },
-            }
-        );
-        return 0;
-    } catch (...) {
-        const std::exception_ptr failure = std::current_exception();
-        if (reconciled) {
-            std::rethrow_exception(failure);
-        }
-        fail_processing_envelopes(ledger, transitioned);
-        try {
-            ledger.finish_run(
-                run_id, "failed",
-                run_manifest ? std::string_view(run_manifest->storage_ref)
-                             : std::string_view {}
-            );
-        } catch (const std::exception& error) {
-            std::cerr << "warning: cannot finish failed run " << run_id << ": "
-                      << error.what() << '\n';
-        }
-        std::rethrow_exception(failure);
-    }
 }
 
 int command_candidate_rebuild(const options& arguments) {
@@ -2415,8 +2106,9 @@ int command_viewer_build(const options& arguments) {
         { "commands",
           { "candidate-plan", "candidate-rebuild", "cocoon-transition",
             "contract-validate", "fetch", "fetch-plan-translate",
-            "inbox-baseline", "inbox-verify", "intake", "product-integrate",
-            "product-import-normalized", "product-migrate-database",
+            "inbox-baseline", "inbox-verify", "intake",
+            "product-check-inbox", "product-apply-inbox",
+            "product-rebuild-merge-hints",
             "viewer-build" } },
     };
 }
@@ -2459,23 +2151,19 @@ int dispatch(const std::vector<std::string>& arguments) {
         return command_inbox_verify(options(arguments, 3U, { "--config" }));
     }
     if (arguments[1] == "product" && arguments.size() >= 3U
-        && arguments[2] == "integrate") {
-        return command_product_integrate(options(
-            arguments, 3U, { "--config", "--logical-date", "--run-id" },
-            { "--force" }
-        ));
+        && arguments[2] == "check-inbox") {
+        static_cast<void>(options(arguments, 3U, {}));
+        return command_product_inbox(false);
     }
     if (arguments[1] == "product" && arguments.size() >= 3U
-        && arguments[2] == "import-normalized") {
-        return command_product_import_normalized(
-            options(arguments, 3U, { "--manifest", "--database" })
-        );
+        && arguments[2] == "apply-inbox") {
+        static_cast<void>(options(arguments, 3U, {}));
+        return command_product_inbox(true);
     }
     if (arguments[1] == "product" && arguments.size() >= 3U
-        && arguments[2] == "migrate-database") {
-        return command_product_migrate_database(
-            options(arguments, 3U, { "--database", "--manifest" })
-        );
+        && arguments[2] == "rebuild-merge-hints") {
+        static_cast<void>(options(arguments, 3U, {}));
+        return command_product_rebuild_merge_hints();
     }
     if (arguments[1] == "candidate" && arguments.size() >= 3U
         && arguments[2] == "rebuild") {

@@ -1019,7 +1019,6 @@ nlohmann::ordered_json viewer_builder::catalog(
         item["advisories"] = nlohmann::ordered_json::array();
         item["measurements"] = nlohmann::ordered_json::array();
         item["identifiers"] = nlohmann::ordered_json::array();
-        item["assets"] = nlohmann::ordered_json::array();
         item["manifestations"] = nlohmann::ordered_json::array();
         item["financialFacts"] = nlohmann::ordered_json::array();
         works.emplace(id, std::move(item));
@@ -1118,21 +1117,6 @@ nlohmann::ordered_json viewer_builder::catalog(
         };
         copy_field(item, "url", identifier, "canonical_url");
         work->second["identifiers"].push_back(std::move(item));
-    }
-
-    for (const auto& asset : array_or_empty(product_export, "remote_assets")) {
-        const auto work = works.find(asset.value("entity_id", ""));
-        if (work == works.end()) {
-            continue;
-        }
-        nlohmann::ordered_json item {
-            { "provider", asset.value("provider", "unknown") },
-        };
-        copy_field(item, "remoteKey", asset, "remote_key");
-        copy_field(item, "directUrl", asset, "direct_url");
-        copy_field(item, "resolverRule", asset, "resolver_rule");
-        copy_field(item, "rightsNote", asset, "rights_note");
-        work->second["assets"].push_back(std::move(item));
     }
 
     for (const auto& manifestation :

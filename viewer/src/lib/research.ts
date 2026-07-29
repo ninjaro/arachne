@@ -105,8 +105,8 @@ function summarize(items: ResearchItem[]): ResearchSummary {
   return {
     total: items.length,
     qualityGaps: items.filter((item) => item.kind === "quality_gap").length,
-    conflicts: items.filter((item) => item.kind === "conflict").length,
-    remainders: items.filter((item) => item.kind === "remainder").length,
+    ingestIssues: items.filter((item) => item.kind === "ingest_issue").length,
+    mergeHints: items.filter((item) => item.kind === "merge_hint").length,
     problems: items.filter((item) => item.severity === "problem").length,
     weak: items.filter((item) => item.severity === "weak").length,
     info: items.filter((item) => item.severity === "info").length,
@@ -137,6 +137,7 @@ export function buildResearchData(
     (left, right) =>
       severityRank[left.severity] - severityRank[right.severity] ||
       left.kind.localeCompare(right.kind) ||
+      (right.similarityScore ?? -1) - (left.similarityScore ?? -1) ||
       (left.score ?? 101) - (right.score ?? 101) ||
       left.title.localeCompare(right.title) ||
       left.id.localeCompare(right.id),

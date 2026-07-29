@@ -11,7 +11,6 @@ from typing import Any
 
 
 CONTROL_CONTRACTS = (
-    "mining_batch_v1",
     "batch_envelope_v1",
     "fetch_plan_v1",
     "fetch_request_v1",
@@ -28,6 +27,8 @@ ARTIFACT_FORMATS = (
     "research_candidate_graph_materialization_v1",
     "viewer_projection_data_v1",
 )
+
+PRODUCT_BATCH_FORMAT = "arachne_batch_v2"
 
 WORKFLOWS = (
     "validation.yml",
@@ -73,14 +74,44 @@ def check_contracts(root: Path) -> None:
                 f"{schema_path}: wrong contract const")
         require(properties.get("format_version", {}).get("const") == 1,
                 f"{schema_path}: wrong format version")
-        if name == "mining_batch_v1":
-            require(example.get("contract") in (None, name),
-                    f"{example_path}: invalid optional MINER contract field")
-        else:
-            require(example.get("contract") == name,
-                    f"{example_path}: control example is not discoverable")
+        require(example.get("contract") == name,
+                f"{example_path}: control example is not discoverable")
 
     load_json(schemas / "common_v1.schema.json")
+
+    batch_schema_path = schemas / f"{PRODUCT_BATCH_FORMAT}.schema.json"
+    batch_example_path = examples / f"{PRODUCT_BATCH_FORMAT}.json"
+    batch_schema = load_json(batch_schema_path)
+    batch_example = load_json(batch_example_path)
+    require(
+        batch_schema.get("$schema")
+        == "https://json-schema.org/draft/2020-12/schema",
+        f"{batch_schema_path}: expected JSON Schema Draft 2020-12",
+    )
+    require(
+        batch_schema.get("type") == "object",
+        f"{batch_schema_path}: root must be an object",
+    )
+    require(
+        batch_schema.get("additionalProperties") is False,
+        f"{batch_schema_path}: batch root must be closed",
+    )
+    require(
+        batch_schema.get("properties", {})
+        .get("format", {})
+        .get("const")
+        == PRODUCT_BATCH_FORMAT,
+        f"{batch_schema_path}: wrong format const",
+    )
+    require(
+        set(batch_schema.get("required", ()))
+        == {"format", "batch_id", "create", "update", "merge"},
+        f"{batch_schema_path}: wrong required root fields",
+    )
+    require(
+        batch_example.get("format") == PRODUCT_BATCH_FORMAT,
+        f"{batch_example_path}: wrong batch format",
+    )
 
 
 def check_artifacts(root: Path) -> None:
@@ -98,80 +129,6 @@ def check_artifacts(root: Path) -> None:
                 f"{example_path}: wrong artifact_type")
         require(example.get("format_version") == 1,
                 f"{example_path}: wrong format_version")
-
-    normalized_name = "normalized_product_import_v3"
-    normalized_path = directory / f"{normalized_name}.schema.json"
-    normalized = load_json(normalized_path)
-    normalized_properties = normalized.get("properties", {})
-    normalized_defs = normalized.get("$defs", {})
-    require(normalized.get("$schema") == "https://json-schema.org/draft/2020-12/schema",
-            f"{normalized_path}: expected JSON Schema Draft 2020-12")
-    require(normalized.get("type") == "object",
-            f"{normalized_path}: root must be an object")
-    require(normalized.get("additionalProperties") is False,
-            f"{normalized_path}: normalized import root must be closed")
-    require(normalized_properties.get("contract", {}).get("const") == normalized_name,
-            f"{normalized_path}: wrong contract const")
-    require(normalized_properties.get("format_version", {}).get("const") == 3,
-            f"{normalized_path}: wrong format version")
-    require(
-        not {"entity_redirects", "source_redirects"} & normalized_properties.keys(),
-        f"{normalized_path}: legacy redirects are forbidden",
-    )
-
-    expected_id_patterns = {
-        "agent_id": r"^agent-[0-9]{6,}$",
-        "work_id": r"^work-[0-9]{6,}$",
-        "concept_id": r"^concept-[0-9]{6,}$",
-        "manifestation_id": r"^manifestation-[0-9]{6,}$",
-    }
-    for definition, pattern in expected_id_patterns.items():
-        require(normalized_defs.get(definition, {}).get("pattern") == pattern,
-                f"{normalized_path}: wrong {definition} pattern")
-
-    entity_id_definitions = {
-        "creator": "agent_id",
-        "work": "work_id",
-        "manifestation": "manifestation_id",
-    }
-    for entity, identifier_definition in entity_id_definitions.items():
-        all_of = normalized_defs.get(entity, {}).get("allOf", [])
-        overrides = (
-            all_of[1].get("properties", {})
-            if isinstance(all_of, list)
-            and len(all_of) > 1
-            and isinstance(all_of[1], dict)
-            else {}
-        )
-        expected_ref = f"#/$defs/{identifier_definition}"
-        require(overrides.get("local_id", {}).get("$ref") == expected_ref,
-                f"{normalized_path}: {entity} local_id is not readable")
-        require(overrides.get("canonical_id", {}).get("$ref") == expected_ref,
-                f"{normalized_path}: {entity} canonical_id is not readable")
-
-    concept = normalized_defs.get("concept", {})
-    concept_properties = concept.get("properties", {})
-    require("canonical_id" in concept.get("required", ()),
-            f"{normalized_path}: concepts require canonical_id")
-    require(concept_properties.get("local_id", {}).get("$ref") == "#/$defs/concept_id",
-            f"{normalized_path}: concept local_id is not readable")
-    require(concept_properties.get("canonical_id", {}).get("$ref") == "#/$defs/concept_id",
-            f"{normalized_path}: concept canonical_id is not readable")
-    require("names" in concept_properties,
-            f"{normalized_path}: concept names are missing")
-    require("slug_aliases" not in concept_properties,
-            f"{normalized_path}: concept slug aliases are forbidden")
-
-    reference = normalized_defs.get("reference", {})
-    reference_properties = reference.get("properties", {})
-    require({"ref_id", "source_type"} <= set(reference.get("required", ())),
-            f"{normalized_path}: references require ref_id and source_type")
-    require("canonical_id" not in reference_properties,
-            f"{normalized_path}: source canonical IDs are forbidden")
-    require("alternate_urls" in reference_properties,
-            f"{normalized_path}: alternate source URLs are missing")
-    require("archive" in reference_properties,
-            f"{normalized_path}: source archive metadata is missing")
 
 
 def check_configuration(root: Path) -> None:
@@ -198,9 +155,6 @@ def check_configuration(root: Path) -> None:
     require(paths.get("legacy_inbox") is None
             or isinstance(paths.get("legacy_inbox"), str),
             f"{path}: paths.legacy_inbox must be null or a path")
-    product = config.get("product_integration", {})
-    require(product.get("queued_batch_threshold") == 15,
-            f"{path}: the current default queued_batch_threshold must be 15")
     wikidata = config.get("candidate_rebuild", {}).get("sources", {}).get(
         "wikidata", {}
     )
@@ -224,23 +178,47 @@ def check_configuration(root: Path) -> None:
 
 
 def check_repository_surface(root: Path) -> None:
+    inbox_placeholder = root / "inbox" / "rejected" / ".gitkeep"
+    require(
+        inbox_placeholder.is_file(),
+        f"missing fixed product inbox layout placeholder: {inbox_placeholder}",
+    )
     for workflow in WORKFLOWS:
         path = root / ".github" / "workflows" / workflow
         require(path.is_file(), f"missing workflow: {path}")
-    for document in ("ARCHITECTURE.md", "OPERATIONS.md"):
+    for document in ("ARCHITECTURE.md", "OPERATIONS.md", "PRODUCT_INBOX.md"):
         path = root / "docs" / document
         require(path.is_file(), f"missing documentation: {path}")
     required_scripts = {
-        "corpus analysis tool": "analyze_legacy_corpus.py",
         "publication bundle resolver": "resolve_site_bundle.py",
         "source refresh cadence gate": "source_refresh_gate.py",
         "Wikidata bulk plan adapter": "wikidata_bulk_fetch_plan.py",
+        "product batch materializer": "materialize_product_batch.py",
     }
     for label, name in required_scripts.items():
         path = root / "scripts" / name
         require(path.is_file(), f"missing {label}: {path}")
     worker = root / "hpc" / "wikidata" / "build_external_graph.py"
     require(worker.is_file(), f"missing streaming HPC worker: {worker}")
+    forbidden_legacy_paths = (
+        "scripts/analyze_legacy_corpus.py",
+        "scripts/build_canonical_merge_plan.py",
+        "scripts/cleanup_merged_inbox.py",
+        "scripts/consolidate_canonical_manifest.py",
+        "scripts/inbox_manifest.py",
+        "scripts/normalize_legacy_batches.py",
+        "scripts/safe_extract.py",
+        "schema/product_v4.sql",
+        "corpus-import",
+        "viewer/README-MIGRATION.md",
+        "viewer/patches",
+        "viewer/scripts/apply_production_integration.py",
+    )
+    for relative in forbidden_legacy_paths:
+        require(
+            not (root / relative).exists(),
+            f"legacy migration surface must be removed: {relative}",
+        )
 
 
 def parser() -> argparse.ArgumentParser:

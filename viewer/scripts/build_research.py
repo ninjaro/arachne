@@ -3,110 +3,131 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
-def source(value: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "container": str(value.get("container", "unknown")),
-    }
-    if value.get("batch_id"):
-        result["batchId"] = str(value["batch_id"])
-    if value.get("member"):
-        result["member"] = str(value["member"])
-    return result
+PRODUCT_SCHEMA_VERSION = 5
 
 
-def work_id_from_identity(identity: Any) -> str | None:
-    if isinstance(identity, str) and identity.startswith("work:"):
-        return identity.split(":", 1)[1] or None
-    if isinstance(identity, dict):
-        value = identity.get("work_id") or identity.get("id")
-        return str(value) if value else None
-    return None
-
-
-def unresolved_items(
-    document: dict[str, Any], include_raw: bool
+def rows(
+    connection: sqlite3.Connection,
+    query: str,
+    parameters: Iterable[Any] = (),
 ) -> list[dict[str, Any]]:
-    if document.get("artifact_type") != "consolidated_corpus_unresolved_v1":
-        raise ValueError(
-            "unresolved input must be consolidated_corpus_unresolved_v1"
+    return [dict(row) for row in connection.execute(query, tuple(parameters))]
+
+
+def parse_json(value: str | None) -> Any:
+    if value is None:
+        return None
+    return json.loads(value)
+
+
+def entity_labels(connection: sqlite3.Connection) -> dict[str, str]:
+    return {
+        row["id"]: row["label"]
+        for row in rows(
+            connection,
+            """
+            SELECT e.id,
+                   COALESCE(
+                       (
+                           SELECT n.value
+                           FROM names AS n
+                           WHERE n.entity_id = e.id
+                           ORDER BY n.is_preferred DESC, n.id
+                           LIMIT 1
+                       ),
+                       (
+                           SELECT c.slug
+                           FROM concepts AS c
+                           WHERE c.entity_id = e.id
+                       ),
+                       e.id
+                   ) AS label
+            FROM entities AS e
+            ORDER BY e.id
+            """,
         )
+    }
 
+
+def issue_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-
-    for index, conflict in enumerate(document.get("conflicts", [])):
-        if not isinstance(conflict, dict):
-            continue
-        occurrences = []
-        for occurrence in conflict.get("occurrences", []):
-            if not isinstance(occurrence, dict):
-                continue
-            item: dict[str, Any] = {
-                "source": source(occurrence.get("source", {})),
-                "jsonPointer": str(occurrence.get("json_pointer", "")),
-            }
-            if include_raw and "value" in occurrence:
-                item["value"] = occurrence["value"]
-            occurrences.append(item)
-
-        field = str(conflict.get("field", "unknown"))
-        result: dict[str, Any] = {
-            "id": f"conflict:{index}",
-            "kind": "conflict",
+    for row in rows(
+        connection,
+        """
+        SELECT batch_id, code, json_path, message, value_json
+        FROM ingest_issues
+        WHERE status = 'open'
+        ORDER BY batch_id, code, json_path
+        """,
+    ):
+        item: dict[str, Any] = {
+            "id": (
+                f"ingest-issue:{row['batch_id']}:{row['code']}:"
+                f"{row['json_path']}"
+            ),
+            "kind": "ingest_issue",
             "severity": "problem",
-            "category": str(conflict.get("category", "conflict")),
-            "title": f"Conflict: {field}",
-            "message": str(
-                conflict.get("reason", "Manual review required.")
+            "category": row["code"],
+            "title": (
+                f"Batch {row['batch_id']}: "
+                f"{row['code'].replace('_', ' ')}"
             ),
-            "field": field,
-            "occurrences": occurrences,
+            "message": row["message"],
+            "batchId": row["batch_id"],
+            "jsonPath": row["json_path"],
         }
-        work_id = work_id_from_identity(conflict.get("identity"))
-        if work_id:
-            result["workId"] = work_id
-        if conflict.get("dependencies"):
-            result["dependencies"] = conflict["dependencies"]
-        items.append(result)
+        if row["value_json"] is not None:
+            item["value"] = parse_json(row["value_json"])
+        items.append(item)
+    return items
 
-    for index, remainder in enumerate(document.get("remainders", [])):
-        if not isinstance(remainder, dict):
-            continue
-        source_value = remainder.get("source", {})
-        occurrence: dict[str, Any] = {
-            "source": source(
-                source_value if isinstance(source_value, dict) else {}
+
+def hint_items(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    labels = entity_labels(connection)
+    items: list[dict[str, Any]] = []
+    for row in rows(
+        connection,
+        """
+        SELECT entity_type, left_id, right_id, score, text_score,
+               graph_score, context_score, signals_json
+        FROM merge_hints
+        WHERE status = 'open'
+        ORDER BY score DESC, entity_type, left_id, right_id
+        """,
+    ):
+        left_label = labels.get(row["left_id"], row["left_id"])
+        right_label = labels.get(row["right_id"], row["right_id"])
+        score = float(row["score"])
+        item: dict[str, Any] = {
+            "id": (
+                f"merge-hint:{row['entity_type']}:{row['left_id']}:"
+                f"{row['right_id']}"
             ),
-            "jsonPointer": str(remainder.get("json_pointer", "")),
-        }
-        if include_raw and "value" in remainder:
-            occurrence["value"] = remainder["value"]
-
-        result = {
-            "id": f"remainder:{index}",
-            "kind": "remainder",
-            "severity": "weak",
-            "category": str(remainder.get("category", "remainder")),
-            "title": str(
-                remainder.get("category", "Untransferred value")
-            ).replace("_", " ").title(),
-            "message": str(
-                remainder.get(
-                    "reason", "The value could not be transferred safely."
-                )
+            "kind": "merge_hint",
+            "severity": "info",
+            "category": f"{row['entity_type']}_duplicate_candidate",
+            "title": f"Possible {row['entity_type']} duplicate",
+            "message": (
+                f"{left_label} and {right_label} scored "
+                f"{score * 100:.1f}% as a review candidate."
             ),
-            "occurrences": [occurrence],
+            "entityType": row["entity_type"],
+            "leftId": row["left_id"],
+            "leftLabel": left_label,
+            "rightId": row["right_id"],
+            "rightLabel": right_label,
+            "similarityScore": score,
+            "textScore": row["text_score"],
+            "graphScore": row["graph_score"],
+            "contextScore": row["context_score"],
+            "signals": parse_json(row["signals_json"]),
         }
-        if include_raw and "value" in remainder:
-            result["value"] = remainder["value"]
-        if remainder.get("dependencies"):
-            result["dependencies"] = remainder["dependencies"]
-        items.append(result)
-
+        items.append(item)
     return items
 
 
@@ -114,54 +135,85 @@ def summary(items: list[dict[str, Any]]) -> dict[str, int]:
     return {
         "total": len(items),
         "qualityGaps": 0,
-        "conflicts": sum(item.get("kind") == "conflict" for item in items),
-        "remainders": sum(item.get("kind") == "remainder" for item in items),
+        "ingestIssues": sum(
+            item.get("kind") == "ingest_issue" for item in items
+        ),
+        "mergeHints": sum(item.get("kind") == "merge_hint" for item in items),
         "problems": sum(item.get("severity") == "problem" for item in items),
         "weak": sum(item.get("severity") == "weak" for item in items),
         "info": sum(item.get("severity") == "info" for item in items),
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Build optional unresolved research data for the viewer."
-    )
-    parser.add_argument("catalog", type=Path)
-    parser.add_argument("output", type=Path)
-    parser.add_argument("--unresolved", type=Path)
-    parser.add_argument("--include-raw-values", action="store_true")
-    args = parser.parse_args()
+def build_research(database: Path, catalog: dict[str, Any]) -> dict[str, Any]:
+    if catalog.get("formatVersion") != 1 or not isinstance(
+        catalog.get("productSnapshotId"), str
+    ):
+        raise ValueError("catalog must be the current viewer catalog format")
 
-    catalog = json.loads(args.catalog.read_text(encoding="utf-8"))
-    unresolved_path = args.unresolved
-    if unresolved_path is None and os.environ.get("ARACHNE_UNRESOLVED"):
-        unresolved_path = Path(os.environ["ARACHNE_UNRESOLVED"])
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"database quick_check failed: {integrity}")
 
-    items: list[dict[str, Any]] = []
-    if unresolved_path is not None:
-        document = json.loads(
-            unresolved_path.resolve(strict=True).read_text(encoding="utf-8")
+        user_version = int(
+            connection.execute("PRAGMA user_version").fetchone()[0]
         )
-        items = unresolved_items(document, args.include_raw_values)
+        if user_version != PRODUCT_SCHEMA_VERSION:
+            raise RuntimeError(
+                "research export requires product schema v5 "
+                f"(found v{user_version})"
+            )
 
-    output = {
+        items = issue_items(connection) + hint_items(connection)
+    finally:
+        connection.close()
+
+    return {
         "formatVersion": 1,
-        "productSnapshotId": str(
-            catalog.get("productSnapshotId", "unknown")
-        ),
+        "productSnapshotId": catalog["productSnapshotId"],
         "summary": summary(items),
         "items": items,
     }
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description=(
+            "Build actionable viewer research data from product schema v5."
+        )
     )
+    result.add_argument("database", type=Path)
+    result.add_argument("catalog", type=Path)
+    result.add_argument("output", type=Path)
+    result.add_argument("--pretty", action="store_true")
+    return result
+
+
+def main() -> int:
+    arguments = parser().parse_args()
+    database = arguments.database.resolve(strict=True)
+    catalog_path = arguments.catalog.resolve(strict=True)
+    output_path = arguments.output.resolve(strict=False)
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    research = build_research(database, catalog)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if arguments.pretty:
+        payload = json.dumps(research, ensure_ascii=False, indent=2)
+    else:
+        payload = json.dumps(
+            research,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    output_path.write_text(payload + "\n", encoding="utf-8")
     print(
-        f"Wrote {args.output}: "
-        f"{output['summary']['conflicts']} conflicts, "
-        f"{output['summary']['remainders']} remainders"
+        f"Wrote {output_path}: "
+        f"{research['summary']['ingestIssues']} open ingest issues, "
+        f"{research['summary']['mergeHints']} open merge hints"
     )
     return 0
 

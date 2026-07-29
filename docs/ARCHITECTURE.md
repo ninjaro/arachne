@@ -13,14 +13,10 @@ certify truth. Current contributors are treated as trusted participants; public
 contributor ratings, approval queues, and malicious-miner controls are deferred.
 Ambiguous semantic content is not guessed or rewritten by automation.
 
-No strict public Arachne intake manifest exists. The boundary name
-`mining_batch_v1` remains an open, non-normative legacy compatibility marker and
-is never an intake gate. The complete installed corpus has now been observed,
-and that evidence supports legacy `normalized_product_import_v1` and
-`normalized_product_import_v2` input formats, the final-record
-`normalized_product_import_v3` transfer surface, and the external consolidated
-unresolved format described in [Corpus Import](CORPUS_IMPORT.md). Those formats
-do not constrain future miner submissions.
+Product-database intake has one strict format: `arachne_batch_v2`. It is a
+closed, plain UTF-8 JSON document with explicit create, update, and merge
+operations. Unknown fields and legacy batch variants are rejected. See
+[Product inbox](PRODUCT_INBOX.md).
 
 ## Actor boundaries
 
@@ -54,18 +50,13 @@ falls back to stale bytes.
 
 | Domain | Owner | Policy |
 |---|---|---|
-| External legacy inbox | Separate legacy project | Optional migration input; read-only forever while present; never a runtime dependency |
 | Internal queue | Arachne | Temporary accumulated working input; earlier arrival normally comes first |
 | Remainders | Arachne | Reserved for future untransferred portions; currently unused because no schema exists |
 | Operational state | Arachne | Queue/run coordination; permanent per-batch audit metadata is not required |
-| Product SQLite | Penelope | Immutable snapshot under `paths.graph_store`; schema v4 keeps readable canonical entity IDs and compact integer internal keys, and the active snapshot is the durable accepted result versioned through Git LFS |
+| Product inbox | Penelope | Strict JSON files at repository `inbox/`; successful files are removed only after commit and rejected files move to `inbox/rejected/` |
+| Product SQLite | Penelope | `database/art-islands.sqlite`; schema v5 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, ingest issues, and review-only merge hints |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
-
-`~/Projects/new/art-lineages/inbox/` belongs to the separate legacy project.
-Arachne never deletes, moves, renames, overwrites, or modifies it and remains fully
-operational when both legacy projects are absent. Baseline and analysis tools are
-explicitly scoped to this external path.
 
 Arachne's own `paths.queue` is not an immutable inbox. Fully transferred raw queue
 content may be deleted and must not be kept merely for history. The architecture
@@ -75,73 +66,52 @@ whole or fails before mutation and remains in the queue.
 
 ## Intake
 
-Local intake is supported. The exact GitHub-side UX is deferred; the included
-Issue Form and workflow are explicitly provisional and may be replaced by a bot,
-another form, or different Actions integration.
-
-Local intake accepts opaque bytes without treating a speculative JSON shape as
-mandatory. The provisional GitHub adapter currently permits `.json` only because
-ZIP package semantics are deferred. For remote attachments, Arachne constructs
-`fetch_request_v1`, delegates acquisition to Pheidippides, verifies the returned
-`acquired_artifact_v1`, and places received bytes in the accumulated queue.
+Generic local intake accepts opaque bytes without treating a speculative JSON
+shape as mandatory. Product-database issue intake is deliberately narrower:
+the Issue Form accepts exactly one `.json` attachment, Arachne constructs a
+`fetch_request_v1`, Pheidippides returns verified bytes plus
+`acquired_artifact_v1`, and the adapter places those bytes in the fixed product
+inbox. Penelope's read-only `product check-inbox` must accept the complete
+pending inbox before the workflow may propose that file for review. ZIPs and
+sidecars are not accepted.
 
 The only author-facing intake result is:
 
-- `ok`: bytes were received and queued;
+- `ok`: the attachment was received, validated, and proposed for review;
 - `fail`: transmission or receipt did not complete.
 
 `ok` does not imply database integration. No delayed per-author processing
 notification is sent.
 
-Receipt and approval are separate transitions. Intake stops at
-`waiting_approval`; only an explicit maintainer decision may move a cocoon to
-`accepted`, with the actor reference and reason recorded atomically in the
-operational ledger. The maintainer-dispatch workflow provides the corresponding
-GitHub-operated approval/rejection path.
+For product batches, pull-request review is the approval boundary. Intake never
+runs `apply-inbox`; the separately serialized product workflow applies merged
+inbox files and proposes the resulting SQLite change in another reviewable pull
+request. Generic opaque cocoon intake retains its explicit maintainer decision
+and operational-ledger transitions.
 
-## Accumulated product processing
+## Product inbox processing
 
-A scheduled check targets approximately 03:00 in the configured IANA timezone.
-The current default and required baseline is exactly 15 queued batches. A normal
-scheduled check with fewer than 15 does nothing. The threshold remains configurable
-for a future policy change. The configured repository owner may force an immediate
-run, and local manual runs remain the local operator's coordination responsibility.
+`product check-inbox` parses and validates every pending file without modifying
+the database. `product apply-inbox` performs the same complete preflight, then
+applies one batch per `BEGIN IMMEDIATE` transaction. Local references are
+resolved before the transaction; canonical references and explicit merge
+members must already exist.
 
-Runs accumulate inputs and may inspect or merge them before writes. Ordering is
-simple and deterministic; it never uses LLM or machine-learning inference and miner
-identity gives no semantic priority. Penelope stages a transaction and atomically
-activates the new product SQLite only after structural checks.
+Each transaction applies table-specific create, update, relationship-delete, and
+merge operations, checks foreign keys, records the batch ID, and commits before
+the inbox file is deleted. A rejected batch is recorded as structured
+`ingest_issues` rows and moved to `inbox/rejected/`. A previously applied,
+structurally valid batch is not replayed.
 
-`normalized_product_import_v3` is a transfer format, not the SQLite schema
-version. Its readable `agent-*`, `work-*`, `concept-*`, and `manifestation-*`
-IDs become the canonical text IDs in product schema v4. Names, external
-identifiers, credits, measurements, financial facts, assets, sources, archives,
-evidence, assertions, and relationship rows use SQLite `INTEGER PRIMARY KEY`
-values with natural or composite uniqueness constraints. Foreign keys point
-directly to those current keys; no legacy-ID mapping, redirect, or concept-slug
-alias tables exist. Descriptive names and alternate checked source URLs remain
-research data. SHA-256 remains only where it verifies actual content, snapshots,
-or immutable artifacts.
-
-Product schema migrations deliberately distinguish two historical steps.
-Schema v2 to v3 is the metadata-removal migration: without a manifest it drops
-redirect and slug-alias structures while preserving the surviving text IDs.
-Schema v3 to v4 is the compact-ID migration and requires an equivalent
-`normalized_product_import_v3` manifest; Penelope rebuilds a fresh schema-v4
-database, checks semantic equivalence, vacuums it, validates foreign keys and
-integrity, and only then activates it. A schema-v2 database may also be rebuilt
-directly to v4 when that v3 manifest is supplied.
-
-Routine queued processing retains whole-batch fail-before-mutation semantics. The
-separate evidence-derived corpus migration can accept non-conflicting fields while
-preserving unsafe fields and records in one external structured unresolved file.
-It first normalizes the complete accumulated input, then asks Penelope to apply the
-closed transfer artifact transactionally. Neither path resolves semantic conflicts
-automatically. Temporary reports and detailed file lists need not be retained.
-
-The product SQLite—not a permanently retained raw queue—is the durable accepted
-result. Full replay from every original Arachne submission and permanent batch
-hashes, filenames, identities, timestamps, or snapshot links are not required.
+Schema v5 stores readable `agent-*`, `work-*`, `concept-*`, and
+`manifestation-*` IDs. Internal and relationship rows use integer primary keys
+with natural uniqueness constraints. It has no redirect, canonical-ID alias,
+source-URL alias, remote-asset, source-archive, or legacy-ID mapping tables.
+Similarity calculations populate `merge_hints` for human review only; an actual
+merge always requires an explicit batch operation. A disposable normalized
+block dictionary and integer-key membership index make routine hint refresh
+affected-entity-only; the separate full rebuild reconstructs that derived index
+and all open hints while retaining ignored pairs.
 
 ## Candidate graph and viewer
 
@@ -173,11 +143,12 @@ version; a failed build leaves the prior Pages deployment valid.
 
 ## Remote state and concurrency
 
-Official GitHub operations use a separate protected state repository. Intake runs
-are globally serialized and commit queue/ledger state to the official base so
-parallel per-issue SQLite branches cannot conflict. Product and candidate graph
-changes remain reviewable pull requests. Canonical SQLite paths are Git LFS
-objects, not ordinary Git blobs. Caches and Actions artifacts are disposable.
+Official GitHub operations use a separate protected state repository for
+transport configuration, artifact custody, and generic operational state.
+Product issue intake proposes only a validated repository inbox file; product
+and candidate graph changes remain reviewable pull requests. Canonical SQLite
+paths are Git LFS objects, not ordinary Git blobs. Caches and Actions artifacts
+are disposable.
 
 Workflow concurrency serializes product and candidate writes independently.
 Stable logical dates prevent duplicate daily schedule runs across daylight-saving
@@ -185,9 +156,9 @@ transitions. GitHub operations are the priority path; the system is not required
 coordinate them with arbitrary local writes, and local conflicts belong to the
 local operator.
 
-Every successful product or candidate activation has an immutable run manifest
-under its graph-domain `runs/` directory. It binds actor and contract versions,
-configuration hashes, exact input identities and hashes, database and exports,
-validation report, and snapshot control. Coordinator reconciliation marks the
-same stable input set integrated only in the transaction that records the
-successful product run; failed attempts remain retryable and auditable.
+Candidate graph activations keep immutable run manifests under their graph-domain
+`runs/` directory. Product inbox application is intentionally smaller: each
+strict batch is committed directly to the canonical database and records only
+its `batch_id` in `applied_batches` in the same transaction. Product batches do
+not create run manifests, hashes, compatibility metadata, or snapshot-control
+records.

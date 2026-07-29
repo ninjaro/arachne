@@ -5,10 +5,10 @@
 
 # Arachne
 
-Arachne is a repository-driven pipeline for Art Lineages research. It accumulates
-human-authored mining batches in a temporary queue, coordinates durable and
-candidate graph builds, and generates a static viewer without a continuously
-running server.
+Arachne is a repository-driven pipeline for Art Lineages research. It applies
+strict human-authored product batches transactionally, coordinates candidate
+graph builds, and generates a static viewer without a continuously running
+server.
 
 The central trust rule is simple: miners remain responsible for factual and
 semantic correctness. Arachne checks mechanical properties and provenance; it
@@ -40,15 +40,15 @@ external data. Neither Pheidippides nor Ariadne writes a graph database directly
 | `src/penelope/` | SQLite graph stores, staging, activation and exports |
 | `viewer/` | Static Ariadne viewer assets |
 | `hpc/wikidata/` | Bulk-first streaming Wikidata source-graph worker |
-| `scripts/` | Local/CI adapters, legacy-corpus observation and repository checks |
+| `scripts/` | Local/CI adapters, one-way schema conversion, and repository checks |
 | `.github/workflows/` | Validation, intake, graph operations and verified immutable publication |
 
 ## Build and test
 
-Requirements are CMake 3.28+, a C++23 compiler, libcurl, SQLite, nlohmann-json,
-GoogleTest for test builds, and `yamllint` for workflow checks. On Debian/Ubuntu,
-install `libcurl4-openssl-dev`, `libsqlite3-dev`, `nlohmann-json3-dev`,
-`libgtest-dev`, and `yamllint`.
+Requirements are CMake 3.28+, a C++23 compiler, libcurl, SQLite, utf8proc,
+nlohmann-json, GoogleTest for test builds, and `yamllint` for workflow checks.
+On Debian/Ubuntu, install `libcurl4-openssl-dev`, `libsqlite3-dev`,
+`libutf8proc-dev`, `nlohmann-json3-dev`, `libgtest-dev`, and `yamllint`.
 
 Run the same checks used by the validation workflow:
 
@@ -77,26 +77,19 @@ python3 scripts/arachne_ops.py preflight
 python3 scripts/arachne_ops.py capabilities
 ```
 
-The local adapter and GitHub workflows share eleven versioned capabilities for
-contract validation, Pheidippides transport, intake, cocoon transitions, legacy
-inbox verification, fetch-plan translation, product integration, Ariadne candidate
-planning and rebuilds, and viewer construction. It refuses to execute a
-binary that does not advertise the requested capability.
+The local adapter negotiates the advertised capabilities it uses for actor
+operations. Product-database intake deliberately bypasses configurable adapters:
+the only normal commands are `build/arachne product check-inbox` and
+`build/arachne product apply-inbox`.
 
-Remote writes are disabled by default. A production deployment needs a protected
-persistent-state repository, Git LFS for canonical SQLite, and a least-privilege
-token. Penelope keeps immutable SQLite snapshots under `paths.graph_store`; the
-active product snapshot is the durable accepted result, and fully processed raw
-queue content may be deleted. Current failure handling is conservative: the whole
-batch remains queued and no partial remainder is invented.
+Remote writes are disabled by default. A production deployment needs protected
+branches, Git LFS for the canonical SQLite database, and a least-privilege token.
+Successful product batches are removed only after commit; rejected files move to
+`inbox/rejected/` and their concrete problems are stored in the database.
 
-The included Issue Form is experimental because the exact GitHub intake UX is
-deferred. It currently accepts one opaque `.json` and returns only `ok` (received
-and queued) or `fail`; ZIP package semantics remain deferred, `ok` does not mean
-approval or integration, and no later per-author processing notification is sent.
-Every cocoon remains at `waiting_approval` until a maintainer records an explicit,
-auditable acceptance or rejection through `cocoon-transition` or the maintainer
-dispatch workflow. Local intake remains supported.
+The included Issue Form accepts one plain UTF-8 `arachne_batch_v2` JSON file for
+review. ZIP packages, sidecars, legacy variants, and arbitrary batch metadata are
+not product input.
 
 Periodic external processing is bulk-first. The source-refresh workflow honors the
 reviewed per-source cadence, downloads the official Wikidata dump through the
@@ -104,16 +97,13 @@ declarative Pheidippides door registry, builds the compact external graph with a
 streaming HPC worker, fully recomputes candidate state, and removes disposable raw
 and scratch data after success. Point APIs remain bounded enrichment paths.
 
-The separate legacy `art-lineages/inbox` may be analyzed during format discovery,
-but is always read-only and is not a runtime dependency. Its installed corpus has
-now been fully examined and has a migration-only normalized transfer artifact plus
-a consolidated unresolved artifact. These evidence-derived formats do not define
-or constrain a future public Arachne intake manifest; see
-[Corpus Import](docs/CORPUS_IMPORT.md).
+Product changes use strict `arachne_batch_v2` JSON files in the repository
+`inbox/`. See [Product inbox](docs/PRODUCT_INBOX.md) for the fixed validation and
+application commands, explicit update and merge operations, rejected-batch
+issues, and merge hints.
 
-See [Operations](docs/OPERATIONS.md) for exact CLI mappings, the 03:00 queue check
-with its default threshold of 15, owner force runs, state configuration, and
-recovery.
+See [Operations](docs/OPERATIONS.md) for current CLI mappings, state
+configuration, and recovery.
 
 ## Contracts and architecture
 
@@ -129,8 +119,8 @@ external state domain before enabling remote writes.
 
 ## Security and license
 
-Treat mining batches, archives, external responses, and filenames as untrusted
-data. Report vulnerabilities through GitHub private vulnerability reporting or the
-contact in [.github/SECURITY.md](.github/SECURITY.md).
+Treat inbox batches, external responses, and filenames as untrusted data. Report
+vulnerabilities through GitHub private vulnerability reporting or the contact in
+[.github/SECURITY.md](.github/SECURITY.md).
 
 Arachne is available under the [MIT License](license).

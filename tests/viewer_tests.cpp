@@ -317,6 +317,9 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     EXPECT_EQ(catalog.at("formatVersion"), 1);
     EXPECT_EQ(catalog.at("productSnapshotId"), "product-1");
     EXPECT_EQ(catalog.at("works").size(), 2U);
+    for (const auto& work : catalog.at("works")) {
+        EXPECT_FALSE(work.contains("assets"));
+    }
 
     const auto template_root = temporary.path() / "templates";
     const auto dist = template_root / "dist";

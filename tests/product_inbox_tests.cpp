@@ -1,0 +1,1602 @@
+#include "penelope/inbox.hpp"
+
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+#include <sqlite3.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+
+namespace {
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+std::atomic<unsigned long long> fixture_sequence { 0 };
+
+class inbox_fixture {
+public:
+    inbox_fixture() {
+        root_ = fs::temp_directory_path()
+            / ("arachne-inbox-test-" + std::to_string(::getpid()) + "-"
+               + std::to_string(++fixture_sequence));
+        fs::create_directories(root_ / "inbox");
+        fs::create_directories(root_ / "database");
+        fs::create_directories(root_ / "schema");
+        fs::copy_file(
+            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v5.sql",
+            root_ / "schema" / "product_v5.sql"
+        );
+        const auto initialized = arachne::penelope::apply_product_inbox(root_);
+        if (!initialized.ok) {
+            throw std::runtime_error("could not initialize inbox fixture");
+        }
+    }
+
+    inbox_fixture(const inbox_fixture&) = delete;
+    inbox_fixture& operator=(const inbox_fixture&) = delete;
+
+    ~inbox_fixture() {
+        std::error_code ignored;
+        fs::remove_all(root_, ignored);
+    }
+
+    [[nodiscard]] const fs::path& root() const { return root_; }
+
+    void write(const std::string& filename, const json& document) const {
+        std::ofstream output(root_ / "inbox" / filename, std::ios::binary);
+        output << document.dump(2) << '\n';
+        if (!output) {
+            throw std::runtime_error("could not write fixture batch");
+        }
+    }
+
+    void write_bytes(
+        const std::string& filename, const std::string& bytes
+    ) const {
+        std::ofstream output(root_ / "inbox" / filename, std::ios::binary);
+        output << bytes;
+        if (!output) {
+            throw std::runtime_error("could not write fixture bytes");
+        }
+    }
+
+    [[nodiscard]] std::int64_t integer(const std::string& sql) const {
+        sqlite3* database = nullptr;
+        if (sqlite3_open_v2(
+                (root_ / "database" / "art-islands.sqlite").c_str(),
+                &database, SQLITE_OPEN_READONLY, nullptr
+            )
+            != SQLITE_OK) {
+            throw std::runtime_error("could not open fixture database");
+        }
+        sqlite3_stmt* query = nullptr;
+        if (sqlite3_prepare_v2(
+                database, sql.c_str(), -1, &query, nullptr
+            )
+            != SQLITE_OK) {
+            sqlite3_close(database);
+            throw std::runtime_error("could not prepare fixture query");
+        }
+        const int status = sqlite3_step(query);
+        if (status != SQLITE_ROW) {
+            sqlite3_finalize(query);
+            sqlite3_close(database);
+            throw std::runtime_error("fixture query returned no row");
+        }
+        const std::int64_t result = sqlite3_column_int64(query, 0);
+        sqlite3_finalize(query);
+        sqlite3_close(database);
+        return result;
+    }
+
+    [[nodiscard]] std::string text(const std::string& sql) const {
+        sqlite3* database = nullptr;
+        if (sqlite3_open_v2(
+                (root_ / "database" / "art-islands.sqlite").c_str(),
+                &database, SQLITE_OPEN_READONLY, nullptr
+            )
+            != SQLITE_OK) {
+            throw std::runtime_error("could not open fixture database");
+        }
+        sqlite3_stmt* query = nullptr;
+        if (sqlite3_prepare_v2(
+                database, sql.c_str(), -1, &query, nullptr
+            )
+            != SQLITE_OK
+            || sqlite3_step(query) != SQLITE_ROW) {
+            sqlite3_finalize(query);
+            sqlite3_close(database);
+            throw std::runtime_error("could not execute fixture text query");
+        }
+        const auto* raw = sqlite3_column_text(query, 0);
+        const std::string result
+            = raw == nullptr ? std::string() : reinterpret_cast<const char*>(raw);
+        sqlite3_finalize(query);
+        sqlite3_close(database);
+        return result;
+    }
+
+    void execute(const std::string& sql) const {
+        sqlite3* database = nullptr;
+        if (sqlite3_open_v2(
+                (root_ / "database" / "art-islands.sqlite").c_str(),
+                &database, SQLITE_OPEN_READWRITE, nullptr
+            )
+            != SQLITE_OK) {
+            throw std::runtime_error("could not open writable fixture database");
+        }
+        char* error = nullptr;
+        if (sqlite3_exec(
+                database, "PRAGMA foreign_keys=ON", nullptr, nullptr, &error
+            )
+            != SQLITE_OK) {
+            const std::string message
+                = error == nullptr
+                ? "could not enable fixture foreign keys"
+                : error;
+            sqlite3_free(error);
+            sqlite3_close(database);
+            throw std::runtime_error(message);
+        }
+        if (sqlite3_exec(database, sql.c_str(), nullptr, nullptr, &error)
+            != SQLITE_OK) {
+            const std::string message
+                = error == nullptr ? "fixture SQL failed" : error;
+            sqlite3_free(error);
+            sqlite3_close(database);
+            throw std::runtime_error(message);
+        }
+        sqlite3_close(database);
+    }
+
+private:
+    fs::path root_;
+};
+
+[[nodiscard]] json empty_batch(const std::string& id) {
+    return {
+        { "format", "arachne_batch_v2" },
+        { "batch_id", id },
+        { "create", json::object() },
+        { "update", json::object() },
+        { "merge", json::object() },
+    };
+}
+
+[[nodiscard]] std::string issues_text(
+    const arachne::penelope::inbox_result& result
+) {
+    std::string text;
+    for (const auto& batch : result.batches) {
+        for (const auto& issue : batch.issues) {
+            text += issue.code + " " + issue.json_path + ": " + issue.message
+                + "\n";
+        }
+    }
+    return text;
+}
+
+[[nodiscard]] json hint_signals(
+    const inbox_fixture& fixture, const std::string& family,
+    const std::string& left_id, const std::string& right_id
+) {
+    return json::parse(fixture.text(
+        "SELECT signals_json FROM merge_hints WHERE entity_type='"
+        + family + "' AND left_id='" + left_id + "' AND right_id='"
+        + right_id + "'"
+    ));
+}
+
+TEST(ProductInbox, RejectsUnknownFieldsAndDoesNotWriteDuringCheck) {
+    inbox_fixture fixture;
+    json batch = empty_batch("strict-001");
+    batch["metadata"] = { { "model", "forbidden" } };
+    fixture.write("strict.json", batch);
+
+    const auto result
+        = arachne::penelope::check_product_inbox(fixture.root());
+
+    ASSERT_FALSE(result.ok);
+    ASSERT_EQ(result.rejected_count, 1U);
+    ASSERT_EQ(result.batches.size(), 1U);
+    ASSERT_EQ(result.batches.front().issues.size(), 1U);
+    EXPECT_EQ(result.batches.front().issues.front().code, "unknown_field");
+    EXPECT_TRUE(fs::exists(fixture.root() / "inbox" / "strict.json"));
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM ingest_issues"), 0);
+}
+
+TEST(ProductInbox, RefusesCurrentSchemaMissingNaturalUniquenessIndex) {
+    inbox_fixture fixture;
+    fixture.execute("DROP INDEX names_logical_unique");
+
+    try {
+        (void)arachne::penelope::check_product_inbox(fixture.root());
+        FAIL() << "schema-v5 database without names_logical_unique was accepted";
+    } catch (const arachne::penelope::inbox_error& error) {
+        EXPECT_EQ(
+            std::string(error.what()),
+            "product database index set does not match schema version 5"
+        );
+    }
+}
+
+TEST(ProductInbox, RefusesCurrentSchemaMissingInvariantTrigger) {
+    inbox_fixture fixture;
+    fixture.execute("DROP TRIGGER works_entity_type");
+
+    try {
+        (void)arachne::penelope::check_product_inbox(fixture.root());
+        FAIL() << "schema-v5 database without works_entity_type was accepted";
+    } catch (const arachne::penelope::inbox_error& error) {
+        EXPECT_EQ(
+            std::string(error.what()),
+            "product database trigger set does not match schema version 5"
+        );
+    }
+}
+
+TEST(ProductInbox, RejectedFilenameCollisionsUseDeterministicSuffixes) {
+    inbox_fixture fixture;
+    fs::create_directory(fixture.root() / "inbox" / "rejected");
+    {
+        std::ofstream existing(
+            fixture.root() / "inbox" / "rejected" / "strict.json",
+            std::ios::binary
+        );
+        existing << "previous rejection\n";
+    }
+    json batch = empty_batch("strict-collision");
+    batch["metadata"] = true;
+    fixture.write("strict.json", batch);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(result.ok);
+    EXPECT_FALSE(fs::exists(fixture.root() / "inbox" / "strict.json"));
+    EXPECT_TRUE(
+        fs::exists(fixture.root() / "inbox" / "rejected" / "strict-1.json")
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM ingest_issues "
+            "WHERE batch_id='strict-collision'"
+        ),
+        1
+    );
+}
+
+TEST(ProductInbox, IssueStorageFailureIsReportedAndLeavesInputInPlace) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "DROP TRIGGER works_entity_type;"
+        "CREATE TRIGGER works_entity_type "
+        "BEFORE INSERT ON ingest_issues "
+        "BEGIN SELECT RAISE(ABORT,'test issue storage failure'); END"
+    );
+    json batch = empty_batch("strict-storage-failure");
+    batch["metadata"] = true;
+    fixture.write("strict.json", batch);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(result.ok);
+    ASSERT_EQ(result.batches.size(), 1U);
+    EXPECT_NE(
+        issues_text(result).find("issue_storage_error"), std::string::npos
+    );
+    EXPECT_TRUE(fs::exists(fixture.root() / "inbox" / "strict.json"));
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM ingest_issues"), 0);
+}
+
+TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
+    inbox_fixture fixture;
+    json batch = empty_batch("create-001");
+    batch["create"] = {
+        { "agents",
+          json::array(
+              { { { "local_id", "a" }, { "agent_type", "person" } } }
+          ) },
+        { "works",
+          json::array(
+              { { { "local_id", "w" }, { "medium", "painting" },
+                  { "year_start", 1970 } } }
+          ) },
+        { "concepts",
+          json::array(
+              { { { "local_id", "c" }, { "concept_type", "movement" },
+                  { "slug", "test-movement" } } }
+          ) },
+        { "names",
+          json::array(
+              { { { "entity_id", "a" }, { "name_type", "original" },
+                  { "value", "Example Artist" }, { "is_preferred", true } },
+                { { "entity_id", "w" }, { "name_type", "english" },
+                  { "value", "Example Work" }, { "is_preferred", true } } }
+          ) },
+        { "sources",
+          json::array(
+              { { { "local_id", "s" }, { "source_type", "book" },
+                  { "isbn", "9780000000001" } } }
+          ) },
+        { "evidence",
+          json::array(
+              { { { "local_id", "e" }, { "source_id", "s" },
+                  { "exact_quote", "The work belongs to the movement." },
+                  { "stance", "supports" } } }
+          ) },
+        { "credits",
+          json::array(
+              { { { "work_id", "w" }, { "agent_id", "a" },
+                  { "role", "artist" }, { "importance", "primary" } } }
+          ) },
+        { "work_concepts",
+          json::array(
+              { { { "local_id", "wc" }, { "work_id", "w" },
+                  { "concept_id", "c" }, { "relation_type", "exemplifies" },
+                  { "centrality", 90 }, { "evidence", json::array({ "e" }) } } }
+          ) },
+    };
+    fixture.write("create.json", batch);
+
+    const auto checked
+        = arachne::penelope::check_product_inbox(fixture.root());
+    ASSERT_TRUE(checked.ok) << issues_text(checked);
+    ASSERT_EQ(checked.valid_count, 1U);
+    EXPECT_TRUE(fs::exists(fixture.root() / "inbox" / "create.json"));
+
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(applied.ok);
+    ASSERT_EQ(applied.applied_count, 1U);
+    EXPECT_FALSE(fs::exists(fixture.root() / "inbox" / "create.json"));
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM entities"), 3);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM entities WHERE id IN("
+            "'agent-000001','work-000001','concept-000001')"
+        ),
+        3
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 1);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM applied_batches"), 1);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+    EXPECT_THROW(
+        fixture.execute("DELETE FROM evidence WHERE id=1"),
+        std::runtime_error
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 1);
+
+    json cleanup = empty_batch("create-cleanup");
+    cleanup["update"]["delete"] = {
+        { "work_concepts", json::array({ 1 }) },
+        { "evidence", json::array({ 1 }) },
+    };
+    fixture.write("cleanup.json", cleanup);
+    const auto cleaned
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(cleaned.ok) << issues_text(cleaned);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 0);
+}
+
+TEST(ProductInbox, AllocatesDistinctIdsAcrossAllPendingBatches) {
+    inbox_fixture fixture;
+    for (const auto& [filename, batch_id, suffix] : {
+             std::tuple { "first.json", "multi-001", "one" },
+             std::tuple { "second.json", "multi-002", "two" } }) {
+        json batch = empty_batch(batch_id);
+        batch["create"] = {
+            { "works",
+              json::array(
+                  { { { "local_id", "work-local" },
+                      { "medium", "painting" } } }
+              ) },
+            { "concepts",
+              json::array(
+                  { { { "local_id", "concept-local" },
+                      { "concept_type", "theme" },
+                      { "slug", "multi-" + std::string(suffix) } } }
+              ) },
+            { "sources",
+              json::array(
+                  { { { "local_id", "source-local" },
+                      { "source_type", "book" },
+                      { "isbn", "isbn-" + std::string(suffix) } } }
+              ) },
+            { "evidence",
+              json::array(
+                  { { { "local_id", "evidence-local" },
+                      { "source_id", "source-local" },
+                      { "exact_quote", "quote-" + std::string(suffix) },
+                      { "stance", "supports" } } }
+              ) },
+            { "work_concepts",
+              json::array(
+                  { { { "local_id", "assertion-local" },
+                      { "work_id", "work-local" },
+                      { "concept_id", "concept-local" },
+                      { "relation_type", "exemplifies" },
+                      { "centrality", 50 },
+                      { "evidence",
+                        json::array({ "evidence-local" }) } } }
+              ) },
+        };
+        fixture.write(filename, batch);
+    }
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(result.ok) << issues_text(result);
+    EXPECT_EQ(result.applied_count, 2U);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM works"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM sources"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 2);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM entities WHERE id IN("
+            "'work-000001','work-000002','concept-000001','concept-000002')"
+        ),
+        4
+    );
+}
+
+TEST(ProductInbox, RejectsCanonicalLookingLocalIds) {
+    inbox_fixture fixture;
+    json batch = empty_batch("shadow-001");
+    batch["create"]["works"] = json::array(
+        { { { "local_id", "work-000001" }, { "medium", "painting" } } }
+    );
+    fixture.write("shadow.json", batch);
+
+    const auto result
+        = arachne::penelope::check_product_inbox(fixture.root());
+
+    ASSERT_FALSE(result.ok);
+    EXPECT_NE(issues_text(result).find("reserved_local_id"), std::string::npos);
+}
+
+TEST(ProductInbox, EvidenceDeleteCannotOrphanNewAssertion) {
+    inbox_fixture fixture;
+    json seed = empty_batch("evidence-seed");
+    seed["create"] = {
+        { "works",
+          json::array(
+              { { { "local_id", "work-local" },
+                  { "medium", "painting" } } }
+          ) },
+        { "concepts",
+          json::array(
+              { { { "local_id", "concept-local" },
+                  { "concept_type", "theme" },
+                  { "slug", "evidence-theme" } } }
+          ) },
+        { "sources",
+          json::array(
+              { { { "local_id", "source-local" },
+                  { "source_type", "book" },
+                  { "isbn", "evidence-isbn" } } }
+          ) },
+        { "evidence",
+          json::array(
+              { { { "local_id", "evidence-local" },
+                  { "source_id", "source-local" },
+                  { "exact_quote", "Evidence to retain." },
+                  { "stance", "supports" } },
+                { { "local_id", "evidence-second" },
+                  { "source_id", "source-local" },
+                  { "exact_quote", "Independent evidence." },
+                  { "stance", "supports" } } }
+          ) },
+    };
+    fixture.write("seed.json", seed);
+    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+
+    json conflict = empty_batch("evidence-conflict");
+    conflict["create"]["work_concepts"] = json::array(
+        { { { "local_id", "assertion-local" },
+            { "work_id", "work-000001" },
+            { "concept_id", "concept-000001" },
+            { "relation_type", "exemplifies" },
+            { "centrality", 75 },
+            { "evidence", json::array({ 1 }) } } }
+    );
+    conflict["update"]["delete"] = { { "evidence", json::array({ 1 }) } };
+    fixture.write("conflict.json", conflict);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(result.ok);
+    EXPECT_NE(
+        issues_text(result).find("assertion_evidence_required"),
+        std::string::npos
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
+
+    json mixed = empty_batch("evidence-mixed-conflict");
+    mixed["create"]["work_concepts"] = json::array(
+        { { { "local_id", "assertion-mixed" },
+            { "work_id", "work-000001" },
+            { "concept_id", "concept-000001" },
+            { "relation_type", "exemplifies" },
+            { "centrality", 75 },
+            { "evidence", json::array({ 1, 2 }) } } }
+    );
+    mixed["update"]["delete"] = { { "evidence", json::array({ 1 }) } };
+    fixture.write("mixed.json", mixed);
+    const auto mixed_result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(mixed_result.ok);
+    EXPECT_NE(
+        issues_text(mixed_result).find("deleted_evidence_reference"),
+        std::string::npos
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
+}
+
+TEST(ProductInbox, DeletesOnlyClosedIngestIssuesExplicitly) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO ingest_issues("
+        "batch_id,code,json_path,message,status) VALUES"
+        "('old-resolved','bad_value','/create/works/0','resolved','resolved'),"
+        "('old-open','bad_value','/create/works/0','open','open')"
+    );
+    json cleanup = empty_batch("issue-cleanup");
+    cleanup["update"]["delete"]["ingest_issues"] = json::array(
+        { { { "batch_id", "old-resolved" },
+            { "code", "bad_value" },
+            { "json_path", "/create/works/0" } } }
+    );
+    fixture.write("cleanup.json", cleanup);
+    const auto cleaned
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(cleaned.ok) << issues_text(cleaned);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM ingest_issues "
+            "WHERE batch_id='old-resolved'"
+        ),
+        0
+    );
+
+    json forbidden = empty_batch("issue-open-delete");
+    forbidden["update"]["delete"]["ingest_issues"] = json::array(
+        { { { "batch_id", "old-open" },
+            { "code", "bad_value" },
+            { "json_path", "/create/works/0" } } }
+    );
+    fixture.write("forbidden.json", forbidden);
+    const auto rejected
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_FALSE(rejected.ok);
+    EXPECT_NE(
+        issues_text(rejected).find("open_issue_delete_forbidden"),
+        std::string::npos
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM ingest_issues WHERE batch_id='old-open'"
+        ),
+        1
+    );
+}
+
+TEST(ProductInbox, StructurallyValidRepeatedBatchSkipsItsOperations) {
+    inbox_fixture fixture;
+    fixture.write("first.json", empty_batch("repeat-001"));
+    const auto first
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(first.ok) << issues_text(first);
+
+    json repeated = empty_batch("repeat-001");
+    repeated["create"]["names"] = json::array(
+        { { { "entity_id", "work-999999" }, { "name_type", "english" },
+            { "value", "Would be unresolved" }, { "is_preferred", true } } }
+    );
+    fixture.write("again.json", repeated);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(result.ok);
+    ASSERT_EQ(result.already_applied_count, 1U);
+    EXPECT_FALSE(fs::exists(fixture.root() / "inbox" / "again.json"));
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM names"), 0);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM applied_batches"), 1);
+}
+
+TEST(ProductInbox, RollsBackConstraintFailureAndRecordsIssue) {
+    inbox_fixture fixture;
+    json batch = empty_batch("collision-001");
+    batch["create"]["concepts"] = json::array(
+        { { { "local_id", "one" }, { "concept_type", "theme" },
+            { "slug", "same-slug" } },
+          { { "local_id", "two" }, { "concept_type", "motif" },
+            { "slug", "same-slug" } } }
+    );
+    fixture.write("collision.json", batch);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_FALSE(result.ok);
+    ASSERT_EQ(result.rejected_count, 1U);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 0);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM applied_batches"), 0);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM ingest_issues"), 1);
+    EXPECT_EQ(
+        fixture.text("SELECT code FROM ingest_issues"),
+        "constraint_violation"
+    );
+    EXPECT_EQ(
+        fixture.text("SELECT json_path FROM ingest_issues"),
+        "/create/concepts/1"
+    );
+    EXPECT_EQ(
+        fixture.text(
+            "SELECT json_extract(value_json,'$.local_id') "
+            "FROM ingest_issues"
+        ),
+        "two"
+    );
+    EXPECT_TRUE(
+        fs::exists(
+            fixture.root() / "inbox" / "rejected" / "collision.json"
+        )
+    );
+}
+
+TEST(ProductInbox, ExplicitAgentMergeRewritesAndDeduplicatesCredits) {
+    inbox_fixture fixture;
+    json seed = empty_batch("merge-seed");
+    seed["create"] = {
+        { "agents",
+          json::array(
+              { { { "local_id", "a1" }, { "agent_type", "person" } },
+                { { "local_id", "a2" }, { "agent_type", "person" } } }
+          ) },
+        { "works",
+          json::array(
+              { { { "local_id", "w" }, { "medium", "painting" } } }
+          ) },
+        { "names",
+          json::array(
+              { { { "entity_id", "a1" }, { "name_type", "original" },
+                  { "value", "Same Artist" }, { "is_preferred", true } },
+                { { "entity_id", "a2" }, { "name_type", "original" },
+                  { "value", "Same Artist" }, { "is_preferred", true } } }
+          ) },
+        { "credits",
+          json::array(
+              { { { "work_id", "w" }, { "agent_id", "a1" },
+                  { "role", "artist" }, { "importance", "primary" } },
+                { { "work_id", "w" }, { "agent_id", "a2" },
+                  { "role", "artist" }, { "importance", "primary" } } }
+          ) },
+    };
+    fixture.write("seed.json", seed);
+    const auto seeded
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+    ASSERT_EQ(fixture.integer("SELECT count(*) FROM credits"), 2);
+    ASSERT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hint_block_members m "
+            "JOIN merge_hint_blocks b ON b.id=m.block_id "
+            "WHERE m.entity_id='work-000001' "
+            "AND b.block_type='work_primary_agent'"
+        ),
+        2
+    );
+
+    json merge = empty_batch("merge-apply");
+    merge["merge"]["agents"] = json::array(
+        { { { "target", "agent-000001" },
+            { "members", json::array({ "agent-000002" }) },
+            { "set", json::object() },
+            { "unset", json::array() } } }
+    );
+    fixture.write("merge.json", merge);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 1);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM credits"), 1);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM credits WHERE agent_id='agent-000001'"
+        ),
+        1
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hint_block_members m "
+            "JOIN merge_hint_blocks b ON b.id=m.block_id "
+            "WHERE m.entity_id='work-000001' "
+            "AND b.block_type='work_primary_agent' "
+            "AND b.block_key='agent-000001'"
+        ),
+        1
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hint_block_members m "
+            "JOIN merge_hint_blocks b ON b.id=m.block_id "
+            "WHERE m.entity_id='work-000001' "
+            "AND b.block_type='work_primary_agent' "
+            "AND b.block_key='agent-000002'"
+        ),
+        0
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+TEST(ProductInbox, RejectsDuplicateLocalIdsAndUnresolvedReferences) {
+    inbox_fixture fixture;
+    json batch = empty_batch("references-001");
+    batch["create"] = {
+        { "agents",
+          json::array(
+              { { { "local_id", "duplicate" },
+                  { "agent_type", "person" } } }
+          ) },
+        { "works",
+          json::array(
+              { { { "local_id", "duplicate" }, { "medium", "painting" } } }
+          ) },
+        { "names",
+          json::array(
+              { { { "entity_id", "missing" }, { "name_type", "alias" },
+                  { "value", "Unknown" }, { "is_preferred", false } } }
+          ) },
+    };
+    fixture.write("references.json", batch);
+
+    const auto result
+        = arachne::penelope::check_product_inbox(fixture.root());
+    ASSERT_FALSE(result.ok);
+    ASSERT_EQ(result.batches.size(), 1U);
+    const std::string issues = issues_text(result);
+    EXPECT_NE(issues.find("duplicate_local_id"), std::string::npos);
+}
+
+TEST(ProductInbox, RejectsUnresolvedLocalReferenceBeforeTransaction) {
+    inbox_fixture fixture;
+    json batch = empty_batch("references-002");
+    batch["create"]["names"] = json::array(
+        { { { "entity_id", "missing" }, { "name_type", "alias" },
+            { "value", "Unknown" }, { "is_preferred", false } } }
+    );
+    fixture.write("unresolved.json", batch);
+
+    const auto result
+        = arachne::penelope::check_product_inbox(fixture.root());
+    ASSERT_FALSE(result.ok);
+    EXPECT_NE(
+        issues_text(result).find("unknown_reference"), std::string::npos
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM entities"), 0);
+}
+
+TEST(ProductInbox, AppliesExplicitSetAndUnset) {
+    inbox_fixture fixture;
+    json seed = empty_batch("update-seed");
+    seed["create"]["works"] = json::array(
+        { { { "local_id", "w" }, { "medium", "film" },
+            { "language_code", "fr" }, { "year_start", 1975 } } }
+    );
+    fixture.write("seed.json", seed);
+    const auto seeded
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+
+    json update = empty_batch("update-apply");
+    update["update"]["works"] = json::array(
+        { { { "id", "work-000001" },
+            { "set", { { "country_code", "DE" }, { "year_start", 1976 } } },
+            { "unset", json::array({ "language_code" }) } } }
+    );
+    fixture.write("update.json", update);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(
+        fixture.text(
+            "SELECT country_code FROM works WHERE entity_id='work-000001'"
+        ),
+        "DE"
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT year_start FROM works WHERE entity_id='work-000001'"
+        ),
+        1976
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT language_code IS NULL FROM works "
+            "WHERE entity_id='work-000001'"
+        ),
+        1
+    );
+}
+
+TEST(ProductInbox, AppliesSourceUpdatesByIntegerId) {
+    inbox_fixture fixture;
+    json seed = empty_batch("source-update-seed");
+    seed["create"]["sources"] = json::array(
+        { { { "local_id", "source-local" }, { "source_type", "book" },
+            { "isbn", "9780000000001" } } }
+    );
+    fixture.write("seed.json", seed);
+    const auto seeded
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+
+    json update = empty_batch("source-update-apply");
+    update["update"]["sources"] = json::array(
+        { { { "id", 1 },
+            { "set", { { "title", "Corrected source title" } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("update.json", update);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(
+        fixture.text("SELECT title FROM sources WHERE id=1"),
+        "Corrected source title"
+    );
+}
+
+TEST(ProductInbox, RejectsRepeatedUpdateTargetsBeforeMutation) {
+    inbox_fixture fixture;
+    json seed = empty_batch("duplicate-update-seed");
+    seed["create"]["works"] = json::array(
+        { { { "local_id", "work-local" }, { "medium", "painting" },
+            { "year_start", 1900 } } }
+    );
+    fixture.write("seed.json", seed);
+    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+
+    json update = empty_batch("duplicate-update");
+    update["update"]["works"] = json::array(
+        { { { "id", "work-000001" },
+            { "set", { { "year_start", 1901 } } },
+            { "unset", json::array() } },
+          { { "id", "work-000001" },
+            { "set", { { "year_start", 1902 } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("update.json", update);
+    const auto checked
+        = arachne::penelope::check_product_inbox(fixture.root());
+
+    ASSERT_FALSE(checked.ok);
+    EXPECT_NE(
+        issues_text(checked).find("duplicate_update_target"),
+        std::string::npos
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT year_start FROM works WHERE entity_id='work-000001'"
+        ),
+        1900
+    );
+}
+
+TEST(ProductInbox, ExplicitDeleteAndCreateAtomicallyReplacesRelationship) {
+    inbox_fixture fixture;
+    json seed = empty_batch("replace-credit-seed");
+    seed["create"] = {
+        { "agents",
+          json::array(
+              { { { "local_id", "agent-local" },
+                  { "agent_type", "person" } } }
+          ) },
+        { "works",
+          json::array(
+              { { { "local_id", "work-local" }, { "medium", "painting" } } }
+          ) },
+        { "credits",
+          json::array(
+              { { { "work_id", "work-local" },
+                  { "agent_id", "agent-local" },
+                  { "role", "artist" },
+                  { "importance", "supporting" } } }
+          ) },
+    };
+    fixture.write("seed.json", seed);
+    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+
+    json replacement = empty_batch("replace-credit");
+    replacement["create"]["credits"] = json::array(
+        { { { "work_id", "work-000001" },
+            { "agent_id", "agent-000001" },
+            { "role", "artist" },
+            { "importance", "primary" } } }
+    );
+    replacement["update"]["delete"]["credits"] = json::array({ 1 });
+    fixture.write("replacement.json", replacement);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM credits"), 1);
+    EXPECT_EQ(
+        fixture.text("SELECT importance FROM credits"),
+        "primary"
+    );
+}
+
+TEST(ProductInbox, SchemaKeepsAgentSubtypeSynchronized) {
+    inbox_fixture fixture;
+    json seed = empty_batch("agent-type-seed");
+    seed["create"]["agents"] = json::array(
+        { { { "local_id", "agent-local" },
+            { "agent_type", "person" } } }
+    );
+    fixture.write("seed.json", seed);
+    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+
+    fixture.execute(
+        "UPDATE agents SET agent_type='organization' "
+        "WHERE entity_id='agent-000001'"
+    );
+    EXPECT_EQ(
+        fixture.text(
+            "SELECT entity_type FROM entities WHERE id='agent-000001'"
+        ),
+        "organization"
+    );
+    fixture.execute(
+        "UPDATE entities SET entity_type='group' WHERE id='agent-000001'"
+    );
+    EXPECT_EQ(
+        fixture.text(
+            "SELECT agent_type FROM agents WHERE entity_id='agent-000001'"
+        ),
+        "group"
+    );
+    EXPECT_THROW(
+        fixture.execute(
+            "UPDATE entities SET entity_type='work' "
+            "WHERE id='agent-000001'"
+        ),
+        std::runtime_error
+    );
+}
+
+TEST(ProductInbox, MergeConflictRollsBackUnlessExplicitlyResolved) {
+    inbox_fixture fixture;
+    json seed = empty_batch("conflict-seed");
+    seed["create"]["agents"] = json::array(
+        { { { "local_id", "a1" }, { "agent_type", "person" },
+            { "birth_year", 1900 } },
+          { { "local_id", "a2" }, { "agent_type", "person" },
+            { "birth_year", 1901 } } }
+    );
+    fixture.write("seed.json", seed);
+    const auto seeded
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+
+    json conflict = empty_batch("conflict-merge");
+    conflict["merge"]["agents"] = json::array(
+        { { { "target", "agent-000001" },
+            { "members", json::array({ "agent-000002" }) },
+            { "set", json::object() },
+            { "unset", json::array() } } }
+    );
+    fixture.write("conflict.json", conflict);
+    const auto rejected
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_FALSE(rejected.ok);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 2);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM applied_batches "
+            "WHERE batch_id='conflict-merge'"
+        ),
+        0
+    );
+
+    json resolved = empty_batch("resolved-merge");
+    resolved["merge"]["agents"] = json::array(
+        { { { "target", "agent-000001" },
+            { "members", json::array({ "agent-000002" }) },
+            { "set", { { "birth_year", 1900 } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("resolved.json", resolved);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 1);
+}
+
+TEST(ProductInbox, ConceptMergeCanAdoptMemberSlugWithoutAliasRows) {
+    inbox_fixture fixture;
+    json seed = empty_batch("concept-seed");
+    seed["create"]["concepts"] = json::array(
+        { { { "local_id", "c1" }, { "concept_type", "style" },
+            { "slug", "old-slug" } },
+          { { "local_id", "c2" }, { "concept_type", "style" },
+            { "slug", "final-slug" } } }
+    );
+    fixture.write("seed.json", seed);
+    const auto seeded
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+
+    json merge = empty_batch("concept-merge");
+    merge["merge"]["concepts"] = json::array(
+        { { { "target", "concept-000001" },
+            { "members", json::array({ "concept-000002" }) },
+            { "set", { { "slug", "final-slug" } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("merge.json", merge);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 1);
+    EXPECT_EQ(
+        fixture.text(
+            "SELECT slug FROM concepts WHERE entity_id='concept-000001'"
+        ),
+        "final-slug"
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM sqlite_schema "
+            "WHERE name='concept_slug_aliases'"
+        ),
+        0
+    );
+}
+
+TEST(ProductInbox, ConceptMergeDeduplicatesAssertionsAndPreservesEvidence) {
+    inbox_fixture fixture;
+    json seed = empty_batch("concept-evidence-seed");
+    seed["create"] = {
+        { "works",
+          json::array(
+              { { { "local_id", "work-local" },
+                  { "medium", "painting" } } }
+          ) },
+        { "concepts",
+          json::array(
+              { { { "local_id", "concept-one" },
+                  { "concept_type", "theme" },
+                  { "slug", "merge-theme-one" } },
+                { { "local_id", "concept-two" },
+                  { "concept_type", "theme" },
+                  { "slug", "merge-theme-two" } } }
+          ) },
+        { "sources",
+          json::array(
+              { { { "local_id", "source-local" },
+                  { "source_type", "book" },
+                  { "isbn", "merge-evidence-isbn" } } }
+          ) },
+        { "evidence",
+          json::array(
+              { { { "local_id", "evidence-one" },
+                  { "source_id", "source-local" },
+                  { "exact_quote", "First supporting passage." },
+                  { "stance", "supports" } },
+                { { "local_id", "evidence-two" },
+                  { "source_id", "source-local" },
+                  { "exact_quote", "Second supporting passage." },
+                  { "stance", "supports" } } }
+          ) },
+        { "work_concepts",
+          json::array(
+              { { { "local_id", "assertion-one" },
+                  { "work_id", "work-local" },
+                  { "concept_id", "concept-one" },
+                  { "relation_type", "exemplifies" },
+                  { "centrality", 80 },
+                  { "evidence", json::array({ "evidence-one" }) } },
+                { { "local_id", "assertion-two" },
+                  { "work_id", "work-local" },
+                  { "concept_id", "concept-two" },
+                  { "relation_type", "exemplifies" },
+                  { "centrality", 80 },
+                  { "evidence", json::array({ "evidence-two" }) } } }
+          ) },
+    };
+    fixture.write("seed.json", seed);
+    const auto seeded
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+
+    json merge = empty_batch("concept-evidence-merge");
+    merge["merge"]["concepts"] = json::array(
+        { { { "target", "concept-000001" },
+            { "members", json::array({ "concept-000002" }) },
+            { "set", { { "slug", "merge-theme-one" } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("merge.json", merge);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 1);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 1);
+    EXPECT_EQ(
+        fixture.integer("SELECT count(*) FROM work_concept_evidence"),
+        2
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+TEST(ProductInbox, MalformedJsonWithoutBatchIdStaysInPlace) {
+    inbox_fixture fixture;
+    fixture.write_bytes("bad.json", "{\"format\":\"arachne_batch_v2\",");
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(result.ok);
+    EXPECT_TRUE(fs::exists(fixture.root() / "inbox" / "bad.json"));
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM ingest_issues"), 0);
+}
+
+TEST(ProductInbox, AgentHintsExposeDistinctFamilySignals) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('agent-000001','person'),('agent-000002','person'),"
+        "('work-000001','work');"
+        "INSERT INTO agents(entity_id,agent_type,birth_year,death_year) VALUES"
+        "('agent-000001','person',1950,2000),"
+        "('agent-000002','person',1951,2000);"
+        "INSERT INTO works(entity_id,medium) VALUES"
+        "('work-000001','painting');"
+        "INSERT INTO names(entity_id,name_type,value,is_preferred) VALUES"
+        "('agent-000001','original','Alexander Smith',1),"
+        "('agent-000001','alias','Alex Smith',0),"
+        "('agent-000002','original','Alexandra Smith',1),"
+        "('agent-000002','alias','Alex Smith',0);"
+        "INSERT INTO credits(work_id,agent_id,role,importance) VALUES"
+        "('work-000001','agent-000001','artist','primary'),"
+        "('work-000001','agent-000002','artist','primary');"
+        "INSERT INTO external_ids(entity_id,scheme,value) VALUES"
+        "('agent-000001','VIAF','ABC'),"
+        "('agent-000002','viaf','abc');"
+    );
+
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+    const json signals = hint_signals(
+        fixture, "agent", "agent-000001", "agent-000002"
+    );
+
+    EXPECT_LT(
+        signals.at("preferred_name_similarity").get<double>(),
+        signals.at("alias_similarity").get<double>()
+    );
+    EXPECT_DOUBLE_EQ(signals.at("alias_similarity").get<double>(), 1.0);
+    EXPECT_EQ(signals.at("birth_year_difference"), 1);
+    EXPECT_FALSE(signals.at("birth_year_compatible").get<bool>());
+    EXPECT_EQ(signals.at("death_year_difference"), 0);
+    EXPECT_TRUE(signals.at("death_year_compatible").get<bool>());
+    EXPECT_EQ(signals.at("shared_work_count"), 1);
+    EXPECT_DOUBLE_EQ(signals.at("shared_work_jaccard").get<double>(), 1.0);
+    EXPECT_EQ(signals.at("shared_role_count"), 1);
+    EXPECT_DOUBLE_EQ(signals.at("shared_role_jaccard").get<double>(), 1.0);
+    EXPECT_EQ(signals.at("external_identifier_collision_count"), 1);
+    EXPECT_TRUE(signals.at("external_identifier_collision").get<bool>());
+}
+
+TEST(ProductInbox, WorkHintsExposeDistinctFamilySignals) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('work-000001','work'),('work-000002','work'),"
+        "('agent-000001','person'),('concept-000001','concept');"
+        "INSERT INTO works(entity_id,medium,year_start,year_end) VALUES"
+        "('work-000001','painting',1900,1902),"
+        "('work-000002','painting',1901,1903);"
+        "INSERT INTO agents(entity_id,agent_type) VALUES"
+        "('agent-000001','person');"
+        "INSERT INTO concepts(entity_id,concept_type,slug) VALUES"
+        "('concept-000001','theme','garden');"
+        "INSERT INTO names(entity_id,name_type,value,is_preferred) VALUES"
+        "('work-000001','original','The Red Garden',1),"
+        "('work-000001','translation','Red Garden',0),"
+        "('work-000002','original','A Red Garden',1),"
+        "('work-000002','translation','Red Garden',0);"
+        "INSERT INTO credits(work_id,agent_id,role,importance) VALUES"
+        "('work-000001','agent-000001','artist','primary'),"
+        "('work-000002','agent-000001','artist','key');"
+        "INSERT INTO work_concepts("
+        "work_id,concept_id,relation_type,centrality"
+        ") VALUES"
+        "('work-000001','concept-000001','contains',80),"
+        "('work-000002','concept-000001','contains',80);"
+    );
+
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+    const json signals = hint_signals(
+        fixture, "work", "work-000001", "work-000002"
+    );
+
+    EXPECT_LT(
+        signals.at("preferred_title_similarity").get<double>(),
+        signals.at("alternate_title_similarity").get<double>()
+    );
+    EXPECT_DOUBLE_EQ(
+        signals.at("alternate_title_similarity").get<double>(), 1.0
+    );
+    EXPECT_TRUE(signals.at("medium_equal").get<bool>());
+    EXPECT_EQ(signals.at("start_year_difference"), 1);
+    EXPECT_EQ(signals.at("end_year_difference"), 1);
+    EXPECT_DOUBLE_EQ(signals.at("date_compatibility").get<double>(), 0.9);
+    EXPECT_EQ(signals.at("shared_primary_agent_count"), 1);
+    EXPECT_DOUBLE_EQ(signals.at("primary_agent_jaccard").get<double>(), 1.0);
+    EXPECT_EQ(signals.at("shared_concept_count"), 1);
+    EXPECT_DOUBLE_EQ(signals.at("concept_set_jaccard").get<double>(), 1.0);
+}
+
+TEST(ProductInbox, ConceptHintsExposeDistinctFamilySignals) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('concept-000001','concept'),('concept-000002','concept'),"
+        "('concept-000003','concept'),('work-000001','work');"
+        "INSERT INTO concepts(entity_id,concept_type,slug) VALUES"
+        "('concept-000001','style','acoustic-electronic-hybrid'),"
+        "('concept-000002','style','electronic-acoustic-hybrid'),"
+        "('concept-000003','style','experimental-music');"
+        "INSERT INTO works(entity_id,medium) VALUES"
+        "('work-000001','composition');"
+        "INSERT INTO work_concepts("
+        "work_id,concept_id,relation_type,centrality"
+        ") VALUES"
+        "('work-000001','concept-000001','contains',80),"
+        "('work-000001','concept-000002','contains',80);"
+        "INSERT INTO concept_relations("
+        "subject_concept_id,relation_type,object_concept_id"
+        ") VALUES"
+        "('concept-000001','influenced_by','concept-000003'),"
+        "('concept-000002','influenced_by','concept-000003');"
+    );
+
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+    const json signals = hint_signals(
+        fixture, "concept", "concept-000001", "concept-000002"
+    );
+
+    EXPECT_DOUBLE_EQ(signals.at("slug_similarity").get<double>(), 1.0);
+    EXPECT_TRUE(signals.at("token_fingerprint_equal").get<bool>());
+    EXPECT_TRUE(signals.at("concept_type_equal").get<bool>());
+    EXPECT_EQ(signals.at("shared_work_count"), 1);
+    EXPECT_DOUBLE_EQ(signals.at("shared_work_jaccard").get<double>(), 1.0);
+    EXPECT_EQ(signals.at("shared_relation_neighbor_count"), 1);
+    EXPECT_DOUBLE_EQ(
+        signals.at("relation_neighborhood_jaccard").get<double>(), 1.0
+    );
+}
+
+TEST(ProductInbox, BlockedLowScoreNamelessPairRemainsAReviewHint) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('work-000001','work'),('work-000002','work'),"
+        "('agent-000001','person');"
+        "INSERT INTO works(entity_id,medium) VALUES"
+        "('work-000001','film'),('work-000002','album');"
+        "INSERT INTO agents(entity_id,agent_type) VALUES"
+        "('agent-000001','person');"
+        "INSERT INTO credits(work_id,agent_id,role,importance) VALUES"
+        "('work-000001','agent-000001','director','primary'),"
+        "('work-000002','agent-000001','director','primary');"
+    );
+
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints "
+            "WHERE entity_type='work' AND left_id='work-000001' "
+            "AND right_id='work-000002' AND score < 0.5"
+        ),
+        1
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hint_block_members m "
+            "JOIN merge_hint_blocks b ON b.id=m.block_id "
+            "WHERE m.entity_id IN('work-000001','work-000002') "
+            "AND b.block_type='work_primary_agent'"
+        ),
+        2
+    );
+}
+
+TEST(ProductInbox, NormalizedExternalIdentifiersBlockNamelessAgents) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('agent-000001','person'),('agent-000002','person');"
+        "INSERT INTO agents(entity_id,agent_type) VALUES"
+        "('agent-000001','person'),('agent-000002','person');"
+        "INSERT INTO external_ids(entity_id,scheme,value) VALUES"
+        "('agent-000001',' VIAF ',' ABC '),"
+        "('agent-000002','viaf','abc');"
+    );
+
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints "
+            "WHERE entity_type='agent' AND left_id='agent-000001' "
+            "AND right_id='agent-000002' "
+            "AND json_extract(signals_json,"
+            "'$.external_identifier_collision')=1"
+        ),
+        1
+    );
+}
+
+TEST(ProductInbox, ExternalIdentifierComponentsCannotCollideByDelimiter) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('agent-000001','person'),('agent-000002','person'),"
+        "('work-000001','work');"
+        "INSERT INTO agents(entity_id,agent_type) VALUES"
+        "('agent-000001','person'),('agent-000002','person');"
+        "INSERT INTO works(entity_id,medium) VALUES"
+        "('work-000001','film');"
+        "INSERT INTO credits(work_id,agent_id,role,importance) VALUES"
+        "('work-000001','agent-000001','director','primary'),"
+        "('work-000001','agent-000002','director','primary');"
+        "INSERT INTO external_ids(entity_id,scheme,value) VALUES"
+        "('agent-000001','a:b','c'),"
+        "('agent-000002','a','b:c');"
+    );
+
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints "
+            "WHERE entity_type='agent' AND left_id='agent-000001' "
+            "AND right_id='agent-000002' "
+            "AND json_extract(signals_json,"
+            "'$.external_identifier_collision')=0 "
+            "AND json_extract(signals_json,"
+            "'$.external_identifier_collision_count')=0"
+        ),
+        1
+    );
+}
+
+TEST(ProductInbox, EmptyDerivedIndexBootstrapsExistingPeers) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('concept-000001','concept');"
+        "INSERT INTO concepts(entity_id,concept_type,slug) VALUES"
+        "('concept-000001','style','acoustic-electronic');"
+    );
+    ASSERT_EQ(
+        fixture.integer("SELECT count(*) FROM merge_hint_block_members"), 0
+    );
+
+    json batch = empty_batch("hint-index-bootstrap");
+    batch["create"]["concepts"] = json::array(
+        { { { "local_id", "new-concept" },
+            { "concept_type", "style" },
+            { "slug", "electronic-acoustic" } } }
+    );
+    fixture.write("bootstrap.json", batch);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_GT(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hint_block_members "
+            "WHERE entity_id='concept-000001'"
+        ),
+        0
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints "
+            "WHERE entity_type='concept' "
+            "AND left_id='concept-000001' AND right_id='concept-000002'"
+        ),
+        1
+    );
+
+    fixture.execute(
+        "INSERT INTO merge_hint_blocks(entity_type,block_type,block_key) "
+        "VALUES('concept','label_fingerprint','unaffected-sentinel');"
+        "INSERT INTO merge_hint_block_members(block_id,entity_id) "
+        "SELECT id,'concept-000001' FROM merge_hint_blocks "
+        "WHERE block_key='unaffected-sentinel';"
+    );
+    json update = empty_batch("hint-index-affected-only");
+    update["update"]["concepts"] = json::array(
+        { { { "id", "concept-000002" },
+            { "set", { { "slug", "electronic-acoustic-hybrid" } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("update.json", update);
+    const auto refreshed
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(refreshed.ok) << issues_text(refreshed);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hint_block_members m "
+            "JOIN merge_hint_blocks b ON b.id=m.block_id "
+            "WHERE m.entity_id='concept-000001' "
+            "AND b.block_key='unaffected-sentinel'"
+        ),
+        1
+    );
+}
+
+TEST(ProductInbox, WorkContextualTitleBlocksReplaceBroadContextBlocks) {
+    inbox_fixture fixture;
+    std::string seed;
+    for (int index = 1; index <= 22; ++index) {
+        const std::string suffix
+            = std::to_string(1'000'000 + index).substr(1);
+        const std::string id = "work-" + suffix;
+        const int year = index <= 2 ? 1900 : 1900 + index;
+        const std::string title = index == 1
+            ? "Sharedlongsequence Alpha"
+            : index == 2 ? "Sharedlongsequence Omega"
+                         : "Sharedlongsequence Filler " + suffix;
+        seed += "INSERT INTO entities(id,entity_type) VALUES('" + id
+            + "','work');";
+        seed += "INSERT INTO works(entity_id,medium,year_start) VALUES('"
+            + id + "','film'," + std::to_string(year) + ");";
+        seed += "INSERT INTO names(entity_id,name_type,value,is_preferred) "
+            "VALUES('" + id + "','original','" + title + "',1);";
+    }
+    fixture.execute(seed);
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+    ASSERT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints WHERE entity_type='work' "
+            "AND left_id='work-000001' AND right_id='work-000002'"
+        ),
+        1
+    );
+
+    json update = empty_batch("work-context-refresh");
+    update["update"]["works"] = json::array(
+        { { { "id", "work-000002" },
+            { "set",
+              { { "medium", "album" }, { "year_start", 1950 } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("context.json", update);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints WHERE entity_type='work' "
+            "AND left_id='work-000001' AND right_id='work-000002'"
+        ),
+        0
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hint_block_members m "
+            "JOIN merge_hint_blocks b ON b.id=m.block_id "
+            "WHERE m.entity_id='work-000002' "
+            "AND ((b.block_type LIKE 'work_year_title_%' "
+            "AND b.block_key LIKE '1900%') "
+            "OR (b.block_type LIKE 'work_medium_title_%' "
+            "AND b.block_key LIKE 'film%'))"
+        ),
+        0
+    );
+}
+
+TEST(ProductInbox, IncrementalHintsPreserveIgnoredPairs) {
+    inbox_fixture fixture;
+    json first = empty_batch("hints-first");
+    first["create"] = {
+        { "concepts",
+          json::array(
+              { { { "local_id", "c1" }, { "concept_type", "style" },
+                  { "slug", "acoustic-electronic-hybrid" } },
+                { { "local_id", "c2" }, { "concept_type", "style" },
+                  { "slug", "electronic-acoustic-hybrid" } } }
+          ) }
+    };
+    fixture.write("hints-first.json", first);
+    const auto initial
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(initial.ok) << issues_text(initial);
+    ASSERT_EQ(fixture.integer("SELECT count(*) FROM merge_hints"), 1);
+    fixture.execute("UPDATE merge_hints SET status='ignored'");
+
+    json second = empty_batch("hints-second");
+    second["create"] = {
+        { "concepts",
+          json::array(
+              { { { "local_id", "c3" }, { "concept_type", "style" },
+                  { "slug", "hybrid-acoustic-electronic" } } }
+          ) }
+    };
+    fixture.write("hints-second.json", second);
+    const auto incremental
+        = arachne::penelope::apply_product_inbox(fixture.root());
+    ASSERT_TRUE(incremental.ok) << issues_text(incremental);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM merge_hints"), 3);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints WHERE status='ignored'"
+        ),
+        1
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints "
+            "WHERE json_extract(signals_json,'$.token_fingerprint_equal')=1"
+        ),
+        3
+    );
+
+    fixture.execute("DELETE FROM merge_hint_blocks");
+    ASSERT_EQ(
+        fixture.integer("SELECT count(*) FROM merge_hint_block_members"), 0
+    );
+    static_cast<void>(
+        arachne::penelope::rebuild_product_merge_hints(fixture.root())
+    );
+    EXPECT_GT(
+        fixture.integer("SELECT count(*) FROM merge_hint_block_members"), 0
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM merge_hints WHERE status='ignored'"
+        ),
+        1
+    );
+}
+
+} // namespace

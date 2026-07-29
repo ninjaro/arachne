@@ -68,6 +68,10 @@ def build_catalog(database: Path) -> dict[str, Any]:
         raise RuntimeError(f"database quick_check failed: {integrity}")
 
     user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if user_version != 5:
+        raise RuntimeError(
+            f"unsupported product schema version {user_version}; expected 5"
+        )
 
     preferred_names: dict[str, str] = {}
     for row in rows(
@@ -218,26 +222,6 @@ def build_catalog(database: Path) -> dict[str, Any]:
             }
         )
 
-    assets: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows(
-        connection,
-        """
-        SELECT entity_id, provider, remote_key, direct_url, resolver_rule,
-               rights_note
-        FROM remote_assets
-        ORDER BY entity_id, provider, remote_key
-        """,
-    ):
-        assets[row["entity_id"]].append(
-            {
-                "provider": row["provider"],
-                "remoteKey": row["remote_key"],
-                "directUrl": row["direct_url"],
-                "resolverRule": row["resolver_rule"],
-                "rightsNote": row["rights_note"],
-            }
-        )
-
     manifestations: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows(
         connection,
@@ -313,7 +297,6 @@ def build_catalog(database: Path) -> dict[str, Any]:
                 "advisories": advisories.get(work_id, []),
                 "measurements": measurements.get(work_id, []),
                 "identifiers": identifiers.get(work_id, []),
-                "assets": assets.get(work_id, []),
                 "manifestations": manifestations.get(work_id, []),
                 "financialFacts": financial_facts.get(work_id, []),
             }

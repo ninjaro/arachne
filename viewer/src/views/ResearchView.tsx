@@ -27,6 +27,14 @@ function ResearchCard({
   onOpen: OpenHandler;
 }) {
   const linkedWork = item.workId ? domain.workById.get(item.workId) : undefined;
+  const leftWork =
+    item.entityType === "work" && item.leftId
+      ? domain.workById.get(item.leftId)
+      : undefined;
+  const rightWork =
+    item.entityType === "work" && item.rightId
+      ? domain.workById.get(item.rightId)
+      : undefined;
 
   return (
     <article className={`research-card severity-${item.severity}`}>
@@ -44,10 +52,24 @@ function ResearchCard({
           <h3>{item.title}</h3>
           <p>{item.message}</p>
         </div>
-        {linkedWork ? (
-          <button type="button" onClick={() => onOpen(linkedWork.id)}>
-            Open work
-          </button>
+        {linkedWork || leftWork || rightWork ? (
+          <div>
+            {linkedWork ? (
+              <button type="button" onClick={() => onOpen(linkedWork.id)}>
+                Open work
+              </button>
+            ) : null}
+            {leftWork ? (
+              <button type="button" onClick={() => onOpen(leftWork.id)}>
+                Open left work
+              </button>
+            ) : null}
+            {rightWork ? (
+              <button type="button" onClick={() => onOpen(rightWork.id)}>
+                Open right work
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </header>
 
@@ -61,10 +83,45 @@ function ResearchCard({
         </div>
       ) : null}
 
-      {item.field ? (
+      {item.similarityScore !== undefined ? (
+        <div
+          className="quality-meter"
+          aria-label={`Similarity ${(item.similarityScore * 100).toFixed(1)} percent`}
+        >
+          <span style={{ width: `${item.similarityScore * 100}%` }} />
+          <strong>{(item.similarityScore * 100).toFixed(1)}%</strong>
+        </div>
+      ) : null}
+
+      {item.batchId ? (
         <p className="research-field">
-          Field: <code>{item.field}</code>
+          Batch: <code>{item.batchId}</code>
+          {item.jsonPath ? (
+            <>
+              {" · "}Path: <code>{item.jsonPath}</code>
+            </>
+          ) : null}
         </p>
+      ) : null}
+
+      {item.leftId && item.rightId ? (
+        <ul className="research-details">
+          <li>
+            Left: {item.leftLabel ?? item.leftId} (<code>{item.leftId}</code>)
+          </li>
+          <li>
+            Right: {item.rightLabel ?? item.rightId} (<code>{item.rightId}</code>)
+          </li>
+          {item.textScore !== undefined && item.textScore !== null ? (
+            <li>Text score: {(item.textScore * 100).toFixed(1)}%</li>
+          ) : null}
+          {item.graphScore !== undefined && item.graphScore !== null ? (
+            <li>Graph score: {(item.graphScore * 100).toFixed(1)}%</li>
+          ) : null}
+          {item.contextScore !== undefined && item.contextScore !== null ? (
+            <li>Context score: {(item.contextScore * 100).toFixed(1)}%</li>
+          ) : null}
+        </ul>
       ) : null}
 
       {item.details?.length ? (
@@ -75,38 +132,17 @@ function ResearchCard({
         </ul>
       ) : null}
 
-      {item.occurrences?.length ? (
-        <div className="research-occurrences">
-          {item.occurrences.map((occurrence, index) => (
-            <details
-              key={`${occurrence.source.container}:${occurrence.jsonPointer}:${index}`}
-            >
-              <summary>
-                {occurrence.source.batchId ? `${occurrence.source.batchId} · ` : ""}
-                {occurrence.source.container}
-                {occurrence.source.member ? ` / ${occurrence.source.member}` : ""}
-                {" · "}
-                <code>{occurrence.jsonPointer}</code>
-              </summary>
-              {occurrence.value !== undefined ? (
-                <pre>{rawValue(occurrence.value)}</pre>
-              ) : null}
-            </details>
-          ))}
-        </div>
-      ) : null}
-
       {item.value !== undefined ? (
         <details>
-          <summary>Preserved value</summary>
+          <summary>Rejected value</summary>
           <pre>{rawValue(item.value)}</pre>
         </details>
       ) : null}
 
-      {item.dependencies?.length ? (
+      {item.signals !== undefined ? (
         <details>
-          <summary>Dependencies ({item.dependencies.length})</summary>
-          <pre>{JSON.stringify(item.dependencies, null, 2)}</pre>
+          <summary>Merge signals</summary>
+          <pre>{JSON.stringify(item.signals, null, 2)}</pre>
         </details>
       ) : null}
     </article>
@@ -140,7 +176,12 @@ export function ResearchView({
       if (kind !== "all" && item.kind !== kind) return false;
       if (severity !== "all" && item.severity !== severity) return false;
       if (category !== "all" && item.category !== category) return false;
-      if (linkedOnly && (!item.workId || !domain.workById.has(item.workId))) {
+      const hasLinkedWork =
+        (item.workId !== undefined && domain.workById.has(item.workId)) ||
+        (item.entityType === "work" &&
+          ((item.leftId !== undefined && domain.workById.has(item.leftId)) ||
+            (item.rightId !== undefined && domain.workById.has(item.rightId))));
+      if (linkedOnly && !hasLinkedWork) {
         return false;
       }
       if (!normalized) return true;
@@ -148,9 +189,14 @@ export function ResearchView({
         item.title,
         item.message,
         item.category,
-        item.field ?? "",
+        item.batchId ?? "",
+        item.jsonPath ?? "",
         item.workId ?? "",
         item.workLabel ?? "",
+        item.leftId ?? "",
+        item.leftLabel ?? "",
+        item.rightId ?? "",
+        item.rightLabel ?? "",
         ...(item.details ?? []),
       ]
         .join(" ")
@@ -164,8 +210,8 @@ export function ResearchView({
       <div className="research-summary">
         <div><strong>{data.summary.total}</strong><span>Total</span></div>
         <div><strong>{data.summary.qualityGaps}</strong><span>Quality gaps</span></div>
-        <div><strong>{data.summary.conflicts}</strong><span>Conflicts</span></div>
-        <div><strong>{data.summary.remainders}</strong><span>Remainders</span></div>
+        <div><strong>{data.summary.ingestIssues}</strong><span>Ingest issues</span></div>
+        <div><strong>{data.summary.mergeHints}</strong><span>Merge hints</span></div>
         <div className="problem"><strong>{data.summary.problems}</strong><span>Problems</span></div>
       </div>
 
@@ -182,8 +228,8 @@ export function ResearchView({
         <select value={kind} onChange={(event) => setKind(event.target.value as KindFilter)}>
           <option value="all">All kinds</option>
           <option value="quality_gap">Quality gaps</option>
-          <option value="conflict">Conflicts</option>
-          <option value="remainder">Remainders</option>
+          <option value="ingest_issue">Ingest issues</option>
+          <option value="merge_hint">Merge hints</option>
         </select>
         <select
           value={severity}

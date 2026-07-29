@@ -19,7 +19,7 @@ using json = nlohmann::json;
 
 constexpr std::array<std::pair<std::string_view, contract_name>, 10> contracts {
     {
-        { "mining_batch_v1", contract_name::mining_batch },
+        { "arachne_batch_v2", contract_name::arachne_batch },
         { "batch_envelope_v1", contract_name::batch_envelope },
         { "fetch_plan_v1", contract_name::fetch_plan },
         { "fetch_request_v1", contract_name::fetch_request },
@@ -124,16 +124,11 @@ TEST(Contracts, EveryExamplePassesDiscoveryAndExpectedValidation) {
         EXPECT_TRUE(expected.valid());
         const validation_result discovered
             = arachnespace::contracts::validate(document);
-        if (value == contract_name::mining_batch) {
-            EXPECT_FALSE(discovered.valid());
-            EXPECT_TRUE(has_code(discovered, "required"));
-        } else {
-            EXPECT_TRUE(discovered.valid());
-        }
+        EXPECT_TRUE(discovered.valid());
     }
 }
 
-TEST(Contracts, ControlSchemasAreStrictAndMiningSchemaIsCorpusCompatible) {
+TEST(Contracts, ActiveSchemasAreStrict) {
     const std::filesystem::path schemas
         = repository_root() / "contracts" / "schemas";
     for (const auto& [wire_name, unused] : contracts) {
@@ -145,14 +140,21 @@ TEST(Contracts, ControlSchemasAreStrictAndMiningSchemaIsCorpusCompatible) {
             schema.at("$schema"), "https://json-schema.org/draft/2020-12/schema"
         );
         EXPECT_EQ(schema.at("type"), "object");
-        EXPECT_EQ(
-            schema.at("additionalProperties"),
-            unused == contract_name::mining_batch
-        );
-        EXPECT_EQ(
-            schema.at("properties").at("contract").at("const"), wire_name
-        );
-        EXPECT_EQ(schema.at("properties").at("format_version").at("const"), 1);
+        EXPECT_EQ(schema.at("additionalProperties"), false);
+        if (unused == contract_name::arachne_batch) {
+            EXPECT_EQ(
+                schema.at("properties").at("format").at("const"), wire_name
+            );
+            EXPECT_FALSE(schema.at("properties").contains("contract"));
+            EXPECT_FALSE(schema.at("properties").contains("format_version"));
+        } else {
+            EXPECT_EQ(
+                schema.at("properties").at("contract").at("const"), wire_name
+            );
+            EXPECT_EQ(
+                schema.at("properties").at("format_version").at("const"), 1
+            );
+        }
     }
     EXPECT_TRUE(read_json(schemas / "common_v1.schema.json").is_object());
 }
@@ -335,59 +337,71 @@ TEST(Contracts, InvalidCocoonStateIsRejected) {
     EXPECT_TRUE(has_code(result, "enum"));
 }
 
-TEST(Contracts, OpaqueMiningReceiptDoesNotInventAManifest) {
-    const json document = { { "unobserved_future_shape", true } };
-    const validation_result result = arachnespace::contracts::validate(
-        contract_name::mining_batch, document
-    );
-    EXPECT_TRUE(result.valid());
+TEST(Contracts, ArachneBatchIsClosedAtEveryOperationLevel) {
+    json document = example("arachne_batch_v2");
+    document["notes"] = "not operationally necessary";
+    document["create"]["works"][0]["production_info"] = "{}";
+    document["update"]["works"][0]["set"]["language"] = "de";
+    document["merge"]["agents"][0]["redirect"] = true;
 
-    const json wrong_observed_marker = { { "format_version", 2 } };
-    const auto wrong = arachnespace::contracts::validate(
-        contract_name::mining_batch, wrong_observed_marker
+    const validation_result result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
     );
-    EXPECT_FALSE(wrong.valid());
-    EXPECT_TRUE(has_code(wrong, "unsupported_version"));
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "unknown_field"));
+    EXPECT_GE(result.diagnostics.size(), 4U);
 }
 
-TEST(Contracts, MinerCorpusEncodingAllowsNoContractAndExtendedTables) {
-    const json document = {
-        { "format_version", 1 },
-        { "batch_id", "extended-miner-corpus-shape-001" },
-        { "batch_type", "mining" },
-        { "scope",
-          { { "label", "Extended corpus compatibility" },
-            { "queue_anchor", "Q123" } } },
-        { "manifestations", json::array({ { { "local_id", "m-1" } } }) },
-        { "concept_relations",
-          json::array({ { { "source", "c-1" }, { "target", "c-2" } } }) },
-        { "evidence", json::array({ { { "evidence_id", "e-1" } } }) },
-        { "measurements", json::array({ { { "kind", "height" } } }) },
-        { "financial_facts", json::array({ { { "currency", "EUR" } } }) },
-        { "parent_guide_assertions",
-          json::array({ { { "rating_system", "FSK" } } }) },
-        { "work_relations", json::array({ { { "relation", "adapts" } } }) },
-        { "manifestation_credits",
-          json::array({ { { "manifestation", "m-1" } } }) },
-        { "remote_assets",
-          json::array({ { { "url", "https://example.org" } } }) },
-        { "source_archives",
-          json::array({ { { "storage_ref", "archives/source-1" } } }) },
-        { "review_notes", json::array({ "Needs identity review" }) },
-        { "follow_up_candidates",
-          json::array({ { { "label", "Related work" } } }) },
-        { "validation_summary", { { "mechanically_readable", true } } },
-        { "future_miner_table", json::array({ { { "value", 1 } } }) },
-    };
+TEST(Contracts, ArachneBatchRequiresExplicitEvidenceSemantics) {
+    json document = example("arachne_batch_v2");
+    document["create"]["evidence"][0].erase("exact_quote");
+    document["create"]["evidence"][0].erase("stance");
+    document["create"]["names"][0].erase("is_preferred");
+    document["create"]["work_concepts"][0]["evidence"] = json::array();
 
-    EXPECT_TRUE(
-        arachnespace::contracts::validate(contract_name::mining_batch, document)
-            .valid()
-    );
-    const validation_result generic
+    const validation_result result
         = arachnespace::contracts::validate(document);
-    EXPECT_FALSE(generic.valid());
-    EXPECT_TRUE(has_code(generic, "required"));
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "required"));
+    EXPECT_TRUE(has_code(result, "min_items"));
+}
+
+TEST(Contracts, ArachneBatchReservesCanonicalEntityIds) {
+    json document = example("arachne_batch_v2");
+    document["create"]["works"][0]["local_id"] = "work-000001";
+
+    const validation_result result
+        = arachnespace::contracts::validate(document);
+
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "reserved_identifier"));
+}
+
+TEST(Contracts, ArachneBatchReservesCanonicalIdsInLocalReferences) {
+    json document = example("arachne_batch_v2");
+    document["create"]["evidence"][0]["source_id"] = "work-000001";
+
+    const validation_result result
+        = arachnespace::contracts::validate(document);
+
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "reserved_identifier"));
+}
+
+TEST(Contracts, LegacyMiningBatchIsNotAnActiveContract) {
+    EXPECT_FALSE(
+        arachnespace::contracts::parse_contract_name("mining_batch_v1")
+            .has_value()
+    );
+    const json legacy = {
+        { "format_version", 1 },
+        { "batch_id", "old-batch" },
+        { "batch_type", "mining" },
+    };
+    const validation_result result
+        = arachnespace::contracts::validate(legacy);
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "required"));
 }
 
 TEST(Contracts, FetchRequestSafetyPolicyIsStrictAndBounded) {
@@ -432,7 +446,7 @@ TEST(Contracts, CanonicalJsonRejectsNonFiniteValues) {
 TEST(Contracts, ArtifactBearingClassificationIsExplicit) {
     EXPECT_FALSE(
         arachnespace::contracts::is_artifact_bearing(
-            contract_name::mining_batch
+            contract_name::arachne_batch
         )
     );
     EXPECT_FALSE(

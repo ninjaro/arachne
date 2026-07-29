@@ -93,6 +93,36 @@ class WorkflowYamlTests(unittest.TestCase):
             self.assertNotIn("inbox_manifest.py", text, name)
             self.assertNotIn("ARACHNE_INBOX", text, name)
 
+    def test_product_workflow_uses_fixed_inbox_commands_in_order(self) -> None:
+        text = (WORKFLOWS / "product-integration.yml").read_text(encoding="utf-8")
+        check = "build/arachne product check-inbox"
+        apply = "build/arachne product apply-inbox"
+        self.assertIn(check, text)
+        self.assertIn(apply, text)
+        self.assertLess(text.index(check), text.index(apply))
+        for obsolete in (
+            "product-integrate",
+            "import-normalized",
+            "cleanup_merged_inbox.py",
+            "--database",
+            "--manifest",
+            "--apply",
+        ):
+            self.assertNotIn(obsolete, text)
+
+    def test_issue_intake_proposes_only_a_validated_strict_batch(self) -> None:
+        text = (WORKFLOWS / "intake.yml").read_text(encoding="utf-8")
+        materialize = "scripts/materialize_product_batch.py"
+        check = "build/arachne product check-inbox"
+        propose = "scripts/propose_state_change.py"
+        self.assertIn(materialize, text)
+        self.assertIn(check, text)
+        self.assertIn(propose, text)
+        self.assertLess(text.index(materialize), text.index(check))
+        self.assertLess(text.index(check), text.index(propose))
+        self.assertNotIn("build/arachne product apply-inbox", text)
+        self.assertNotIn("dispatch_intake_request.py", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "data": "python3 scripts/build_catalog.py ../database/art-islands.sqlite public/data/catalog.json && python3 scripts/build_research.py public/data/catalog.json public/data/research.json",
+    "data": "python3 scripts/build_catalog.py ../database/art-islands.sqlite public/data/catalog.json && python3 scripts/build_research.py ../database/art-islands.sqlite public/data/catalog.json public/data/research.json",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview"

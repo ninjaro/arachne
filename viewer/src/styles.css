@@ -781,19 +781,19 @@ tbody tr:focus {
   font-size: 0.72rem;
 }
 
-.research-badge.kind-conflict,
+.research-badge.kind-ingest_issue,
 .research-badge.severity-problem {
   color: #ffd6d8;
   background: #51282c;
 }
 
-.research-badge.kind-remainder,
 .research-badge.severity-weak {
   color: #f2ddb1;
   background: #4b3a20;
 }
 
-.research-badge.kind-quality_gap {
+.research-badge.kind-quality_gap,
+.research-badge.kind-merge_hint {
   color: #c9e1e8;
   background: #263f48;
 }

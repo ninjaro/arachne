@@ -23,7 +23,9 @@ REQUIRED_CAPABILITIES = frozenset(
         "cocoon-transition",
         "inbox-baseline",
         "inbox-verify",
-        "product-integrate",
+        "product-apply-inbox",
+        "product-check-inbox",
+        "product-rebuild-merge-hints",
         "candidate-plan",
         "candidate-rebuild",
         "viewer-build",
@@ -221,19 +223,6 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
         return command, ["inbox", "baseline", *common]
     if command == "inbox-verify":
         return command, ["inbox", "verify", *common]
-    if command == "product-integrate":
-        result = [
-            "product",
-            "integrate",
-            *common,
-            "--logical-date",
-            arguments.logical_date,
-            "--run-id",
-            arguments.run_id,
-        ]
-        if arguments.force:
-            result.append("--force")
-        return command, result
     if command == "candidate-rebuild":
         return command, [
             "candidate",
@@ -304,11 +293,6 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
 
     subparsers.add_parser("inbox-baseline")
     subparsers.add_parser("inbox-verify")
-
-    product = subparsers.add_parser("product-integrate")
-    product.add_argument("--logical-date", required=True)
-    product.add_argument("--run-id", required=True)
-    product.add_argument("--force", action="store_true")
 
     candidate = subparsers.add_parser("candidate-rebuild")
     candidate.add_argument("--plan-control", type=Path, required=True)

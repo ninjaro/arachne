@@ -25,7 +25,9 @@ npm run dev
 ```
 
 The data command reads `../database/art-islands.sqlite` and writes the generated,
-ignored file `public/data/catalog.json`.
+ignored files `public/data/catalog.json` and `public/data/research.json`.
+Research data comes directly from the schema-v5 `ingest_issues` and
+`merge_hints` tables; only open rows are included in the review queue.
 
 Open the Vite URL printed by the command, normally `http://localhost:5173/`.
 
@@ -46,18 +48,5 @@ The static site is written to `viewer/dist/`.
 was about 79 MiB. The compact browser read model is generated directly from the
 canonical SQLite database and is about 12 MiB for the current corpus.
 
-The SQLite database remains the source of truth. `catalog.json` is disposable.
-
-## Arachne production integration
-
-The migration package includes `scripts/apply_production_integration.py`. The
-installer runs it automatically. It updates the C++ viewer builder to:
-
-- create the compact catalog directly from the verified product JSONL export;
-- copy the complete Vite `viewer/dist/` tree into the immutable site bundle;
-- add `data/catalog.json` to the bundle;
-- keep the full projection as a separate build artifact rather than shipping it
-  to every browser.
-
-It also updates the publication workflow to run `npm ci` and `npm run build`,
-and updates the static bundle test for hashed Vite assets.
+The SQLite database remains the source of truth. `catalog.json` and
+`research.json` are disposable viewer projections.

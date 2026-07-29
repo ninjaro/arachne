@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -12,6 +13,18 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_product_materializer():
+    path = ROOT / "scripts" / "materialize_product_batch.py"
+    specification = importlib.util.spec_from_file_location(
+        "materialize_product_batch", path
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError("could not load product batch materializer")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
 
 
 class IntakeAdapterTests(unittest.TestCase):
@@ -117,6 +130,142 @@ class IntakeAdapterTests(unittest.TestCase):
 
         self.assertNotEqual(parsed.returncode, 0)
         self.assertFalse(request.exists())
+
+    def test_verified_issue_attachment_materializes_in_fixed_inbox(self) -> None:
+        repository = self.root / "repository"
+        (repository / "inbox").mkdir(parents=True)
+        payload = self.artifacts / "intake" / "batch.json"
+        payload.parent.mkdir()
+        content = (
+            b'{"format":"arachne_batch_v2","batch_id":"issue-17",'
+            b'"create":{},"update":{},"merge":{}}\n'
+        )
+        payload.write_bytes(content)
+        locator = "https://github.com/user-attachments/assets/example"
+        request = self.root / "request.json"
+        request.write_text(
+            json.dumps(
+                {
+                    "submission_ref": "github-issue:example/arachne#17",
+                    "attachment_url": locator,
+                    "attachment_name": "batch.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        fetch = self.root / "fetch.json"
+        fetch.write_text(
+            json.dumps(
+                {
+                    "locator": locator,
+                    "request_id": "issue-request-17",
+                    "output_ref": "intake/batch.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        acquired = self.root / "acquired.json"
+        acquired.write_text(
+            json.dumps(
+                {
+                    "contract": "acquired_artifact_v1",
+                    "format_version": 1,
+                    "request_id": "issue-request-17",
+                    "source_locator": locator,
+                    "transport": {"status": "delivered"},
+                    "artifact": {
+                        "storage_ref": "intake/batch.json",
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "byte_length": len(content),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        module = load_product_materializer()
+
+        result = module.main(
+            [
+                "--request",
+                str(request),
+                "--fetch-request",
+                str(fetch),
+                "--acquired-control",
+                str(acquired),
+                "--config",
+                str(self.config),
+            ],
+            repository_root=repository,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual((repository / "inbox" / "issue-17.json").read_bytes(), content)
+
+    def test_product_materializer_rejects_tampered_transport_bytes(self) -> None:
+        repository = self.root / "repository"
+        (repository / "inbox").mkdir(parents=True)
+        payload = self.artifacts / "intake" / "tampered.json"
+        payload.parent.mkdir()
+        payload.write_bytes(b"tampered")
+        locator = "https://github.com/user-attachments/assets/tampered"
+        request = self.root / "request-tampered.json"
+        request.write_text(
+            json.dumps(
+                {
+                    "submission_ref": "github-issue:example/arachne#18",
+                    "attachment_url": locator,
+                    "attachment_name": "batch.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        fetch = self.root / "fetch-tampered.json"
+        fetch.write_text(
+            json.dumps(
+                {
+                    "locator": locator,
+                    "request_id": "issue-request-18",
+                    "output_ref": "intake/tampered.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        acquired = self.root / "acquired-tampered.json"
+        acquired.write_text(
+            json.dumps(
+                {
+                    "contract": "acquired_artifact_v1",
+                    "format_version": 1,
+                    "request_id": "issue-request-18",
+                    "source_locator": locator,
+                    "transport": {"status": "delivered"},
+                    "artifact": {
+                        "storage_ref": "intake/tampered.json",
+                        "sha256": hashlib.sha256(b"expected").hexdigest(),
+                        "byte_length": len(b"tampered"),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        module = load_product_materializer()
+
+        result = module.main(
+            [
+                "--request",
+                str(request),
+                "--fetch-request",
+                str(fetch),
+                "--acquired-control",
+                str(acquired),
+                "--config",
+                str(self.config),
+            ],
+            repository_root=repository,
+        )
+
+        self.assertNotEqual(result, 0)
+        self.assertEqual(list((repository / "inbox").iterdir()), [])
 
     def test_discards_only_matching_verified_acquisition(self) -> None:
         payload = self.artifacts / "intake" / "batch.json"
