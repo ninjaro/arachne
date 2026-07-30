@@ -1,5 +1,10 @@
 import type { Domain, EntityId, Work } from "./types";
 import type { FeatureIndex } from "./features";
+import {
+  matchesWorkQuery,
+  parseQuery,
+  scoreWorkQuery,
+} from "./query";
 
 export interface BrowseFilters {
   query: string;
@@ -19,10 +24,16 @@ export const EMPTY_FILTERS: BrowseFilters = {
 
 export type BrowseSort = "date" | "label" | "medium" | "relevance";
 
+function optionalNumber(value: string): number | null {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function filterWorks(domain: Domain, filters: BrowseFilters): Work[] {
-  const query = filters.query.trim().toLocaleLowerCase();
-  const minimum = filters.minimumYear ? Number(filters.minimumYear) : null;
-  const maximum = filters.maximumYear ? Number(filters.maximumYear) : null;
+  const parsedQuery = parseQuery(filters.query);
+  const minimum = optionalNumber(filters.minimumYear);
+  const maximum = optionalNumber(filters.maximumYear);
 
   return domain.works.filter((work) => {
     if (filters.medium && work.medium !== filters.medium) return false;
@@ -38,32 +49,7 @@ export function filterWorks(domain: Domain, filters: BrowseFilters): Work[] {
     if (maximum !== null && (work.yearStart === null || work.yearStart > maximum)) {
       return false;
     }
-    if (!query) return true;
-
-    const haystack = [
-      work.label,
-      work.medium,
-      work.countryCode ?? "",
-      work.languageCode ?? "",
-      ...work.concepts.flatMap((concept) => [
-        concept.label,
-        concept.slug,
-        concept.conceptType,
-      ]),
-      ...work.contributors.flatMap((contributor) => [
-        contributor.label,
-        contributor.role,
-        contributor.creditedAs ?? "",
-      ]),
-      ...work.identifiers.flatMap((identifier) => [
-        identifier.scheme,
-        identifier.value,
-      ]),
-    ]
-      .join(" ")
-      .toLocaleLowerCase();
-
-    return haystack.includes(query);
+    return matchesWorkQuery(work, parsedQuery);
   });
 }
 
@@ -74,28 +60,10 @@ export function relevanceScores(
   filters: BrowseFilters,
 ): Map<EntityId, number> {
   const result = new Map<EntityId, number>();
-  const query = filters.query.trim().toLocaleLowerCase();
+  const parsedQuery = parseQuery(filters.query);
 
   for (const work of works) {
-    let score = 0;
-    if (query) {
-      const label = work.label.toLocaleLowerCase();
-      if (label === query) score += 12;
-      else if (label.startsWith(query)) score += 8;
-      else if (label.includes(query)) score += 5;
-
-      for (const concept of work.concepts) {
-        const value = concept.label.toLocaleLowerCase();
-        if (value === query) score += 6;
-        else if (value.includes(query)) score += 2;
-      }
-      for (const contributor of work.contributors) {
-        const value = contributor.label.toLocaleLowerCase();
-        if (value === query) score += 5;
-        else if (value.includes(query)) score += 1.5;
-      }
-    }
-
+    let score = scoreWorkQuery(work, parsedQuery);
     if (filters.conceptId) {
       const feature = index.vectors.get(work.id)?.get(`concept:${filters.conceptId}`);
       score += feature ? 10 + feature : 0;
@@ -127,7 +95,8 @@ export function sortWorks(
         (relevance.get(right.id) ?? 0) - (relevance.get(left.id) ?? 0) ||
         (left.yearStart ?? Number.MAX_SAFE_INTEGER) -
           (right.yearStart ?? Number.MAX_SAFE_INTEGER) ||
-        left.label.localeCompare(right.label)
+        left.label.localeCompare(right.label) ||
+        left.id.localeCompare(right.id)
       );
     }
     return (

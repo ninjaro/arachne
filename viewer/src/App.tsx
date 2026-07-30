@@ -25,6 +25,7 @@ import {
   useEntityWindows,
 } from "./components/windows";
 import "./styles.css";
+import "./enhancements.css";
 
 const VIEWS: Array<{ name: ViewName; label: string }> = [
   { name: "browse", label: "Browse" },
@@ -186,6 +187,17 @@ export default function App() {
     writeLocation(currentLocation({ page: 1, pageSize: next }), "replace");
   }
 
+  function searchBrowse(query: string) {
+    const nextFilters = { ...filters, query };
+    setView("browse");
+    setFilters(nextFilters);
+    setPage(1);
+    writeLocation(
+      currentLocation({ view: "browse", filters: nextFilters, page: 1 }),
+      "push",
+    );
+  }
+
   function clearRatings() {
     if (!Object.keys(ratings).length) return;
     if (window.confirm("Clear all local ratings?")) setRatings({});
@@ -313,6 +325,7 @@ export default function App() {
         domain={domain}
         ratings={ratings}
         onRate={rate}
+        onSearch={searchBrowse}
         onFocus={focusWindow}
         onClose={closeWindow}
         onMove={moveWindow}

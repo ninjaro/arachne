@@ -14,6 +14,7 @@ import {
 } from "../components/common";
 import type { OpenHandler, RateHandler } from "../components/common";
 import { dateLabel, humanize } from "../lib/format";
+import { buildQueryToken, queryDiagnostics } from "../lib/query";
 
 export function BrowseView({
   domain,
@@ -58,6 +59,10 @@ export function BrowseView({
     () => sortWorks(filtered, sort, relevance),
     [filtered, sort, relevance],
   );
+  const queryErrors = useMemo(
+    () => queryDiagnostics(filters.query),
+    [filters.query],
+  );
 
   const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
   const safePage = Math.min(Math.max(1, page), pageCount);
@@ -89,7 +94,7 @@ export function BrowseView({
         <input
           type="search"
           value={filters.query}
-          placeholder="Search works, concepts, people, identifiers"
+          placeholder='Search or use agent:"Johnny Rotten" genre:punk'
           onChange={(event) => setFilter("query", event.target.value)}
           aria-label="Search catalog"
         />
@@ -162,6 +167,29 @@ export function BrowseView({
         </button>
       </section>
 
+      {queryErrors.length ? (
+        <div className="query-error" role="alert">
+          {queryErrors.join(" · ")}
+        </div>
+      ) : null}
+
+      <details className="advanced-search">
+        <summary>Advanced search syntax</summary>
+        <p>
+          Terms are combined with AND. Quotes preserve phrases; a leading minus
+          excludes a term.
+        </p>
+        <code>
+          agent:&quot;Johnny Rotten&quot; genre:punk -guide:violence year:1976..1981
+        </code>
+        <p>
+          Fields: title, agent, role, concept, genre, movement, theme, style,
+          medium, country, lang, id, guide and year. Use <code>word:punk</code> for
+          a whole word or <code>regex:/\bpost[- ]punk\b/i</code> for a regular
+          expression.
+        </p>
+      </details>
+
       {pagination}
       <div className="table-wrap">
         <table>
@@ -189,9 +217,25 @@ export function BrowseView({
               >
                 <td className="date-cell">{dateLabel(work)}</td>
                 <td className="label-cell">{work.label}</td>
-                <td>{humanize(work.medium)}</td>
                 <td>
-                  <ConceptChips concepts={work.concepts} />
+                  <button
+                    type="button"
+                    className="table-filter-link"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setFilter("medium", work.medium);
+                    }}
+                  >
+                    {humanize(work.medium)}
+                  </button>
+                </td>
+                <td>
+                  <ConceptChips
+                    concepts={work.concepts}
+                    onFilter={(concept) =>
+                      setFilter("query", buildQueryToken("concept", concept.label))
+                    }
+                  />
                 </td>
                 <td>
                   <RatingButtons

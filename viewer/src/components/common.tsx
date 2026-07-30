@@ -47,21 +47,74 @@ export function RatingButtons({
 export function ConceptChips({
   concepts,
   limit = 6,
+  onFilter,
 }: {
   concepts: ConceptAssignment[];
   limit?: number;
+  onFilter?: (concept: ConceptAssignment) => void;
 }) {
-  const visible = concepts.slice(0, limit);
+  const visible = [...concepts]
+    .sort(
+      (left, right) =>
+        (right.centrality ?? 0) - (left.centrality ?? 0) ||
+        (right.confidence ?? 0) - (left.confidence ?? 0) ||
+        left.label.localeCompare(right.label),
+    )
+    .slice(0, limit);
+
   return (
     <div className="chips">
-      {visible.map((concept) => (
-        <span className="chip" key={concept.id} title={humanize(concept.conceptType)}>
-          {concept.label}
-        </span>
-      ))}
+      {visible.map((concept) =>
+        onFilter ? (
+          <button
+            type="button"
+            className="chip chip-button"
+            key={concept.id}
+            title={`${humanize(concept.conceptType)} · filter by this concept`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onFilter(concept);
+            }}
+          >
+            {concept.label}
+          </button>
+        ) : (
+          <span className="chip" key={concept.id} title={humanize(concept.conceptType)}>
+            {concept.label}
+          </span>
+        ),
+      )}
       {concepts.length > visible.length ? (
         <span className="chip muted-chip">+{concepts.length - visible.length}</span>
       ) : null}
+    </div>
+  );
+}
+
+export function GroupedConceptChips({
+  concepts,
+  onFilter,
+}: {
+  concepts: ConceptAssignment[];
+  onFilter?: (concept: ConceptAssignment) => void;
+}) {
+  const groups = new Map<string, ConceptAssignment[]>();
+  for (const concept of concepts) {
+    const group = groups.get(concept.conceptType);
+    if (group) group.push(concept);
+    else groups.set(concept.conceptType, [concept]);
+  }
+
+  return (
+    <div className="concept-groups">
+      {[...groups.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([type, items]) => (
+          <section className="concept-group" key={type}>
+            <h4>{humanize(type)}</h4>
+            <ConceptChips concepts={items} limit={30} onFilter={onFilter} />
+          </section>
+        ))}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent } from "react";
 import type { Domain, EntityId, Settings } from "../lib/types";
 import type { FeatureIndex } from "../lib/features";
 import { factorPhrase } from "../lib/features";
@@ -88,6 +88,21 @@ function visibleLayout(
   return placed;
 }
 
+function keyboardActivate(event: KeyboardEvent, action: () => void) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  event.stopPropagation();
+  action();
+}
+
+function searchRank(label: string, query: string): number {
+  const normalized = label.toLocaleLowerCase();
+  if (normalized === query) return 0;
+  if (normalized.startsWith(query)) return 1;
+  if (normalized.includes(query)) return 2;
+  return Number.MAX_SAFE_INTEGER;
+}
+
 export function EvolutionView({
   domain,
   index,
@@ -113,7 +128,10 @@ export function EvolutionView({
   const [search, setSearch] = useState("");
   const [zoom, setZoom] = useState(1);
 
-  const roots = forest.roots.slice(0, visibleRootCount);
+  const roots = useMemo(
+    () => forest.roots.slice(0, visibleRootCount),
+    [forest.roots, visibleRootCount],
+  );
   const layout = useMemo(
     () =>
       visibleLayout(
@@ -130,6 +148,10 @@ export function EvolutionView({
       expandedGroups,
       settings.evolution.visibleChildrenPerNode,
     ],
+  );
+  const layoutByKey = useMemo(
+    () => new Map(layout.map((node) => [node.key, node])),
+    [layout],
   );
 
   const width = Math.max(
@@ -150,18 +172,34 @@ export function EvolutionView({
   function reveal() {
     const query = search.trim().toLocaleLowerCase();
     if (!query) return;
-    const target = domain.works.find(
-      (work) =>
-        work.label.toLocaleLowerCase().includes(query) &&
-        forest.byId.has(work.id),
-    );
+    const target = domain.works
+      .filter((work) => forest.byId.has(work.id))
+      .map((work) => ({ work, rank: searchRank(work.label, query) }))
+      .filter((candidate) => candidate.rank !== Number.MAX_SAFE_INTEGER)
+      .sort(
+        (left, right) =>
+          left.rank - right.rank ||
+          (left.work.yearStart ?? Number.MAX_SAFE_INTEGER) -
+            (right.work.yearStart ?? Number.MAX_SAFE_INTEGER) ||
+          left.work.label.localeCompare(right.work.label),
+      )[0]?.work;
     if (!target) return;
+
     const path = ancestorPath(forest, target.id);
+    const parents = path.slice(0, -1);
     setExpanded((current) => {
       const next = new Set(current);
-      path.slice(0, -1).forEach((id) => next.add(id));
+      parents.forEach((id) => next.add(id));
       return next;
     });
+    // A found child can be outside the visible childLimit. Reveal all groups on
+    // its ancestor path so the DOM node actually exists before scrolling.
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      parents.forEach((id) => next.add(id));
+      return next;
+    });
+
     const rootIndex = forest.roots.indexOf(path[0]);
     if (rootIndex >= 0) {
       setVisibleRootCount((current) => Math.max(current, rootIndex + 1));
@@ -209,8 +247,9 @@ export function EvolutionView({
         </span>
       </div>
       <p className="graph-help">
-        Each non-root work selects the strongest earlier feature match above the
-        configured threshold. These links are navigational inferences, not claims
+        Each non-root work selects the strongest strictly earlier feature match
+        above the configured threshold. Same-year works are not forced into a
+        parent/child relationship. Links are navigational inferences, not claims
         of direct influence.
       </p>
 
@@ -226,7 +265,7 @@ export function EvolutionView({
           <g className="evolution-edges">
             {layout.map((node) => {
               if (!node.parentKey) return null;
-              const parent = layout.find((candidate) => candidate.key === node.parentKey);
+              const parent = layoutByKey.get(node.parentKey);
               if (!parent) return null;
               const x1 = 220 + parent.depth * 280;
               const y1 = 54 + parent.row * 76;
@@ -256,6 +295,14 @@ export function EvolutionView({
               const y = 28 + node.row * 76;
 
               if (!node.id) {
+                const revealGroup = () => {
+                  if (!node.parentId) return;
+                  setExpandedGroups((current) => {
+                    const next = new Set(current);
+                    next.add(node.parentId!);
+                    return next;
+                  });
+                };
                 return (
                   <g
                     key={node.key}
@@ -263,14 +310,8 @@ export function EvolutionView({
                     className="evolution-more"
                     role="button"
                     tabIndex={0}
-                    onClick={() => {
-                      if (!node.parentId) return;
-                      setExpandedGroups((current) => {
-                        const next = new Set(current);
-                        next.add(node.parentId!);
-                        return next;
-                      });
-                    }}
+                    onClick={revealGroup}
+                    onKeyDown={(event) => keyboardActivate(event, revealGroup)}
                   >
                     <rect width="150" height="50" rx="12" />
                     <text x="75" y="30" textAnchor="middle">
@@ -328,6 +369,9 @@ export function EvolutionView({
                         event.stopPropagation();
                         toggle(node.id!);
                       }}
+                      onKeyDown={(event) =>
+                        keyboardActivate(event, () => toggle(node.id!))
+                      }
                       role="button"
                       tabIndex={0}
                     >

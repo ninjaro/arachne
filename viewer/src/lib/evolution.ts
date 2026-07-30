@@ -37,40 +37,48 @@ export function buildEvolutionForest(
   settings: EvolutionSettings,
 ): EvolutionForest {
   const ordered = domain.works.filter((work) => work.yearStart !== null).sort(workOrder);
-  const rank = new Map(ordered.map((work, position) => [work.id, position]));
   const allowed = new Set(ordered.map((work) => work.id));
   const nodes: EvolutionNode[] = [];
 
   for (const work of ordered) {
+    const workYear = work.yearStart!;
     let best:
-      | { parent: EntityId; score: number; shared: number; topFactors: EdgeFactor[] }
+      | {
+          parent: EntityId;
+          parentYear: number;
+          score: number;
+          shared: number;
+          topFactors: EdgeFactor[];
+        }
       | undefined;
 
     for (const candidateId of similarityCandidates(index, work.id, allowed)) {
       const candidate = domain.workById.get(candidateId);
       if (!candidate || candidate.yearStart === null) continue;
-      if ((rank.get(candidateId) ?? Number.MAX_SAFE_INTEGER) >= (rank.get(work.id) ?? 0)) {
-        continue;
-      }
+
+      // Alphabetical ordering must never manufacture a temporal direction.
+      // Same-year relationships are contemporary links, not parent/child links.
+      if (candidate.yearStart >= workYear) continue;
 
       const similarity = similarityBetween(index, candidateId, work.id);
-      if (
-        similarity.similarity < settings.minimumSimilarity ||
-        similarity.sharedFeatureCount < settings.minimumSharedFeatures
-      ) {
-        continue;
-      }
+      if (similarity.sharedFeatureCount < settings.minimumSharedFeatures) continue;
 
       const kindFactor =
         candidate.medium === work.medium ? 1 : settings.kindMismatchFactor;
       const score = similarity.similarity * kindFactor;
+      if (score < settings.minimumSimilarity) continue;
+
       if (
         !best ||
         score > best.score ||
-        (score === best.score && candidateId.localeCompare(best.parent) < 0)
+        (score === best.score && candidate.yearStart > best.parentYear) ||
+        (score === best.score &&
+          candidate.yearStart === best.parentYear &&
+          candidateId.localeCompare(best.parent) < 0)
       ) {
         best = {
           parent: candidateId,
+          parentYear: candidate.yearStart,
           score,
           shared: similarity.sharedFeatureCount,
           topFactors: similarity.topFactors,
