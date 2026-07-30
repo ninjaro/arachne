@@ -340,3 +340,61 @@
     grid-template-columns: 1fr;
   }
 }
+
+
+/* Temporal evolution timeline and per-feature edges */
+.evolution-timeline-axis {
+  stroke: #596368;
+  stroke-width: 1.2;
+}
+
+.evolution-year-tick {
+  stroke: #596368;
+  stroke-width: 1;
+}
+
+.evolution-year-label {
+  fill: #9ca7aa;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+.evolution-timeline-point {
+  fill: #7d898d;
+  opacity: 0.38;
+  cursor: pointer;
+  transition: opacity 120ms ease, r 120ms ease, fill 120ms ease;
+}
+
+.evolution-timeline-point:hover {
+  fill: #d7e1e2;
+  opacity: 0.95;
+}
+
+.evolution-timeline-point.selected {
+  fill: #e8c477;
+  opacity: 1;
+}
+
+.evolution-factor-edge {
+  fill: none;
+  transition: opacity 120ms ease, stroke-width 120ms ease;
+}
+
+.evolution-factor-group:hover .evolution-factor-edge {
+  opacity: 0.92 !important;
+}
+
+.evolution-factor-group:hover .evolution-factor-edge.thin {
+  opacity: 0.58 !important;
+}
+
+.evolution-group-edge {
+  opacity: 0.3;
+  stroke-dasharray: 3 5;
+}
+
+.evolution-node.selected > rect:first-of-type {
+  stroke: #e8c477;
+  stroke-width: 2;
+}

@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import type { Domain, EntityId, Settings } from "../lib/types";
-import type { FeatureIndex } from "../lib/features";
-import { factorPhrase } from "../lib/features";
+import type { EdgeFactor, FeatureIndex } from "../lib/features";
+import { factorPhrase, similarityBetween } from "../lib/features";
 import {
   ancestorPath,
   buildEvolutionForest,
@@ -25,17 +25,58 @@ interface PlacedNode {
   evidence?: EvolutionNode["evidence"];
 }
 
-function evolutionEdgeStyle(
-  score: number | null | undefined,
-): CSSProperties {
-  if (score === null || score === undefined) {
-    return { strokeWidth: 1, opacity: 0.45 };
+const TIMELINE_LEFT = 90;
+const TIMELINE_RIGHT = 150;
+const PIXELS_PER_YEAR = 34;
+const TIMELINE_AXIS_Y = 52;
+const TIMELINE_BAND_TOP = 74;
+const TIMELINE_LANE_COUNT = 20;
+const TIMELINE_LANE_GAP = 7;
+const DETAIL_TOP = 260;
+
+function stableHash(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
-  const strength = Math.max(0, Math.min(1, score));
+  return hash >>> 0;
+}
+
+function timelineX(year: number, minimumYear: number): number {
+  return TIMELINE_LEFT + (year - minimumYear) * PIXELS_PER_YEAR;
+}
+
+function factorBaseHue(factor: EdgeFactor): number {
+  if (factor.source === "contributor") return 42;
+  if (factor.source === "organization") return 315;
+  if (factor.source === "content-guide") return 25;
+
+  const category = factor.category?.toLocaleLowerCase() ?? "";
+  if (category.includes("genre")) return 225;
+  if (category.includes("movement") || category.includes("scene")) return 8;
+  if (category.includes("theme") || category.includes("topic")) return 155;
+  if (category.includes("style") || category.includes("technique")) return 275;
+  return 195;
+}
+
+function factorColor(factor: EdgeFactor): string {
+  const hueOffset = (stableHash(factor.id) % 29) - 14;
+  return `hsl(${factorBaseHue(factor) + hueOffset} 58% 60%)`;
+}
+
+function factorEdgeStyle(
+  factor: EdgeFactor,
+  strongestContribution: number,
+  thin: boolean,
+): CSSProperties {
+  const ratio = Math.max(0, Math.min(1, factor.contribution / strongestContribution));
   return {
-    strokeWidth: 0.9 + 4.2 * Math.pow(strength, 1.35),
-    opacity: 0.35 + 0.65 * strength,
+    stroke: factorColor(factor),
+    strokeWidth: 0.65 + 3.4 * Math.sqrt(ratio),
+    opacity: thin ? 0.07 : 0.28 + 0.62 * ratio,
     strokeLinecap: "round",
+    pointerEvents: "stroke",
   };
 }
 
@@ -127,6 +168,7 @@ export function EvolutionView({
   );
   const [search, setSearch] = useState("");
   const [zoom, setZoom] = useState(1);
+  const [selectedId, setSelectedId] = useState<EntityId | null>(null);
 
   const roots = useMemo(
     () => forest.roots.slice(0, visibleRootCount),
@@ -154,11 +196,85 @@ export function EvolutionView({
     [layout],
   );
 
-  const width = Math.max(
-    900,
-    340 + Math.max(0, ...layout.map((node) => node.depth)) * 280,
+  const datedWorks = useMemo(
+    () =>
+      domain.works
+        .filter((work) => work.yearStart !== null)
+        .sort(
+          (left, right) =>
+            left.yearStart! - right.yearStart! ||
+            left.label.localeCompare(right.label) ||
+            left.id.localeCompare(right.id),
+        ),
+    [domain.works],
   );
-  const height = Math.max(600, 90 + layout.length * 76);
+  const minimumYear = datedWorks.reduce(
+    (minimum, work) => Math.min(minimum, work.yearStart!),
+    datedWorks[0]?.yearStart ?? 0,
+  );
+  const maximumYear = datedWorks.reduce(
+    (maximum, work) => Math.max(maximum, work.yearStart!),
+    datedWorks[0]?.yearStart ?? 0,
+  );
+  const yearTickStep = maximumYear - minimumYear > 90 ? 10 : 5;
+  const yearTicks = useMemo(() => {
+    const first = Math.floor(minimumYear / yearTickStep) * yearTickStep;
+    const last = Math.ceil(maximumYear / yearTickStep) * yearTickStep;
+    const result: number[] = [];
+    for (let year = first; year <= last; year += yearTickStep) result.push(year);
+    return result;
+  }, [maximumYear, minimumYear, yearTickStep]);
+  const timelinePoints = useMemo(() => {
+    const byYear = new Map<number, typeof datedWorks>();
+    for (const work of datedWorks) {
+      const year = work.yearStart!;
+      const group = byYear.get(year);
+      if (group) group.push(work);
+      else byYear.set(year, [work]);
+    }
+
+    return [...byYear.entries()].flatMap(([year, works]) =>
+      works.map((work, index) => ({
+        work,
+        x:
+          timelineX(year, minimumYear) +
+          ((index + 1) / (works.length + 1)) * PIXELS_PER_YEAR,
+        y:
+          TIMELINE_BAND_TOP +
+          (stableHash(work.id) % TIMELINE_LANE_COUNT) * TIMELINE_LANE_GAP,
+      })),
+    );
+  }, [datedWorks, minimumYear]);
+  const factorsByEdge = useMemo(() => {
+    const result = new Map<string, EdgeFactor[]>();
+    for (const node of layout) {
+      if (!node.id || !node.parentKey) continue;
+      const parent = layoutByKey.get(node.parentKey);
+      if (!parent?.id) continue;
+      result.set(
+        `${parent.id}:${node.id}`,
+        similarityBetween(index, parent.id, node.id, Number.MAX_SAFE_INTEGER).topFactors,
+      );
+    }
+    return result;
+  }, [index, layout, layoutByKey]);
+
+  const width = Math.max(
+    1200,
+    TIMELINE_LEFT +
+      (maximumYear - minimumYear + 1) * PIXELS_PER_YEAR +
+      TIMELINE_RIGHT,
+  );
+  const height = Math.max(720, DETAIL_TOP + 90 + layout.length * 76);
+
+  function nodeX(node: PlacedNode): number {
+    const referenceId = node.id ?? node.parentId;
+    const year = referenceId
+      ? domain.workById.get(referenceId)?.yearStart
+      : null;
+    if (year === null || year === undefined) return TIMELINE_LEFT;
+    return timelineX(year, minimumYear) - (node.id ? 110 : -22);
+  }
 
   function toggle(id: EntityId) {
     setExpanded((current) => {
@@ -185,6 +301,7 @@ export function EvolutionView({
       )[0]?.work;
     if (!target) return;
 
+    setSelectedId(target.id);
     const path = ancestorPath(forest, target.id);
     const parents = path.slice(0, -1);
     setExpanded((current) => {
@@ -206,7 +323,7 @@ export function EvolutionView({
     }
     window.setTimeout(() => {
       document
-        .querySelector(`[data-evolution-id="${CSS.escape(target.id)}"]`)
+        .querySelector(`[data-timeline-id="${CSS.escape(target.id)}"]`)
         ?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
     }, 0);
   }
@@ -247,10 +364,10 @@ export function EvolutionView({
         </span>
       </div>
       <p className="graph-help">
-        Each non-root work selects the strongest strictly earlier feature match
-        above the configured threshold. Same-year works are not forced into a
-        parent/child relationship. Links are navigational inferences, not claims
-        of direct influence.
+        Horizontal position is the actual start year. Every dated work appears
+        as a point in the timeline band; expanded branch cards use the same time
+        scale. Parent selection and similarity thresholds are unchanged. Each visible
+        parent/child link is split into independent shared-feature strokes.
       </p>
 
       <div className="graph-scroll evolution-scroll">
@@ -262,37 +379,127 @@ export function EvolutionView({
           role="img"
           aria-label="Inferred temporal similarity forest"
         >
+          <g className="evolution-timeline" aria-label="All dated works by year">
+            <line
+              x1={timelineX(minimumYear, minimumYear)}
+              y1={TIMELINE_AXIS_Y}
+              x2={timelineX(maximumYear + 1, minimumYear)}
+              y2={TIMELINE_AXIS_Y}
+              className="evolution-timeline-axis"
+              vectorEffect="non-scaling-stroke"
+            />
+            {yearTicks.map((year) => (
+              <g key={year} transform={`translate(${timelineX(year, minimumYear)} 0)`}>
+                <line
+                  y1={TIMELINE_AXIS_Y - 5}
+                  y2={TIMELINE_AXIS_Y + 9}
+                  className="evolution-year-tick"
+                  vectorEffect="non-scaling-stroke"
+                />
+                <text y={TIMELINE_AXIS_Y - 12} textAnchor="middle" className="evolution-year-label">
+                  {year}
+                </text>
+              </g>
+            ))}
+            <g
+              className="evolution-timeline-points"
+              onClick={(event) => {
+                const target = event.target as SVGCircleElement;
+                const id = target.dataset.timelineId;
+                if (!id) return;
+                setSelectedId(id);
+                onOpen(id);
+              }}
+            >
+              {timelinePoints.map(({ work, x, y }) => (
+                <circle
+                  key={work.id}
+                  cx={x}
+                  cy={y}
+                  r={selectedId === work.id ? 4.2 : 1.8}
+                  data-timeline-id={work.id}
+                  className={
+                    selectedId === work.id
+                      ? "evolution-timeline-point selected"
+                      : "evolution-timeline-point"
+                  }
+                  vectorEffect="non-scaling-stroke"
+                >
+                  <title>
+                    {[work.label, work.yearStart, humanize(work.medium)]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </title>
+                </circle>
+              ))}
+            </g>
+          </g>
+
           <g className="evolution-edges">
             {layout.map((node) => {
               if (!node.parentKey) return null;
               const parent = layoutByKey.get(node.parentKey);
               if (!parent) return null;
-              const x1 = 220 + parent.depth * 280;
-              const y1 = 54 + parent.row * 76;
-              const x2 = 60 + node.depth * 280;
-              const y2 = 54 + node.row * 76;
+              const x1 = nodeX(parent) + 110;
+              const y1 = DETAIL_TOP + 54 + parent.row * 76;
+              const x2 = nodeX(node) + 110;
+              const y2 = DETAIL_TOP + 54 + node.row * 76;
+
+              if (!parent.id || !node.id) {
+                return (
+                  <path
+                    key={`edge:${node.key}`}
+                    d={`M ${x1} ${y1} C ${x1 + 70} ${y1}, ${x2 - 70} ${y2}, ${x2} ${y2}`}
+                    className="evolution-edge evolution-group-edge"
+                    vectorEffect="non-scaling-stroke"
+                  >
+                    <title>Grouped hidden children</title>
+                  </path>
+                );
+              }
+
+              const factors = factorsByEdge.get(`${parent.id}:${node.id}`) ?? [];
+              const strongestContribution = factors[0]?.contribution ?? 1;
               return (
-                <path
-                  key={`edge:${node.key}`}
-                  d={`M ${x1} ${y1} C ${x1 + 70} ${y1}, ${x2 - 70} ${y2}, ${x2} ${y2}`}
-                  className="evolution-edge"
-                  style={evolutionEdgeStyle(node.evidence?.score)}
-                  vectorEffect="non-scaling-stroke"
-                >
-                  <title>
-                    {node.evidence
-                      ? `Similarity ${node.evidence.score.toFixed(2)}; ${node.evidence.sharedFeatureCount} shared features; ${node.evidence.topFactors.map(factorPhrase).join("; ")}`
-                      : "Grouped hidden children"}
-                  </title>
-                </path>
+                <g key={`edge:${node.key}`} className="evolution-factor-group">
+                  {factors.map((factor, index) => {
+                    const ratio = factor.contribution / strongestContribution;
+                    const thin = index >= 3 && ratio < 0.18;
+                    const offset =
+                      factors.length <= 1
+                        ? 0
+                        : -14 + (28 * index) / (factors.length - 1);
+                    const bend = Math.max(
+                      24,
+                      Math.min(110, Math.abs(x2 - x1) * 0.35),
+                    );
+                    return (
+                      <path
+                        key={`${node.key}:${factor.id}`}
+                        d={`M ${x1} ${y1 + offset} C ${x1 + bend} ${y1 + offset}, ${x2 - bend} ${y2 + offset}, ${x2} ${y2 + offset}`}
+                        className={
+                          thin
+                            ? "evolution-factor-edge thin"
+                            : "evolution-factor-edge"
+                        }
+                        style={factorEdgeStyle(factor, strongestContribution, thin)}
+                        vectorEffect="non-scaling-stroke"
+                      >
+                        <title>
+                          {`${factorPhrase(factor)} · contribution ${factor.contribution.toFixed(3)} · pair similarity ${node.evidence?.score.toFixed(2) ?? "unknown"}`}
+                        </title>
+                      </path>
+                    );
+                  })}
+                </g>
               );
             })}
           </g>
 
           <g className="evolution-nodes">
             {layout.map((node) => {
-              const x = 60 + node.depth * 280;
-              const y = 28 + node.row * 76;
+              const x = nodeX(node);
+              const y = DETAIL_TOP + 28 + node.row * 76;
 
               if (!node.id) {
                 const revealGroup = () => {
@@ -331,14 +538,22 @@ export function EvolutionView({
                 <g
                   key={node.key}
                   transform={`translate(${x} ${y})`}
-                  className="evolution-node"
+                  className={
+                    selectedId === node.id
+                      ? "evolution-node selected"
+                      : "evolution-node"
+                  }
                   data-evolution-id={node.id}
                   role="button"
                   tabIndex={0}
-                  onClick={() => onOpen(node.id!)}
+                  onClick={() => {
+                    setSelectedId(node.id!);
+                    onOpen(node.id!);
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
+                      setSelectedId(node.id!);
                       onOpen(node.id!);
                     }
                   }}
