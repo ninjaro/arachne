@@ -50,3 +50,25 @@ canonical SQLite database and is about 12 MiB for the current corpus.
 
 The SQLite database remains the source of truth. `catalog.json` and
 `research.json` are disposable viewer projections.
+
+## JSON-first static API
+
+The production build publishes machine-readable resources before the optional
+React presentation layer:
+
+- `api/v1/index.json` is the service index.
+- `api/v1/openapi.json` describes the static endpoints.
+- `api/v1/views/<view>.json` describes Browse, Recommendations, Evolution,
+  Islands and Research.
+- `api/v1/browse/pages/<page>.json` contains precomputed default browse pages.
+- `data/catalog.json` and `data/research.json` remain the canonical datasets.
+
+Human-facing routes (`browse/`, `recommendations/`, `evolution/`, `islands/` and
+`research/`) contain the corresponding JSON descriptor in readable HTML. When
+JavaScript is available, React replaces that document with the interactive
+viewer. Browse filters and pagination are represented in the URL query string.
+
+GitHub Pages cannot perform content negotiation or dynamic filtering, so the
+JSON API uses explicit `.json` resources and precomputes only the default browse
+ordering. The UI can still apply arbitrary filters locally against the catalog.
+

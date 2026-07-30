@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type {
   ConceptAssignment,
   EntityId,
@@ -92,15 +93,36 @@ export function Pagination({
   onPage: (page: number) => void;
   onPageSize: (size: number) => void;
 }) {
+  const [requestedPage, setRequestedPage] = useState(String(page));
+
+  useEffect(() => setRequestedPage(String(page)), [page]);
+
   return (
     <div className="pagination">
       <span>{total.toLocaleString()} results</span>
       <button type="button" disabled={page <= 1} onClick={() => onPage(page - 1)}>
         Previous
       </button>
-      <span>
-        {page} / {pageCount}
-      </span>
+      <form
+        className="page-jump"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const requested = Number(requestedPage);
+          if (!Number.isFinite(requested)) return;
+          onPage(Math.min(pageCount, Math.max(1, Math.trunc(requested))));
+        }}
+      >
+        <input
+          aria-label="Page number"
+          type="number"
+          min={1}
+          max={pageCount}
+          value={requestedPage}
+          onChange={(event) => setRequestedPage(event.target.value)}
+        />
+        <span>/ {pageCount}</span>
+        <button type="submit">Go</button>
+      </form>
       <button
         type="button"
         disabled={page >= pageCount}

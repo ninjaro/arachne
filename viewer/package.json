@@ -6,8 +6,9 @@
   "scripts": {
     "data": "python3 scripts/build_catalog.py ../database/art-islands.sqlite public/data/catalog.json && python3 scripts/build_research.py ../database/art-islands.sqlite public/data/catalog.json public/data/research.json --merge-hints ../database/merge-hints-review.json",
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build && node scripts/build_static_api.mjs",
+    "preview": "vite preview",
+    "test:static": "node scripts/test_static_api.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.7.0",

@@ -882,3 +882,31 @@ tbody tr:focus {
     flex-direction: column;
   }
 }
+
+/* Arachne API-first navigation */
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.52rem 0.7rem;
+  color: inherit;
+  text-decoration: none;
+  background: #1a1f22;
+  border: 1px solid #353d41;
+  border-radius: 0.45rem;
+}
+
+.tab:hover {
+  border-color: #68757a;
+}
+
+.page-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.page-jump input {
+  width: 5.25rem;
+}
+

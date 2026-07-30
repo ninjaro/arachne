@@ -3,8 +3,9 @@ import { buildDomain, loadCatalog, loadResearch } from "./lib/data";
 import { buildFeatureIndex } from "./lib/features";
 import { buildResearchData } from "./lib/research";
 import { DEFAULT_SETTINGS } from "./lib/settings";
-import { EMPTY_FILTERS } from "./lib/browse";
 import type { BrowseFilters, BrowseSort } from "./lib/browse";
+import { buildViewerHref, readViewerLocation } from "./lib/location";
+import type { ViewerLocationState, ViewName } from "./lib/location";
 import { loadRatings, saveRatings, toggleRating } from "./lib/ratings";
 import type {
   Catalog,
@@ -25,13 +26,6 @@ import {
 } from "./components/windows";
 import "./styles.css";
 
-type ViewName =
-  | "browse"
-  | "recommendations"
-  | "evolution"
-  | "islands"
-  | "research";
-
 const VIEWS: Array<{ name: ViewName; label: string }> = [
   { name: "browse", label: "Browse" },
   { name: "recommendations", label: "Recommendations" },
@@ -40,19 +34,31 @@ const VIEWS: Array<{ name: ViewName; label: string }> = [
   { name: "research", label: "Research" },
 ];
 
+const LOCATION_DEFAULTS = {
+  pageSize: DEFAULT_SETTINGS.browse.defaultPageSize,
+  pageSizeOptions: DEFAULT_SETTINGS.browse.pageSizeOptions,
+};
+
 export default function App() {
+  const [initialLocation] = useState(() =>
+    readViewerLocation(
+      window.location,
+      import.meta.env.BASE_URL,
+      LOCATION_DEFAULTS,
+    ),
+  );
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [externalResearch, setExternalResearch] = useState<ResearchData | null>(null);
   const [domain, setDomain] = useState<Domain | null>(null);
   const [error, setError] = useState("");
-  const [view, setView] = useState<ViewName>("browse");
+  const [view, setView] = useState<ViewName>(initialLocation.view);
   const [ratings, setRatings] = useState<Ratings>(() => loadRatings());
-  const [filters, setFilters] = useState<BrowseFilters>(EMPTY_FILTERS);
-  const [sort, setSort] = useState<BrowseSort>("date");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(
-    DEFAULT_SETTINGS.browse.defaultPageSize,
+  const [filters, setFilters] = useState<BrowseFilters>(
+    initialLocation.browse.filters,
   );
+  const [sort, setSort] = useState<BrowseSort>(initialLocation.browse.sort);
+  const [page, setPage] = useState(initialLocation.browse.page);
+  const [pageSize, setPageSize] = useState(initialLocation.browse.pageSize);
 
   const {
     windows,
@@ -76,6 +82,33 @@ export default function App() {
 
   useEffect(() => saveRatings(ratings), [ratings]);
 
+  useEffect(() => {
+    const applyLocation = () => {
+      const next = readViewerLocation(
+        window.location,
+        import.meta.env.BASE_URL,
+        LOCATION_DEFAULTS,
+      );
+      setView(next.view);
+      setFilters(next.browse.filters);
+      setSort(next.browse.sort);
+      setPage(next.browse.page);
+      setPageSize(next.browse.pageSize);
+    };
+
+    const canonical = buildViewerHref(
+      initialLocation,
+      import.meta.env.BASE_URL,
+      LOCATION_DEFAULTS,
+    );
+    if (`${window.location.pathname}${window.location.search}` !== canonical) {
+      window.history.replaceState(null, "", canonical);
+    }
+
+    window.addEventListener("popstate", applyLocation);
+    return () => window.removeEventListener("popstate", applyLocation);
+  }, [initialLocation]);
+
   const featureIndex = useMemo(
     () =>
       domain
@@ -93,19 +126,64 @@ export default function App() {
     setRatings((current) => toggleRating(current, id, value));
   }
 
+  function currentLocation(overrides: {
+    view?: ViewName;
+    filters?: BrowseFilters;
+    sort?: BrowseSort;
+    page?: number;
+    pageSize?: number;
+  } = {}): ViewerLocationState {
+    return {
+      view: overrides.view ?? view,
+      browse: {
+        filters: overrides.filters ?? filters,
+        sort: overrides.sort ?? sort,
+        page: overrides.page ?? page,
+        pageSize: overrides.pageSize ?? pageSize,
+      },
+    };
+  }
+
+  function writeLocation(
+    next: ViewerLocationState,
+    mode: "push" | "replace",
+  ) {
+    const href = buildViewerHref(
+      next,
+      import.meta.env.BASE_URL,
+      LOCATION_DEFAULTS,
+    );
+    if (mode === "push") window.history.pushState(null, "", href);
+    else window.history.replaceState(null, "", href);
+  }
+
+  function navigateView(next: ViewName) {
+    if (next === view) return;
+    setView(next);
+    writeLocation(currentLocation({ view: next }), "push");
+  }
+
   function updateFilters(next: BrowseFilters) {
     setFilters(next);
     setPage(1);
+    writeLocation(currentLocation({ filters: next, page: 1 }), "replace");
   }
 
   function updateSort(next: BrowseSort) {
     setSort(next);
     setPage(1);
+    writeLocation(currentLocation({ sort: next, page: 1 }), "replace");
+  }
+
+  function updatePage(next: number) {
+    setPage(next);
+    writeLocation(currentLocation({ page: next }), "push");
   }
 
   function updatePageSize(next: number) {
     setPageSize(next);
     setPage(1);
+    writeLocation(currentLocation({ page: 1, pageSize: next }), "replace");
   }
 
   function clearRatings() {
@@ -138,22 +216,39 @@ export default function App() {
 
         <nav className="view-tabs" aria-label="Main views">
           {VIEWS.map(({ name, label }) => (
-            <button
-              type="button"
+            <a
               key={name}
+              href={buildViewerHref(
+                currentLocation({ view: name }),
+                import.meta.env.BASE_URL,
+                LOCATION_DEFAULTS,
+              )}
               className={view === name ? "tab active" : "tab"}
-              aria-pressed={view === name}
-              onClick={() => setView(name)}
+              aria-current={view === name ? "page" : undefined}
+              onClick={(event) => {
+                if (
+                  event.button !== 0 ||
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.shiftKey ||
+                  event.altKey
+                ) {
+                  return;
+                }
+                event.preventDefault();
+                navigateView(name);
+              }}
             >
               {label}
               {name === "research" && research.summary.problems > 0 ? (
                 <span className="tab-count">{research.summary.problems}</span>
               ) : null}
-            </button>
+            </a>
           ))}
         </nav>
 
         <div className="rating-summary">
+          <a href={`${import.meta.env.BASE_URL}api/v1/index.json`}>API</a>
           <span>{Object.keys(ratings).length.toLocaleString()} rated</span>
           <button
             type="button"
@@ -178,7 +273,7 @@ export default function App() {
             pageSize={pageSize}
             onFilters={updateFilters}
             onSort={updateSort}
-            onPage={setPage}
+            onPage={updatePage}
             onPageSize={updatePageSize}
             onOpen={openWindow}
             onRate={rate}

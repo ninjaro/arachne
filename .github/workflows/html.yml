@@ -87,10 +87,13 @@ jobs:
 
       - name: Build static viewer
         working-directory: viewer
+        env:
+          ARACHNE_VIEWER_BASE: /${{ github.event.repository.name }}/viewer/
         run: |
           npm ci
           npm run data
           npm run build
+          npm run test:static
 
       - name: Install viewer into Pages site
         run: |
