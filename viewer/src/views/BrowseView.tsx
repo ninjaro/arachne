@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { Domain, Ratings, Settings } from "../lib/types";
 import type { BrowseFilters, BrowseSort } from "../lib/browse";
 import type { FeatureIndex } from "../lib/features";
@@ -14,7 +14,13 @@ import {
 } from "../components/common";
 import type { OpenHandler, RateHandler } from "../components/common";
 import { dateLabel, humanize } from "../lib/format";
-import { buildQueryToken, queryDiagnostics } from "../lib/query";
+import {
+  appendQueryTerms,
+  buildQueryToken,
+  parseQuery,
+  queryDiagnostics,
+  removeQueryTermAt,
+} from "../lib/query";
 
 export function BrowseView({
   domain,
@@ -59,9 +65,12 @@ export function BrowseView({
     () => sortWorks(filtered, sort, relevance),
     [filtered, sort, relevance],
   );
+  const [draftQuery, setDraftQuery] = useState("");
+  const [draftErrors, setDraftErrors] = useState<string[]>([]);
+  const activeQuery = useMemo(() => parseQuery(filters.query), [filters.query]);
   const queryErrors = useMemo(
-    () => queryDiagnostics(filters.query),
-    [filters.query],
+    () => [...queryDiagnostics(filters.query), ...draftErrors],
+    [filters.query, draftErrors],
   );
 
   const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
@@ -75,6 +84,22 @@ export function BrowseView({
     key: K,
     value: BrowseFilters[K],
   ) => onFilters({ ...filters, [key]: value });
+
+  function appendQuery(query: string) {
+    setFilter("query", appendQueryTerms(filters.query, query));
+  }
+
+  function commitDraftQuery() {
+    const candidate = draftQuery.trim();
+    if (!candidate) return;
+    const errors = queryDiagnostics(candidate);
+    setDraftErrors(errors);
+    if (errors.length) return;
+
+    appendQuery(candidate);
+    setDraftQuery("");
+    setDraftErrors([]);
+  }
 
   const pagination = (
     <Pagination
@@ -91,13 +116,59 @@ export function BrowseView({
   return (
     <>
       <section className="filters sticky">
-        <input
-          type="search"
-          value={filters.query}
-          placeholder='Search or use agent:"Johnny Rotten" genre:punk'
-          onChange={(event) => setFilter("query", event.target.value)}
-          aria-label="Search catalog"
-        />
+        <div className="atomic-query">
+          <form
+            className="atomic-query-entry"
+            onSubmit={(event) => {
+              event.preventDefault();
+              commitDraftQuery();
+            }}
+          >
+            <input
+              type="search"
+              value={draftQuery}
+              placeholder='Add filter: genre:punk, tag:punk, actor:"James Gunn"'
+              onChange={(event) => {
+                setDraftQuery(event.target.value);
+                if (draftErrors.length) setDraftErrors([]);
+              }}
+              aria-label="Add catalog search filter"
+            />
+            <button type="submit" disabled={!draftQuery.trim()}>
+              Add
+            </button>
+          </form>
+
+          {activeQuery.terms.length ? (
+            <div className="query-chips" aria-label="Active search filters">
+              {activeQuery.terms.map((term, index) => (
+                <span
+                  className={term.negated ? "query-chip negated" : "query-chip"}
+                  key={`${term.raw}:${index}`}
+                >
+                  <code>{term.raw}</code>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFilter(
+                        "query",
+                        removeQueryTermAt(filters.query, index),
+                      )
+                    }
+                    aria-label={`Remove filter ${term.raw}`}
+                    title={`Remove ${term.raw}`}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span className="atomic-query-hint">
+              Press Enter to add a filter. Active filters appear here as removable tags.
+            </span>
+          )}
+        </div>
         <input
           type="number"
           value={filters.minimumYear}
@@ -153,15 +224,17 @@ export function BrowseView({
         </select>
         <button
           type="button"
-          onClick={() =>
+          onClick={() => {
+            setDraftQuery("");
+            setDraftErrors([]);
             onFilters({
               query: "",
               minimumYear: "",
               maximumYear: "",
               medium: "",
               conceptId: "",
-            })
-          }
+            });
+          }}
         >
           Clear
         </button>
@@ -183,8 +256,9 @@ export function BrowseView({
           agent:&quot;Johnny Rotten&quot; genre:punk -guide:violence year:1976..1981
         </code>
         <p>
-          Fields: title, agent, role, concept, genre, movement, theme, style,
-          medium, country, lang, id, guide and year. Use <code>word:punk</code> for
+          Fields: title, agent, tag, genre, movement, theme, style, actor,
+          performer, director, author, screenwriter, producer, medium, country,
+          lang, id, guide and year. Use <code>word:punk</code> for
           a whole word or <code>regex:/\bpost[- ]punk\b/i</code> for a regular
           expression.
         </p>
@@ -233,7 +307,7 @@ export function BrowseView({
                   <ConceptChips
                     concepts={work.concepts}
                     onFilter={(concept) =>
-                      setFilter("query", buildQueryToken("concept", concept.label))
+                      appendQuery(buildQueryToken("tag", concept.label))
                     }
                   />
                 </td>

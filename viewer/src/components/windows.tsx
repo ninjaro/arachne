@@ -205,7 +205,7 @@ export function FloatingEntityWindows({
                   <GroupedConceptChips
                     concepts={work.concepts}
                     onFilter={(concept) =>
-                      onSearch(buildQueryToken("concept", concept.label))
+                      onSearch(buildQueryToken("tag", concept.label))
                     }
                   />
                 </section>
@@ -231,8 +231,11 @@ export function FloatingEntityWindows({
                                 query: buildQueryToken("agent", contributor.label, true),
                               },
                               {
-                                label: `Filter role: ${humanize(contributor.role)}`,
-                                query: buildQueryToken("role", contributor.role),
+                                label: `Filter as ${humanize(contributor.role)}`,
+                                query: buildQueryToken(
+                                  contributor.role,
+                                  contributor.label,
+                                ),
                               },
                             ]}
                           />

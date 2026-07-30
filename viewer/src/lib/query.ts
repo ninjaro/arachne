@@ -48,6 +48,34 @@ const KNOWN_FIELDS = new Set([
   "similarity",
 ]);
 
+const CONTRIBUTOR_ROLE_FIELDS = new Set([
+  "actor",
+  "performer",
+  "director",
+  "author",
+  "screenwriter",
+  "producer",
+  "creator",
+  "composer",
+  "lyricist",
+  "artist",
+  "band",
+  "production_company",
+  "record_label",
+  "publisher",
+  "distributor",
+  "broadcaster",
+]);
+
+function contributorRoleField(field: string): string | null {
+  const normalized = field.replaceAll("-", "_");
+  return CONTRIBUTOR_ROLE_FIELDS.has(normalized) ? normalized : null;
+}
+
+function isKnownField(field: string): boolean {
+  return KNOWN_FIELDS.has(field) || contributorRoleField(field) !== null;
+}
+
 function scanTokens(input: string): { tokens: string[]; errors: string[] } {
   const tokens: string[] = [];
   const errors: string[] = [];
@@ -197,7 +225,7 @@ export function parseQuery(input: string): ParsedQuery {
       } else {
         field = candidate;
         value = token.slice(colon + 1);
-        if (!KNOWN_FIELDS.has(candidate)) errors.push(`Unknown search field: ${candidate}`);
+        if (!isKnownField(candidate)) errors.push(`Unknown search field: ${candidate}`);
       }
     }
 
@@ -226,7 +254,7 @@ export function parseQuery(input: string): ParsedQuery {
       negated,
       matcher,
       regex: regexResult.regex,
-      invalid: Boolean(regexResult.error) || Boolean(field && !KNOWN_FIELDS.has(field)),
+      invalid: Boolean(regexResult.error) || Boolean(field && !isKnownField(field)),
     });
   }
 
@@ -248,6 +276,37 @@ export function buildQueryToken(
   negated = false,
 ): string {
   return `${negated ? "-" : ""}${field}:${quoteQueryValue(value)}`;
+}
+
+function queryTermKey(term: QueryTerm): string {
+  return [
+    term.negated ? "not" : "yes",
+    term.matcher,
+    term.field ?? "",
+    term.value.toLocaleLowerCase(),
+  ].join("\u0000");
+}
+
+export function appendQueryTerms(current: string, addition: string): string {
+  const combined: QueryTerm[] = [];
+  const seen = new Set<string>();
+
+  for (const term of [...parseQuery(current).terms, ...parseQuery(addition).terms]) {
+    if (term.invalid) continue;
+    const key = queryTermKey(term);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    combined.push(term);
+  }
+
+  return combined.map((term) => term.raw).join(" ");
+}
+
+export function removeQueryTermAt(input: string, index: number): string {
+  return parseQuery(input).terms
+    .filter((_, position) => position !== index)
+    .map((term) => term.raw)
+    .join(" ");
 }
 
 function resetAndTest(regex: RegExp, value: string): boolean {
@@ -317,6 +376,20 @@ function guideMatches(work: Work, term: QueryTerm): boolean {
 function matchWorkTerm(work: Work, term: QueryTerm): boolean {
   const concepts = work.concepts;
   const contributors = work.contributors;
+  const contributorRole = term.field ? contributorRoleField(term.field) : null;
+
+  if (contributorRole) {
+    return contributors.some(
+      (contributor) =>
+        contributor.role.toLocaleLowerCase() === contributorRole &&
+        matchesValues(term, [
+          contributor.label,
+          contributor.creditedAs,
+          contributor.id,
+        ]),
+    );
+  }
+
   switch (term.field) {
     case null:
       return matchesValues(term, [
@@ -409,6 +482,15 @@ function scoreWorkTerm(work: Work, term: QueryTerm): number {
   if (term.field === "title") return textScore(work.label, term, 14, 10, 7);
   if (["agent", "person", "contributor"].includes(term.field ?? "")) {
     return Math.max(0, ...work.contributors.map((item) => textScore(item.label, term, 8, 6, 4)));
+  }
+  const contributorRole = term.field ? contributorRoleField(term.field) : null;
+  if (contributorRole) {
+    return Math.max(
+      0,
+      ...work.contributors
+        .filter((item) => item.role.toLocaleLowerCase() === contributorRole)
+        .map((item) => textScore(item.label, term, 9, 7, 5)),
+    );
   }
   if (["concept", "tag", "genre", "movement", "theme", "style"].includes(term.field ?? "")) {
     return Math.max(0, ...work.concepts.map((item) => textScore(item.label, term, 8, 6, 4)));

@@ -170,3 +170,173 @@
     position: static;
   }
 }
+
+/* Atomic query chips and compact Research layouts */
+.atomic-query {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 0.45rem;
+}
+
+.atomic-query-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+}
+
+.atomic-query-entry input[type="search"] {
+  grid-column: auto;
+}
+
+.atomic-query-hint {
+  color: #8f999d;
+  font-size: 0.78rem;
+}
+
+.query-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+.query-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0.24rem 0.28rem 0.24rem 0.48rem;
+  color: #d5e6e3;
+  background: #20312f;
+  border: 1px solid #36514d;
+  border-radius: 999px;
+}
+
+.query-chip.negated {
+  color: #f0d5d6;
+  background: #382528;
+  border-color: #654046;
+}
+
+.query-chip code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.query-chip button {
+  display: grid;
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.query-chip button:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.research-filters {
+  grid-template-columns:
+    minmax(260px, 2fr)
+    repeat(4, minmax(125px, 0.8fr))
+    auto
+    auto;
+}
+
+.research-view-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.research-layout-toggle {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  background: #111618;
+  border: 1px solid #30383b;
+  border-radius: 0.5rem;
+}
+
+.research-layout-toggle button {
+  border-color: transparent;
+  background: transparent;
+}
+
+.research-layout-toggle button.active {
+  color: #e6f4f1;
+  background: #293638;
+  border-color: #4b5e61;
+}
+
+.research-list.grid {
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+  align-items: start;
+}
+
+.research-list.grid .research-card-header {
+  display: grid;
+}
+
+.research-list.grid .research-card h3 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.research-list.grid .research-card-header p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.research-card-more {
+  margin-top: 0.65rem;
+}
+
+.research-card-more > summary {
+  font-weight: 650;
+}
+
+.research-card-more-body {
+  margin-top: 0.45rem;
+}
+
+.research-card-more-body > :first-child {
+  margin-top: 0;
+}
+
+@media (max-width: 1150px) {
+  .research-filters {
+    grid-template-columns: repeat(3, minmax(140px, 1fr));
+  }
+
+  .research-filters input[type="search"] {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .atomic-query-entry {
+    grid-template-columns: 1fr;
+  }
+
+  .research-view-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .research-layout-toggle {
+    align-self: flex-start;
+  }
+
+  .research-list.grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -18,6 +18,7 @@ import {
 type KindFilter = ResearchKind | "all";
 type SeverityFilter = ResearchSeverity | "all";
 type ResearchSort = "severity" | "quality" | "similarity" | "title";
+type ResearchLayout = "list" | "grid";
 
 const PAGE_SIZES = [25, 50, 100];
 const SEVERITY_RANK: Record<ResearchSeverity, number> = {
@@ -112,56 +113,76 @@ function ResearchCard({
         </div>
       ) : null}
 
-      {item.batchId ? (
-        <p className="research-field">
-          Batch: <code>{item.batchId}</code>
-          {item.jsonPath ? (
-            <>
-              {" · "}Path: <code>{item.jsonPath}</code>
-            </>
-          ) : null}
-        </p>
-      ) : null}
+      {item.batchId ||
+      item.jsonPath ||
+      (item.leftId && item.rightId) ||
+      item.details?.length ||
+      item.value !== undefined ||
+      item.signals !== undefined ? (
+        <details className="research-card-more">
+          <summary>
+            Details
+            {item.details?.length ? ` · ${item.details.length}` : ""}
+          </summary>
+          <div className="research-card-more-body">
+            {item.batchId || item.jsonPath ? (
+              <p className="research-field">
+                {item.batchId ? (
+                  <>
+                    Batch: <code>{item.batchId}</code>
+                  </>
+                ) : null}
+                {item.batchId && item.jsonPath ? " · " : null}
+                {item.jsonPath ? (
+                  <>
+                    Path: <code>{item.jsonPath}</code>
+                  </>
+                ) : null}
+              </p>
+            ) : null}
 
-      {item.leftId && item.rightId ? (
-        <ul className="research-details">
-          <li>
-            Left: {item.leftLabel ?? item.leftId} (<code>{item.leftId}</code>)
-          </li>
-          <li>
-            Right: {item.rightLabel ?? item.rightId} (<code>{item.rightId}</code>)
-          </li>
-          {item.textScore !== undefined && item.textScore !== null ? (
-            <li>Text score: {(item.textScore * 100).toFixed(1)}%</li>
-          ) : null}
-          {item.graphScore !== undefined && item.graphScore !== null ? (
-            <li>Graph score: {(item.graphScore * 100).toFixed(1)}%</li>
-          ) : null}
-          {item.contextScore !== undefined && item.contextScore !== null ? (
-            <li>Context score: {(item.contextScore * 100).toFixed(1)}%</li>
-          ) : null}
-        </ul>
-      ) : null}
+            {item.leftId && item.rightId ? (
+              <ul className="research-details">
+                <li>
+                  Left: {item.leftLabel ?? item.leftId} (<code>{item.leftId}</code>)
+                </li>
+                <li>
+                  Right: {item.rightLabel ?? item.rightId} (<code>{item.rightId}</code>)
+                </li>
+                {item.textScore !== undefined && item.textScore !== null ? (
+                  <li>Text score: {(item.textScore * 100).toFixed(1)}%</li>
+                ) : null}
+                {item.graphScore !== undefined && item.graphScore !== null ? (
+                  <li>Graph score: {(item.graphScore * 100).toFixed(1)}%</li>
+                ) : null}
+                {item.contextScore !== undefined && item.contextScore !== null ? (
+                  <li>Context score: {(item.contextScore * 100).toFixed(1)}%</li>
+                ) : null}
+              </ul>
+            ) : null}
 
-      {item.details?.length ? (
-        <ul className="research-details">
-          {item.details.map((detail, index) => (
-            <li key={`${index}:${detail}`}>{detail}</li>
-          ))}
-        </ul>
-      ) : null}
+            {item.details?.length ? (
+              <ul className="research-details">
+                {item.details.map((detail, index) => (
+                  <li key={`${index}:${detail}`}>{detail}</li>
+                ))}
+              </ul>
+            ) : null}
 
-      {item.value !== undefined ? (
-        <details>
-          <summary>Rejected value</summary>
-          <pre>{rawValue(item.value)}</pre>
-        </details>
-      ) : null}
+            {item.value !== undefined ? (
+              <details>
+                <summary>Rejected value</summary>
+                <pre>{rawValue(item.value)}</pre>
+              </details>
+            ) : null}
 
-      {item.signals !== undefined ? (
-        <details>
-          <summary>Merge signals</summary>
-          <pre>{JSON.stringify(item.signals, null, 2)}</pre>
+            {item.signals !== undefined ? (
+              <details>
+                <summary>Merge signals</summary>
+                <pre>{JSON.stringify(item.signals, null, 2)}</pre>
+              </details>
+            ) : null}
+          </div>
         </details>
       ) : null}
     </article>
@@ -216,6 +237,7 @@ export function ResearchView({
   const [category, setCategory] = useState("all");
   const [linkedOnly, setLinkedOnly] = useState(false);
   const [sort, setSort] = useState<ResearchSort>("severity");
+  const [layout, setLayout] = useState<ResearchLayout>("list");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
 
@@ -396,13 +418,37 @@ export function ResearchView({
         </p>
       </details>
 
-      <p className="research-count">
-        Showing {pageItems.length.toLocaleString()} items on page {safePage} of{" "}
-        {pageCount}; {visible.length.toLocaleString()} match the filters.
-      </p>
+      <div className="research-view-controls">
+        <p className="research-count">
+          Showing {pageItems.length.toLocaleString()} items on page {safePage} of{" "}
+          {pageCount}; {visible.length.toLocaleString()} match the filters.
+        </p>
+        <div
+          className="research-layout-toggle"
+          role="group"
+          aria-label="Research result layout"
+        >
+          <button
+            type="button"
+            className={layout === "list" ? "active" : ""}
+            aria-pressed={layout === "list"}
+            onClick={() => setLayout("list")}
+          >
+            List
+          </button>
+          <button
+            type="button"
+            className={layout === "grid" ? "active" : ""}
+            aria-pressed={layout === "grid"}
+            onClick={() => setLayout("grid")}
+          >
+            Grid
+          </button>
+        </div>
+      </div>
 
       {pagination}
-      <div className="research-list">
+      <div className={`research-list ${layout}`}>
         {pageItems.map((item) => (
           <ResearchCard item={item} domain={domain} onOpen={onOpen} key={item.id} />
         ))}

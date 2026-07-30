@@ -7,6 +7,7 @@ import type { BrowseFilters, BrowseSort } from "./lib/browse";
 import { buildViewerHref, readViewerLocation } from "./lib/location";
 import type { ViewerLocationState, ViewName } from "./lib/location";
 import { loadRatings, saveRatings, toggleRating } from "./lib/ratings";
+import { appendQueryTerms } from "./lib/query";
 import type {
   Catalog,
   Domain,
@@ -188,7 +189,10 @@ export default function App() {
   }
 
   function searchBrowse(query: string) {
-    const nextFilters = { ...filters, query };
+    const nextFilters = {
+      ...filters,
+      query: appendQueryTerms(filters.query, query),
+    };
     setView("browse");
     setFilters(nextFilters);
     setPage(1);
