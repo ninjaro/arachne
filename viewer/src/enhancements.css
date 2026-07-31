@@ -341,60 +341,148 @@
   }
 }
 
-
-/* Temporal evolution timeline and per-feature edges */
-.evolution-timeline-axis {
-  stroke: #596368;
-  stroke-width: 1.2;
+/* Fixed temporal evolution scene */
+.evolution-fixed-view {
+  min-width: 0;
 }
 
-.evolution-year-tick {
-  stroke: #596368;
-  stroke-width: 1;
+.evolution-fixed-selection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0.7rem 0.85rem;
+  background: #141a1c;
+  border: 1px solid #323b3e;
+  border-radius: 0.55rem;
+}
+
+.evolution-fixed-selection h3,
+.evolution-fixed-selection p {
+  margin: 0;
+}
+
+.evolution-fixed-selection h3 {
+  margin-bottom: 0.18rem;
+  font-size: 1rem;
+}
+
+.evolution-fixed-selection p {
+  color: #9da7aa;
+  font-size: 0.82rem;
+}
+
+.evolution-fixed-selection button {
+  flex: 0 0 auto;
+}
+
+.evolution-fixed-canvas {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0.005)),
+    #101416;
+}
+
+.evolution-timeline-axis {
+  stroke: #687276;
+  stroke-width: 1.1;
 }
 
 .evolution-year-label {
-  fill: #9ca7aa;
+  fill: #a2abad;
   font-size: 11px;
   letter-spacing: 0.03em;
 }
 
-.evolution-timeline-point {
-  fill: #7d898d;
-  opacity: 0.38;
-  cursor: pointer;
-  transition: opacity 120ms ease, r 120ms ease, fill 120ms ease;
+.evolution-fixed-year-grid {
+  stroke: #384044;
+  stroke-width: 0.7;
+  opacity: 0.58;
 }
 
-.evolution-timeline-point:hover {
-  fill: #d7e1e2;
-  opacity: 0.95;
+.evolution-fixed-edge-cloud {
+  fill: none;
+  stroke: #748084;
+  stroke-width: 0.55;
+  opacity: 0.12;
+  pointer-events: none;
 }
 
-.evolution-timeline-point.selected {
-  fill: #e8c477;
-  opacity: 1;
+.evolution-fixed-selected-edge {
+  fill: none;
+  stroke: #d5dfe0;
+  pointer-events: stroke;
 }
 
-.evolution-factor-edge {
+.evolution-fixed-feature-edge {
   fill: none;
   transition: opacity 120ms ease, stroke-width 120ms ease;
 }
 
-.evolution-factor-group:hover .evolution-factor-edge {
-  opacity: 0.92 !important;
+.evolution-fixed-feature-edge:hover {
+  opacity: 1 !important;
 }
 
-.evolution-factor-group:hover .evolution-factor-edge.thin {
-  opacity: 0.58 !important;
+.evolution-fixed-point {
+  fill: #8b9699;
+  stroke: #101416;
+  stroke-width: 0.5;
+  opacity: 0.62;
+  cursor: pointer;
+  transition: fill 100ms ease, opacity 100ms ease, stroke-width 100ms ease;
 }
 
-.evolution-group-edge {
-  opacity: 0.3;
-  stroke-dasharray: 3 5;
+.evolution-fixed-point:hover {
+  fill: #dce5e6;
+  opacity: 1;
+  stroke-width: 1;
 }
 
-.evolution-node.selected > rect:first-of-type {
-  stroke: #e8c477;
-  stroke-width: 2;
+.evolution-fixed-point.root {
+  fill: #b99b60;
+  opacity: 0.82;
+}
+
+.evolution-fixed-point.related {
+  fill: #a9d6d0;
+  opacity: 0.98;
+}
+
+.evolution-fixed-point.selected {
+  fill: #f0cc78;
+  stroke: #fff0bd;
+  stroke-width: 1.3;
+  opacity: 1;
+}
+
+.evolution-fixed-point.dimmed {
+  opacity: 0.18;
+}
+
+.evolution-fixed-node-label rect {
+  fill: #111719;
+  stroke: #657174;
+  stroke-width: 1;
+}
+
+.evolution-fixed-node-label .node-title {
+  fill: #eef3f3;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.evolution-fixed-node-label .node-meta {
+  fill: #9da8aa;
+  font-size: 10px;
+}
+
+@media (max-width: 700px) {
+  .evolution-fixed-selection {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .evolution-fixed-selection button {
+    align-self: flex-start;
+  }
 }

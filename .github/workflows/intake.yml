@@ -24,7 +24,7 @@ jobs:
       valid: ${{ steps.parse.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Parse one batch attachment request
+      - name: Parse batch attachment request
         id: parse
         continue-on-error: true
         run: |
@@ -104,47 +104,27 @@ jobs:
           python3 scripts/issue_intake_request.py \
             --event "${GITHUB_EVENT_PATH}" \
             --output "${RUNNER_TEMP}/intake-request.json"
-      - name: Build concrete Pheidippides transport contract
+      - name: Acquire and materialize submitted batches
         run: |
-          python3 scripts/issue_fetch_request.py \
+          python3 scripts/process_issue_batches.py \
             --request "${RUNNER_TEMP}/intake-request.json" \
             --config "${RUNNER_TEMP}/arachne-config.json" \
-            --output "${RUNNER_TEMP}/fetch-request.json"
-          echo "ACQUIRED_CONTROL=${RUNNER_TEMP}/acquired-artifact.json" >> "${GITHUB_ENV}"
-      - name: Acquire attachment through Pheidippides
-        id: fetch
-        run: |
-          python3 scripts/arachne_ops.py \
-            --config "${RUNNER_TEMP}/arachne-config.json" \
             --binary "${GITHUB_WORKSPACE}/build/arachne" \
-            fetch \
-            --request "${RUNNER_TEMP}/fetch-request.json" \
-            --output-control "${ACQUIRED_CONTROL}"
-      - name: Preserve transport result for diagnosis
+            --work-dir "${RUNNER_TEMP}/issue-batches" \
+            --output "${RUNNER_TEMP}/batch-intake-result.json"
+      - name: Preserve batch intake result for diagnosis
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: acquired-artifact-${{ github.event.issue.number }}
-          path: ${{ env.ACQUIRED_CONTROL }}
+          name: batch-intake-${{ github.event.issue.number }}
+          path: |
+            ${{ runner.temp }}/batch-intake-result.json
+            ${{ runner.temp }}/issue-batches
           if-no-files-found: warn
           retention-days: 7
-      - name: Place verified bytes in the fixed product inbox
-        run: |
-          python3 scripts/materialize_product_batch.py \
-            --request "${RUNNER_TEMP}/intake-request.json" \
-            --fetch-request "${RUNNER_TEMP}/fetch-request.json" \
-            --acquired-control "${ACQUIRED_CONTROL}" \
-            --config "${RUNNER_TEMP}/arachne-config.json"
-      - name: Validate the strict product batch
+      - name: Validate the strict product batches
         run: build/arachne product check-inbox
-      - name: Remove transferred acquisition duplicate
-        if: always() && steps.fetch.outcome == 'success'
-        run: |
-          python3 scripts/discard_acquired_artifact.py \
-            --fetch-request "${RUNNER_TEMP}/fetch-request.json" \
-            --acquired-control "${ACQUIRED_CONTROL}" \
-            --config "${RUNNER_TEMP}/arachne-config.json"
-      - name: Propose the validated inbox file for review
+      - name: Propose the validated inbox files for review
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -154,8 +134,8 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --base "${{ github.event.repository.default_branch }}" \
             --branch "arachne/batch-${ISSUE_NUMBER}-${GITHUB_RUN_ID}" \
-            --title "Add Arachne batch from issue #${ISSUE_NUMBER}" \
-            --body "Adds one validated arachne_batch_v2 file from issue #${ISSUE_NUMBER}. Product integration applies it in a separate reviewable database change."
+            --title "Add Arachne batches from issue #${ISSUE_NUMBER}" \
+            --body "Adds one or more validated arachne_batch_v2 files from issue #${ISSUE_NUMBER}. Product integration applies them in a separate reviewable database change."
       - name: Return successful intake result
         if: success()
         env:

@@ -17,7 +17,7 @@ DEFAULT_HOSTS = {"github.com", "user-images.githubusercontent.com"}
 
 
 class InvalidSubmission(ValueError):
-    """The issue does not contain one supported attachment reference."""
+    """The issue does not contain supported attachment references."""
 
 
 def attachment_urls(body: str, allowed_hosts: set[str]) -> list[str]:
@@ -67,29 +67,56 @@ def main() -> int:
         if not title:
             raise InvalidSubmission("issue title is empty")
         urls = attachment_urls(body, allowed_hosts)
-        if len(urls) != 1:
-            raise InvalidSubmission(
-                f"expected exactly one supported attachment URL, found {len(urls)}"
+        if not urls:
+            raise InvalidSubmission("expected at least one supported attachment URL")
+
+        attachments: list[dict[str, str]] = []
+        for url in urls:
+            submitted_name = attachment_name(body, url)
+            if Path(submitted_name).suffix.lower() != ".json":
+                raise InvalidSubmission(
+                    "the provisional GitHub attachment must identify a .json "
+                    f"filename: {submitted_name or '<unnamed>'}"
+                )
+            attachments.append(
+                {
+                    "url": url,
+                    "host": str(urlsplit(url).hostname),
+                    "name": submitted_name,
+                }
             )
-        submitted_name = attachment_name(body, urls[0])
-        if Path(submitted_name).suffix.lower() != ".json":
-            raise InvalidSubmission(
-                "the provisional GitHub attachment must identify a .json filename"
-            )
-        request = {
-            "format_version": 1,
+
+        request: dict[str, object] = {
+            "format_version": 2,
             "submission_ref": f"github-issue:{repository}#{number}",
             "title": title,
-            "attachment_url": urls[0],
-            "attachment_host": urlsplit(urls[0]).hostname,
-            "attachment_name": submitted_name,
+            "attachments": attachments,
         }
+
+        # Preserve the v1 single-attachment shape for local tools and older tests.
+        # Multi-attachment consumers must use the attachments array.
+        if len(attachments) == 1:
+            attachment = attachments[0]
+            request.update(
+                {
+                    "attachment_url": attachment["url"],
+                    "attachment_host": attachment["host"],
+                    "attachment_name": attachment["name"],
+                }
+            )
+
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         with arguments.output.open("x", encoding="utf-8") as stream:
             json.dump(request, stream, indent=2, sort_keys=True)
             stream.write("\n")
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError,
-            InvalidSubmission) as error:
+    except (
+        OSError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        InvalidSubmission,
+    ) as error:
         print(f"issue_intake_request: {error}", file=sys.stderr)
         return 2
     print(arguments.output)
