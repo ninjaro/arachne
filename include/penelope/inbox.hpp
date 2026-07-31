@@ -71,6 +71,11 @@ apply_product_inbox(const std::filesystem::path& repository_root);
 [[nodiscard]] std::size_t
 rebuild_product_merge_hints(const std::filesystem::path& repository_root);
 
+/** Remove disposable open merge hints and blocking state, then VACUUM. */
+void compact_product_merge_hints(
+    const std::filesystem::path& repository_root
+);
+
 [[nodiscard]] const char* to_string(inbox_batch_status status) noexcept;
 
 } // namespace arachne::penelope

@@ -1298,6 +1298,9 @@ int command_product_inbox(const bool apply) {
     const auto result = apply
         ? arachne::penelope::apply_product_inbox(repository_root())
         : arachne::penelope::check_product_inbox(repository_root());
+    if (apply) {
+        arachne::penelope::compact_product_merge_hints(repository_root());
+    }
     ordered_json batches = ordered_json::array();
     for (const auto& batch : result.batches) {
         ordered_json issues = ordered_json::array();

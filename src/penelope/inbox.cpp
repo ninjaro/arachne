@@ -6160,4 +6160,26 @@ std::size_t rebuild_product_merge_hints(const fs::path& repository_root) {
     return rebuild_hints(product);
 }
 
+void compact_product_merge_hints(const fs::path& repository_root) {
+    const fs::path path
+        = repository_root / "database" / "art-islands.sqlite";
+    require_real_database_file(path);
+    database product(path, true);
+    {
+        transaction change(product);
+        product.execute("DELETE FROM merge_hints WHERE status='open'");
+        product.execute("DELETE FROM merge_hint_block_members");
+        product.execute("DELETE FROM merge_hint_blocks");
+        change.commit();
+    }
+    product.execute("VACUUM");
+    require_clean_foreign_keys(product.native());
+    statement quick_check(product.native(), "PRAGMA quick_check");
+    if (!quick_check.step() || quick_check.text(0) != "ok") {
+        throw database_error(
+            "product database quick_check failed after compaction"
+        );
+    }
+}
+
 } // namespace arachne::penelope
