@@ -57,8 +57,8 @@ export interface EvolutionIndex {
 export interface EvolutionFilters extends EvolutionDateFilters {
   seedTagIds: readonly EntityId[];
   excludedTagIds: readonly EntityId[];
-  depth: number;
-  neighborDirection: "both";
+  earlierDepth: number;
+  laterDepth: number;
 }
 
 export type ReachReason =
@@ -69,20 +69,28 @@ export type ReachReason =
       seedTagId: EntityId;
       fromWorkId: EntityId;
       viaTagId: EntityId;
+      direction?: "earlier" | "later";
+      sourceStationId?: string;
     }
   | {
       kind: "temporal-neighbor";
       seedTagId: EntityId;
       fromWorkId: EntityId;
       viaTagId: EntityId;
-      direction: "same" | "earlier" | "later";
+      direction: "earlier" | "later";
       groupId: string;
+      sourceStationId?: string;
+      targetStationId?: string;
+      resultingDepth?: number;
     }
   | {
       kind: "visible-interchange";
       seedTagId: EntityId;
       workId: EntityId;
       tagId: EntityId;
+      direction?: "earlier" | "later";
+      sourceStationId?: string;
+      resultingDepth?: number;
     };
 
 export interface ReachInfo {
@@ -91,27 +99,58 @@ export interface ReachInfo {
   reasons: ReachReason[];
 }
 
-export interface VisibleMembership extends ReachInfo {
+export interface DirectionalReachInfo extends ReachInfo {
+  seedDepth: 0 | null;
+  earlierDepth: number | null;
+  laterDepth: number | null;
+}
+
+export interface DirectionalTraversalState {
+  tagId: EntityId;
+  stopId: string;
+  direction: "earlier" | "later";
+}
+
+export interface AggregateStation extends DirectionalReachInfo {
+  id: string;
+  temporalBucketId: string;
+  temporal: EvolutionDate;
+  workIds: EntityId[];
+  visibleTagIds: EntityId[];
+  workCount: number;
+  reach: DirectionalReachInfo;
+}
+
+export interface AggregateMembership extends DirectionalReachInfo {
+  key: string;
+  tagId: EntityId;
+  stationId: string;
+  reach: DirectionalReachInfo;
+}
+
+export interface VisibleMembership extends DirectionalReachInfo {
   key: string;
   tagId: EntityId;
   workId: EntityId;
 }
 
-export interface VisibleEvolutionTag extends ReachInfo {
+export interface VisibleEvolutionTag extends DirectionalReachInfo {
   tag: EvolutionTag;
   seed: boolean;
   seedOrder: number | null;
   workIds: EntityId[];
   bucketIds: string[];
+  stationIds: string[];
   firstTemporal: EvolutionDate;
   lastTemporal: EvolutionDate;
   origin: {
     id: string;
     targetWorkIds: EntityId[];
+    targetStationIds: string[];
   };
 }
 
-export interface VisibleEvolutionWork extends ReachInfo {
+export interface VisibleEvolutionWork extends DirectionalReachInfo {
   work: Work;
   temporal: EvolutionDate;
   visibleTagIds: EntityId[];
@@ -119,6 +158,14 @@ export interface VisibleEvolutionWork extends ReachInfo {
 
 export interface VisibleExplicitRelation extends OrientedWorkRelation {
   chronologyConflict: boolean;
+}
+
+export interface VisibleAggregateRelation {
+  key: string;
+  sourceStationId: string;
+  targetStationId: string;
+  relations: VisibleExplicitRelation[];
+  relationTypes: string[];
 }
 
 export interface VisibleEvolution {
@@ -131,13 +178,15 @@ export interface VisibleEvolution {
   workById: Map<EntityId, VisibleEvolutionWork>;
   membershipsByTagId: Map<EntityId, VisibleMembership[]>;
   membershipsByWorkId: Map<EntityId, VisibleMembership[]>;
+  stations: AggregateStation[];
+  stationById: Map<string, AggregateStation>;
+  stationIdByWorkId: Map<EntityId, string>;
+  aggregateMemberships: AggregateMembership[];
+  aggregateMembershipsByTagId: Map<EntityId, AggregateMembership[]>;
+  aggregateMembershipsByStationId: Map<string, AggregateMembership[]>;
+  aggregateRelations: VisibleAggregateRelation[];
+  traversalStates: DirectionalTraversalState[];
   emptySeedTagIds: EntityId[];
-}
-
-interface MutableReach {
-  depth: number;
-  seedTagIds: Set<EntityId>;
-  reasons: Map<string, ReachReason>;
 }
 
 interface EligibleTimeline {
@@ -191,6 +240,15 @@ function membershipKey(tagId: EntityId, workId: EntityId): string {
   return `${tagId}\u0000${workId}`;
 }
 
+/** Stable scene identifier for an accepted bucket and sorted visible tag set. */
+export function aggregateStationId(
+  temporalBucketId: string,
+  visibleTagIds: readonly EntityId[],
+): string {
+  const signature = [...new Set(visibleTagIds)].sort().map(encodeURIComponent).join("+");
+  return `station:${encodeURIComponent(temporalBucketId)}:${signature}`;
+}
+
 function reasonKey(reason: ReachReason): string {
   switch (reason.kind) {
     case "seed-tag":
@@ -198,44 +256,12 @@ function reasonKey(reason: ReachReason): string {
     case "seed-membership":
       return `1:${reason.seedTagId}:${reason.viaTagId}`;
     case "shared-work":
-      return `2:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}`;
+      return `2:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}:${reason.direction ?? "seed"}:${reason.sourceStationId ?? ""}`;
     case "temporal-neighbor":
-      return `3:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}:${reason.direction}:${reason.groupId}`;
+      return `3:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}:${reason.direction}:${reason.groupId}:${reason.sourceStationId ?? ""}:${reason.targetStationId ?? ""}:${reason.resultingDepth ?? ""}`;
     case "visible-interchange":
-      return `4:${reason.seedTagId}:${reason.workId}:${reason.tagId}`;
+      return `4:${reason.seedTagId}:${reason.workId}:${reason.tagId}:${reason.direction ?? "seed"}:${reason.sourceStationId ?? ""}:${reason.resultingDepth ?? ""}`;
   }
-}
-
-function recordReach(
-  target: Map<string, MutableReach>,
-  id: string,
-  depth: number,
-  reason: ReachReason,
-  seedTagIds: Iterable<EntityId>,
-): boolean {
-  const current = target.get(id);
-  if (!current || depth < current.depth) {
-    target.set(id, {
-      depth,
-      seedTagIds: new Set(seedTagIds),
-      reasons: new Map([[reasonKey(reason), reason]]),
-    });
-    return true;
-  }
-  if (depth !== current.depth) return false;
-  for (const seedTagId of seedTagIds) current.seedTagIds.add(seedTagId);
-  current.reasons.set(reasonKey(reason), reason);
-  return false;
-}
-
-function freezeReach(reach: MutableReach): ReachInfo {
-  return {
-    depth: reach.depth,
-    seedTagIds: [...reach.seedTagIds].sort(),
-    reasons: [...reach.reasons.values()].sort((left, right) =>
-      reasonKey(left).localeCompare(reasonKey(right)),
-    ),
-  };
 }
 
 function deduplicatedIds(ids: readonly EntityId[]): EntityId[] {
@@ -493,48 +519,480 @@ export function defaultEvolutionSeedTagId(
   return best?.id ?? null;
 }
 
-function normalizedFilters(filters: EvolutionFilters): EvolutionFilters {
+interface ResolvedEvolutionFilters extends EvolutionFilters {
+  earlierDepth: number;
+  laterDepth: number;
+}
+
+function normalizedFilters(filters: EvolutionFilters): ResolvedEvolutionFilters {
+  const earlierDepth = Math.max(0, Math.trunc(filters.earlierDepth));
+  const laterDepth = Math.max(0, Math.trunc(filters.laterDepth));
   return {
     seedTagIds: deduplicatedIds(filters.seedTagIds),
     excludedTagIds: deduplicatedIds(filters.excludedTagIds).sort(),
-    depth: Math.max(0, Math.trunc(filters.depth)),
+    earlierDepth,
+    laterDepth,
     includeYearOnly: filters.includeYearOnly,
     includeAmbiguous: filters.includeAmbiguous,
-    neighborDirection: "both",
   };
 }
 
-function addVisibleInterchanges(
-  index: EvolutionIndex,
-  excluded: ReadonlySet<EntityId>,
-  dateFilters: EvolutionDateFilters,
-  workReach: Map<string, MutableReach>,
-  tagReach: Map<string, MutableReach>,
-  membershipReach: Map<string, MutableReach>,
-) {
-  for (const [workId, workInfo] of workReach) {
-    if (!evolutionDateAccepted(index.temporalByWorkId.get(workId) ?? null, dateFilters)) {
-      continue;
+function combineDirectionalReach(
+  reaches: readonly DirectionalReachInfo[],
+): DirectionalReachInfo {
+  const minimum = (values: Array<number | null>): number | null => {
+    const accepted = values.filter((value): value is number => value !== null);
+    return accepted.length ? Math.min(...accepted) : null;
+  };
+  const seedDepth = reaches.some((reach) => reach.seedDepth === 0) ? 0 : null;
+  const earlierDepth = minimum(reaches.map((reach) => reach.earlierDepth));
+  const laterDepth = minimum(reaches.map((reach) => reach.laterDepth));
+  const depths = [seedDepth, earlierDepth, laterDepth].filter(
+    (depth): depth is number => depth !== null,
+  );
+  const reasonMap = new Map<string, ReachReason>();
+  const seedTagIds = new Set<EntityId>();
+  for (const reach of reaches) {
+    const contributesSeed = seedDepth === 0 && reach.seedDepth === 0;
+    const contributesEarlier =
+      earlierDepth !== null && reach.earlierDepth === earlierDepth;
+    const contributesLater = laterDepth !== null && reach.laterDepth === laterDepth;
+    if (contributesSeed || contributesEarlier || contributesLater) {
+      for (const seedTagId of reach.seedTagIds) seedTagIds.add(seedTagId);
     }
-    for (const tag of index.tagsByWorkId.get(workId) ?? []) {
-      if (excluded.has(tag.id)) continue;
-      const tagInfo = tagReach.get(tag.id);
-      if (!tagInfo) continue;
-      const depth = Math.max(workInfo.depth, tagInfo.depth);
-      const roots = new Set([...workInfo.seedTagIds, ...tagInfo.seedTagIds]);
-      for (const seedTagId of roots) {
-        recordReach(
-          membershipReach,
-          membershipKey(tag.id, workId),
-          depth,
-          { kind: "visible-interchange", seedTagId, workId, tagId: tag.id },
-          roots,
-        );
+    for (const reason of reach.reasons) {
+      const reasonDirection =
+        reason.kind === "temporal-neighbor" ||
+        reason.kind === "shared-work" ||
+        reason.kind === "visible-interchange"
+          ? reason.direction
+          : undefined;
+      if (
+        (contributesSeed && reasonDirection === undefined) ||
+        (contributesEarlier && reasonDirection === "earlier") ||
+        (contributesLater && reasonDirection === "later")
+      ) {
+        reasonMap.set(reasonKey(reason), reason);
       }
     }
   }
+  return {
+    seedDepth,
+    earlierDepth,
+    laterDepth,
+    depth: depths.length ? Math.min(...depths) : 0,
+    seedTagIds: [...seedTagIds].sort(),
+    reasons: [...reasonMap.values()].sort((left, right) =>
+      reasonKey(left).localeCompare(reasonKey(right)),
+    ),
+  };
 }
 
+interface AggregateProjection {
+  stations: AggregateStation[];
+  stationById: Map<string, AggregateStation>;
+  stationIdByWorkId: Map<EntityId, string>;
+  memberships: AggregateMembership[];
+  membershipsByTagId: Map<EntityId, AggregateMembership[]>;
+  membershipsByStationId: Map<string, AggregateMembership[]>;
+  relations: VisibleAggregateRelation[];
+}
+
+function aggregateTemporal(temporals: readonly EvolutionDate[]): EvolutionDate {
+  const ordered = temporals.slice().sort((left, right) => {
+    const qualityRank = (value: EvolutionDate) =>
+      value.quality === "ambiguous" ? 0 : value.quality === "year-only" ? 1 : 2;
+    return qualityRank(left) - qualityRank(right) || left.displayLabel.localeCompare(right.displayLabel);
+  });
+  const representative = ordered[0]!;
+  const ambiguityReasons = [...new Set(temporals.flatMap((temporal) => temporal.ambiguityReasons))]
+    .sort();
+  if (!temporals.some((temporal) => temporal.quality === "ambiguous")) {
+    return { ...representative, ambiguityReasons };
+  }
+  const display = representative.displayLabel.replace(/^≈\s*/, "");
+  return {
+    ...representative,
+    quality: "ambiguous",
+    displayLabel: `≈ ${display}`,
+    ambiguityReasons,
+  };
+}
+
+function buildAggregateProjection(
+  tags: VisibleEvolutionTag[],
+  works: readonly VisibleEvolutionWork[],
+  memberships: readonly VisibleMembership[],
+  relations: readonly VisibleExplicitRelation[],
+): AggregateProjection {
+  const groups = new Map<
+    string,
+    { temporals: EvolutionDate[]; visibleTagIds: EntityId[]; works: VisibleEvolutionWork[] }
+  >();
+  for (const work of works) {
+    const id = aggregateStationId(work.temporal.bucketId, work.visibleTagIds);
+    let group = groups.get(id);
+    if (!group) {
+      group = {
+        temporals: [],
+        visibleTagIds: work.visibleTagIds.slice().sort(),
+        works: [],
+      };
+      groups.set(id, group);
+    }
+    group.temporals.push(work.temporal);
+    group.works.push(work);
+  }
+
+  const stations = [...groups.entries()]
+    .map(([id, group]): AggregateStation => {
+      const reach = combineDirectionalReach(group.works);
+      const workIds = group.works.map((work) => work.work.id).sort();
+      return {
+        id,
+        temporalBucketId: group.temporals[0]!.bucketId,
+        temporal: aggregateTemporal(group.temporals),
+        workIds,
+        visibleTagIds: group.visibleTagIds,
+        workCount: workIds.length,
+        ...reach,
+        reach,
+      };
+    })
+    .sort(
+      (left, right) =>
+        compareEvolutionDates(left.temporal, right.temporal) ||
+        left.id.localeCompare(right.id),
+    );
+  const stationById = new Map(stations.map((station) => [station.id, station]));
+  const stationIdByWorkId = new Map<EntityId, string>();
+  for (const station of stations) {
+    for (const workId of station.workIds) stationIdByWorkId.set(workId, station.id);
+  }
+
+  const membershipsByWorkAndTag = new Map(
+    memberships.map((membership) => [membershipKey(membership.tagId, membership.workId), membership]),
+  );
+  const aggregateMemberships: AggregateMembership[] = [];
+  for (const station of stations) {
+    for (const tagId of station.visibleTagIds) {
+      const sources = station.workIds
+        .map((workId) => membershipsByWorkAndTag.get(membershipKey(tagId, workId)))
+        .filter((membership): membership is VisibleMembership => membership !== undefined)
+        .map((membership) => membership);
+      const reach = sources.length ? combineDirectionalReach(sources) : station.reach;
+      aggregateMemberships.push({
+        key: `${tagId}\u0000${station.id}`,
+        tagId,
+        stationId: station.id,
+        ...reach,
+        reach,
+      });
+    }
+  }
+  aggregateMemberships.sort(
+    (left, right) =>
+      left.tagId.localeCompare(right.tagId) || left.stationId.localeCompare(right.stationId),
+  );
+  const membershipsByTagId = new Map<EntityId, AggregateMembership[]>();
+  const membershipsByStationId = new Map<string, AggregateMembership[]>();
+  for (const membership of aggregateMemberships) {
+    const byTag = membershipsByTagId.get(membership.tagId);
+    if (byTag) byTag.push(membership);
+    else membershipsByTagId.set(membership.tagId, [membership]);
+    const byStation = membershipsByStationId.get(membership.stationId);
+    if (byStation) byStation.push(membership);
+    else membershipsByStationId.set(membership.stationId, [membership]);
+  }
+
+  for (const tag of tags) {
+    tag.stationIds = (membershipsByTagId.get(tag.tag.id) ?? []).map(
+      (membership) => membership.stationId,
+    );
+    tag.origin.targetStationIds = [
+      ...new Set(
+        tag.origin.targetWorkIds
+          .map((workId) => stationIdByWorkId.get(workId))
+          .filter((id): id is string => id !== undefined),
+      ),
+    ].sort();
+  }
+
+  const relationGroups = new Map<string, VisibleExplicitRelation[]>();
+  for (const relation of relations) {
+    const sourceStationId = stationIdByWorkId.get(relation.sourceId);
+    const targetStationId = stationIdByWorkId.get(relation.targetId);
+    if (!sourceStationId || !targetStationId) continue;
+    const key = `${sourceStationId}\u0000${targetStationId}`;
+    const grouped = relationGroups.get(key);
+    if (grouped) grouped.push(relation);
+    else relationGroups.set(key, [relation]);
+  }
+  const aggregateRelations = [...relationGroups.entries()]
+    .map(([pairKey, grouped]): VisibleAggregateRelation => {
+      const separator = pairKey.indexOf("\u0000");
+      const sourceStationId = pairKey.slice(0, separator);
+      const targetStationId = pairKey.slice(separator + 1);
+      const sortedRelations = grouped.slice().sort((left, right) => left.key.localeCompare(right.key));
+      return {
+        key: `aggregate-relation:${encodeURIComponent(sourceStationId)}:${encodeURIComponent(targetStationId)}`,
+        sourceStationId,
+        targetStationId,
+        relations: sortedRelations,
+        relationTypes: [...new Set(sortedRelations.map((relation) => relation.relationType))].sort(),
+      };
+    })
+    .sort((left, right) => left.key.localeCompare(right.key));
+
+  return {
+    stations,
+    stationById,
+    stationIdByWorkId,
+    memberships: aggregateMemberships,
+    membershipsByTagId,
+    membershipsByStationId,
+    relations: aggregateRelations,
+  };
+}
+
+type ReachDirection = "seed" | "earlier" | "later";
+
+interface MutableDirectionalReach {
+  seedDepth: 0 | null;
+  earlierDepth: number | null;
+  laterDepth: number | null;
+  seedReasons: Map<string, ReachReason>;
+  earlierReasons: Map<string, ReachReason>;
+  laterReasons: Map<string, ReachReason>;
+  seedSeedTagIds: Set<EntityId>;
+  earlierSeedTagIds: Set<EntityId>;
+  laterSeedTagIds: Set<EntityId>;
+}
+
+interface TraversalStop {
+  id: string;
+  temporal: EvolutionDate;
+  workIds: EntityId[];
+  tagIds: EntityId[];
+}
+
+interface TraversalStopGroup {
+  id: string;
+  intervalStart: number;
+  intervalEnd: number;
+  stopIds: string[];
+}
+
+interface TraversalTimeline {
+  groups: TraversalStopGroup[];
+  groupIndexByStopId: Map<string, number>;
+}
+
+interface TraversalGraph {
+  stops: TraversalStop[];
+  stopById: Map<string, TraversalStop>;
+  stopIdByWorkId: Map<EntityId, string>;
+  stopsByTagId: Map<EntityId, TraversalStop[]>;
+  timelineByTagId: Map<EntityId, TraversalTimeline>;
+}
+
+interface PendingTraversalState extends DirectionalTraversalState {
+  depth: number;
+  seedTagIds: Set<EntityId>;
+}
+
+function newDirectionalReach(): MutableDirectionalReach {
+  return {
+    seedDepth: null,
+    earlierDepth: null,
+    laterDepth: null,
+    seedReasons: new Map(),
+    earlierReasons: new Map(),
+    laterReasons: new Map(),
+    seedSeedTagIds: new Set(),
+    earlierSeedTagIds: new Set(),
+    laterSeedTagIds: new Set(),
+  };
+}
+
+function recordDirectionalReach(
+  target: Map<string, MutableDirectionalReach>,
+  id: string,
+  direction: ReachDirection,
+  depth: number,
+  reason: ReachReason,
+  seedTagIds: Iterable<EntityId>,
+): void {
+  let reach = target.get(id);
+  if (!reach) {
+    reach = newDirectionalReach();
+    target.set(id, reach);
+  }
+  const reasonId = reasonKey(reason);
+  if (direction === "seed") {
+    reach.seedDepth = 0;
+    for (const seedTagId of seedTagIds) reach.seedSeedTagIds.add(seedTagId);
+    reach.seedReasons.set(reasonId, reason);
+    return;
+  }
+  const depthField = direction === "earlier" ? "earlierDepth" : "laterDepth";
+  const reasons = direction === "earlier" ? reach.earlierReasons : reach.laterReasons;
+  const roots =
+    direction === "earlier" ? reach.earlierSeedTagIds : reach.laterSeedTagIds;
+  const currentDepth = reach[depthField];
+  if (currentDepth === null || depth < currentDepth) {
+    reach[depthField] = depth;
+    reasons.clear();
+    roots.clear();
+  } else if (depth > currentDepth) {
+    return;
+  }
+  for (const seedTagId of seedTagIds) roots.add(seedTagId);
+  reasons.set(reasonId, reason);
+}
+
+function freezeDirectionalReach(reach: MutableDirectionalReach): DirectionalReachInfo {
+  const seedTagIds = new Set<EntityId>();
+  const reasons = new Map<string, ReachReason>();
+  const collect = (roots: ReadonlySet<EntityId>, source: ReadonlyMap<string, ReachReason>) => {
+    for (const seedTagId of roots) seedTagIds.add(seedTagId);
+    for (const [key, reason] of source) reasons.set(key, reason);
+  };
+  if (reach.seedDepth === 0) collect(reach.seedSeedTagIds, reach.seedReasons);
+  if (reach.earlierDepth !== null) collect(reach.earlierSeedTagIds, reach.earlierReasons);
+  if (reach.laterDepth !== null) collect(reach.laterSeedTagIds, reach.laterReasons);
+  const depths = [reach.seedDepth, reach.earlierDepth, reach.laterDepth].filter(
+    (depth): depth is number => depth !== null,
+  );
+  return {
+    seedDepth: reach.seedDepth,
+    earlierDepth: reach.earlierDepth,
+    laterDepth: reach.laterDepth,
+    depth: depths.length ? Math.min(...depths) : 0,
+    seedTagIds: [...seedTagIds].sort(),
+    reasons: [...reasons.values()].sort((left, right) =>
+      reasonKey(left).localeCompare(reasonKey(right)),
+    ),
+  };
+}
+
+function buildTraversalGraph(
+  index: EvolutionIndex,
+  excluded: ReadonlySet<EntityId>,
+  dateFilters: EvolutionDateFilters,
+): TraversalGraph {
+  const mutableStops = new Map<
+    string,
+    { temporals: EvolutionDate[]; workIds: Set<EntityId>; tagIds: EntityId[] }
+  >();
+  const stopIdByWorkId = new Map<EntityId, string>();
+  for (const work of index.domain.works.slice().sort((left, right) => left.id.localeCompare(right.id))) {
+    const temporal = index.temporalByWorkId.get(work.id) ?? null;
+    if (!evolutionDateAccepted(temporal, dateFilters)) continue;
+    const tagIds = (index.tagsByWorkId.get(work.id) ?? [])
+      .map((tag) => tag.id)
+      .filter((tagId) => !excluded.has(tagId))
+      .sort();
+    if (!tagIds.length) continue;
+    const id = aggregateStationId(temporal.bucketId, tagIds);
+    let stop = mutableStops.get(id);
+    if (!stop) {
+      stop = { temporals: [], workIds: new Set(), tagIds };
+      mutableStops.set(id, stop);
+    }
+    stop.temporals.push(temporal);
+    stop.workIds.add(work.id);
+    stopIdByWorkId.set(work.id, id);
+  }
+  const stops = [...mutableStops.entries()]
+    .map(([id, stop]): TraversalStop => ({
+      id,
+      temporal: aggregateTemporal(stop.temporals),
+      workIds: [...stop.workIds].sort(),
+      tagIds: stop.tagIds,
+    }))
+    .sort(
+      (left, right) =>
+        compareEvolutionDates(left.temporal, right.temporal) || left.id.localeCompare(right.id),
+    );
+  const stopById = new Map(stops.map((stop) => [stop.id, stop]));
+  const stopsByTagId = new Map<EntityId, TraversalStop[]>();
+  for (const stop of stops) {
+    for (const tagId of stop.tagIds) {
+      const tagStops = stopsByTagId.get(tagId);
+      if (tagStops) tagStops.push(stop);
+      else stopsByTagId.set(tagId, [stop]);
+    }
+  }
+  const timelineByTagId = new Map<EntityId, TraversalTimeline>();
+  for (const [tagId, tagStops] of stopsByTagId) {
+    const groups: TraversalStopGroup[] = [];
+    for (const stop of tagStops) {
+      const previous = groups.at(-1);
+      if (previous && stop.temporal.intervalStart <= previous.intervalEnd) {
+        previous.intervalEnd = Math.max(previous.intervalEnd, stop.temporal.intervalEnd);
+        previous.stopIds.push(stop.id);
+      } else {
+        groups.push({
+          id: "",
+          intervalStart: stop.temporal.intervalStart,
+          intervalEnd: stop.temporal.intervalEnd,
+          stopIds: [stop.id],
+        });
+      }
+    }
+    const groupIndexByStopId = new Map<string, number>();
+    groups.forEach((group, groupIndex) => {
+      group.stopIds.sort();
+      group.id = `traversal-group:${encodeURIComponent(tagId)}:${group.stopIds.map(encodeURIComponent).join("+")}`;
+      for (const stopId of group.stopIds) groupIndexByStopId.set(stopId, groupIndex);
+    });
+    timelineByTagId.set(tagId, { groups, groupIndexByStopId });
+  }
+  return { stops, stopById, stopIdByWorkId, stopsByTagId, timelineByTagId };
+}
+
+function remapReachReasons(
+  reach: DirectionalReachInfo,
+  graph: TraversalGraph,
+  stationIdByWorkId: ReadonlyMap<EntityId, string>,
+): void {
+  const finalStationId = (traversalStopId: string | undefined) => {
+    if (!traversalStopId) return undefined;
+    const workId = graph.stopById.get(traversalStopId)?.workIds[0];
+    return workId ? stationIdByWorkId.get(workId) : undefined;
+  };
+  reach.reasons = reach.reasons
+    .map((reason): ReachReason => {
+      if (reason.kind === "shared-work") {
+        return {
+          ...reason,
+          sourceStationId: finalStationId(reason.sourceStationId) ?? reason.sourceStationId,
+        };
+      }
+      if (reason.kind === "temporal-neighbor") {
+        return {
+          ...reason,
+          sourceStationId: finalStationId(reason.sourceStationId) ?? reason.sourceStationId,
+          targetStationId: finalStationId(reason.targetStationId) ?? reason.targetStationId,
+        };
+      }
+      if (reason.kind === "visible-interchange") {
+        return {
+          ...reason,
+          sourceStationId: finalStationId(reason.sourceStationId) ?? reason.sourceStationId,
+        };
+      }
+      return reason;
+    })
+    .sort((left, right) => reasonKey(left).localeCompare(reasonKey(right)));
+}
+
+/**
+ * Build the filtered Evolution scene through fixed-direction traversal states.
+ * Stable internal stops use the full non-excluded tag signature; the returned
+ * stations are then regrouped by the final visible signature.
+ */
 export function buildVisibleEvolution(
   index: EvolutionIndex,
   requestedFilters: EvolutionFilters,
@@ -544,207 +1002,281 @@ export function buildVisibleEvolution(
   const seeds = filters.seedTagIds.filter(
     (id) => !excluded.has(id) && index.tagById.has(id),
   );
+  const seedSet = new Set(seeds);
   const seedOrder = new Map(seeds.map((id, order) => [id, order]));
   const dateFilters: EvolutionDateFilters = {
     includeYearOnly: filters.includeYearOnly,
     includeAmbiguous: filters.includeAmbiguous,
   };
-  const timelineCache = new Map<EntityId, EligibleTimeline>();
-  const timelineFor = (tagId: EntityId) => {
-    let timeline = timelineCache.get(tagId);
-    if (!timeline) {
-      timeline = eligibleTimeline(index, tagId, dateFilters);
-      timelineCache.set(tagId, timeline);
-    }
-    return timeline;
-  };
-
-  const workReach = new Map<string, MutableReach>();
-  const tagReach = new Map<string, MutableReach>();
-  const membershipReach = new Map<string, MutableReach>();
+  const graph = buildTraversalGraph(index, excluded, dateFilters);
+  const tagReach = new Map<string, MutableDirectionalReach>();
+  const stopReach = new Map<string, MutableDirectionalReach>();
+  const workReach = new Map<string, MutableDirectionalReach>();
+  const membershipReach = new Map<string, MutableDirectionalReach>();
   const emptySeedTagIds: EntityId[] = [];
-  let frontier = new Set<EntityId>();
 
-  for (const seedTagId of seeds) {
-    const timeline = timelineFor(seedTagId);
-    if (!timeline.buckets.length) {
-      emptySeedTagIds.push(seedTagId);
-      continue;
-    }
-    recordReach(
-      tagReach,
-      seedTagId,
-      0,
-      { kind: "seed-tag", seedTagId },
-      [seedTagId],
-    );
-    for (const bucket of timeline.buckets) {
-      for (const workId of bucket.workIds) {
-        if (
-          recordReach(
-            workReach,
-            workId,
-            0,
-            { kind: "seed-membership", seedTagId, viaTagId: seedTagId },
-            [seedTagId],
-          )
-        ) {
-          frontier.add(workId);
-        }
-        recordReach(
+  const recordStop = (
+    stop: TraversalStop,
+    tagId: EntityId,
+    direction: ReachDirection,
+    depth: number,
+    reasonFor: (seedTagId: EntityId, workId: EntityId) => ReachReason,
+    roots: ReadonlySet<EntityId>,
+  ) => {
+    const sortedRoots = [...roots].sort();
+    for (const seedTagId of sortedRoots) {
+      const stopReason = reasonFor(seedTagId, stop.workIds[0]!);
+      recordDirectionalReach(stopReach, stop.id, direction, depth, stopReason, [seedTagId]);
+      for (const workId of stop.workIds) {
+        const reason = reasonFor(seedTagId, workId);
+        recordDirectionalReach(workReach, workId, direction, depth, reason, [seedTagId]);
+        recordDirectionalReach(
           membershipReach,
-          membershipKey(seedTagId, workId),
-          0,
-          { kind: "seed-membership", seedTagId, viaTagId: seedTagId },
+          membershipKey(tagId, workId),
+          direction,
+          depth,
+          reason,
           [seedTagId],
         );
       }
     }
+  };
+
+  for (const seedTagId of seeds) {
+    const stops = graph.stopsByTagId.get(seedTagId) ?? [];
+    if (!stops.length) {
+      emptySeedTagIds.push(seedTagId);
+      continue;
+    }
+    const roots = new Set([seedTagId]);
+    recordDirectionalReach(
+      tagReach,
+      seedTagId,
+      "seed",
+      0,
+      { kind: "seed-tag", seedTagId },
+      roots,
+    );
+    for (const stop of stops) {
+      recordStop(
+        stop,
+        seedTagId,
+        "seed",
+        0,
+        (root) => ({ kind: "seed-membership", seedTagId: root, viaTagId: seedTagId }),
+        roots,
+      );
+    }
   }
 
-  addVisibleInterchanges(
-    index,
-    excluded,
-    dateFilters,
-    workReach,
-    tagReach,
-    membershipReach,
-  );
+  const processedStates: DirectionalTraversalState[] = [];
+  const runDirection = (direction: "earlier" | "later", budget: number) => {
+    if (budget <= 0) return;
+    const waves = Array.from({ length: budget }, () => new Map<string, PendingTraversalState>());
+    const enqueue = (
+      tagId: EntityId,
+      stopId: string,
+      depth: number,
+      roots: Iterable<EntityId>,
+    ) => {
+      if (depth >= budget || seedSet.has(tagId) || excluded.has(tagId)) return;
+      const stop = graph.stopById.get(stopId);
+      if (!stop?.tagIds.includes(tagId)) return;
+      const key = `${tagId}\u0000${stopId}\u0000${direction}`;
+      let pending = waves[depth]!.get(key);
+      if (!pending) {
+        pending = { tagId, stopId, direction, depth, seedTagIds: new Set() };
+        waves[depth]!.set(key, pending);
+      }
+      for (const seedTagId of roots) pending.seedTagIds.add(seedTagId);
+    };
 
-  for (let nextDepth = 1; nextDepth <= filters.depth && frontier.size; nextDepth += 1) {
-    const pivotsByTagId = new Map<EntityId, Map<EntityId, Set<EntityId>>>();
-    for (const workId of [...frontier].sort()) {
-      const workInfo = workReach.get(workId)!;
-      for (const tag of index.tagsByWorkId.get(workId) ?? []) {
-        if (excluded.has(tag.id) || tagReach.has(tag.id)) continue;
-        let pivots = pivotsByTagId.get(tag.id);
-        if (!pivots) {
-          pivots = new Map();
-          pivotsByTagId.set(tag.id, pivots);
-        }
-        let roots = pivots.get(workId);
-        if (!roots) {
-          roots = new Set();
-          pivots.set(workId, roots);
-        }
-        for (const root of workInfo.seedTagIds) roots.add(root);
+    for (const [stopId, reach] of stopReach) {
+      if (reach.seedDepth !== 0) continue;
+      const stop = graph.stopById.get(stopId)!;
+      for (const tagId of stop.tagIds) {
+        if (!seedSet.has(tagId)) enqueue(tagId, stopId, 0, reach.seedSeedTagIds);
       }
     }
 
-    const nextFrontier = new Set<EntityId>();
-    for (const tagId of [...pivotsByTagId.keys()].sort()) {
-      const timeline = timelineFor(tagId);
-      if (!timeline.groups.length) continue;
-      const pivots = pivotsByTagId.get(tagId)!;
-      const validPivots = [...pivots.entries()]
-        .filter(([workId]) => timeline.groupIndexByWorkId.has(workId))
-        .sort(([left], [right]) => left.localeCompare(right));
-      if (!validPivots.length) continue;
-
-      for (const [workId, roots] of validPivots) {
-        for (const seedTagId of [...roots].sort()) {
-          recordReach(
+    const processed = new Set<string>();
+    for (let depth = 0; depth < budget; depth += 1) {
+      for (const [key, state] of [...waves[depth]!.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+        if (processed.has(key)) continue;
+        processed.add(key);
+        processedStates.push({ tagId: state.tagId, stopId: state.stopId, direction });
+        const current = graph.stopById.get(state.stopId)!;
+        const timeline = graph.timelineByTagId.get(state.tagId)!;
+        const groupIndex = timeline.groupIndexByStopId.get(state.stopId)!;
+        const currentGroup = timeline.groups[groupIndex]!;
+        const neighborIndex = direction === "earlier" ? groupIndex - 1 : groupIndex + 1;
+        const neighborGroup = timeline.groups[neighborIndex] ?? null;
+        const resultingDepth = depth + 1;
+        for (const seedTagId of [...state.seedTagIds].sort()) {
+          recordDirectionalReach(
             tagReach,
-            tagId,
-            nextDepth,
-            { kind: "shared-work", seedTagId, fromWorkId: workId, viaTagId: tagId },
-            roots,
+            state.tagId,
+            direction,
+            resultingDepth,
+            {
+              kind: "shared-work",
+              seedTagId,
+              fromWorkId: current.workIds[0]!,
+              viaTagId: state.tagId,
+              direction,
+              sourceStationId: current.id,
+            },
+            [seedTagId],
           );
         }
-      }
 
-      for (const [pivotWorkId, roots] of validPivots) {
-        const pivotGroupIndex = timeline.groupIndexByWorkId.get(pivotWorkId)!;
-        const candidates: Array<{
-          group: IndexedTemporalGroup;
-          direction: "same" | "earlier" | "later";
-        }> = [{ group: timeline.groups[pivotGroupIndex]!, direction: "same" }];
-        if (pivotGroupIndex > 0) {
-          candidates.push({
-            group: timeline.groups[pivotGroupIndex - 1]!,
-            direction: "earlier",
-          });
-        }
-        if (pivotGroupIndex + 1 < timeline.groups.length) {
-          candidates.push({
-            group: timeline.groups[pivotGroupIndex + 1]!,
-            direction: "later",
-          });
-        }
-
-        for (const { group, direction } of candidates) {
-          for (const workId of group.workIds) {
-            for (const seedTagId of [...roots].sort()) {
-              const reason: ReachReason = {
-                kind: "temporal-neighbor",
-                seedTagId,
-                fromWorkId: pivotWorkId,
-                viaTagId: tagId,
-                direction,
-                groupId: group.id,
-              };
-              if (recordReach(workReach, workId, nextDepth, reason, roots)) {
-                nextFrontier.add(workId);
-              }
-              recordReach(
-                membershipReach,
-                membershipKey(tagId, workId),
-                nextDepth,
-                reason,
-                roots,
-              );
+        const targetStopIds = [
+          ...currentGroup.stopIds,
+          ...(neighborGroup?.stopIds ?? []),
+        ];
+        const targetStops = [...new Set(targetStopIds)]
+          .map((stopId) => graph.stopById.get(stopId)!)
+          .sort((left, right) => left.id.localeCompare(right.id));
+        for (const target of targetStops) {
+          recordStop(
+            target,
+            state.tagId,
+            direction,
+            resultingDepth,
+            (seedTagId, workId) => ({
+              kind: "temporal-neighbor",
+              seedTagId,
+              fromWorkId: current.workIds[0]!,
+              viaTagId: state.tagId,
+              direction,
+              groupId: target.id === current.id ? currentGroup.id : (neighborGroup?.id ?? currentGroup.id),
+              sourceStationId: current.id,
+              targetStationId: target.id,
+              resultingDepth,
+            }),
+            state.seedTagIds,
+          );
+          for (const tagId of target.tagIds) {
+            if (tagId !== state.tagId) {
+              enqueue(tagId, target.id, resultingDepth, state.seedTagIds);
             }
+          }
+        }
+        if (neighborGroup) {
+          for (const stopId of neighborGroup.stopIds) {
+            enqueue(state.tagId, stopId, resultingDepth, state.seedTagIds);
           }
         }
       }
     }
+  };
 
-    addVisibleInterchanges(
-      index,
-      excluded,
-      dateFilters,
-      workReach,
-      tagReach,
-      membershipReach,
-    );
-    frontier = nextFrontier;
+  runDirection("earlier", filters.earlierDepth);
+  runDirection("later", filters.laterDepth);
+
+  // Every membership between an already-visible work and tag is a genuine
+  // interchange, but does not itself consume directional traversal budget.
+  for (const [workId, mutableWork] of workReach) {
+    for (const tag of index.tagsByWorkId.get(workId) ?? []) {
+      if (excluded.has(tag.id)) continue;
+      const mutableTag = tagReach.get(tag.id);
+      if (!mutableTag) continue;
+      const key = membershipKey(tag.id, workId);
+      if (mutableWork.seedDepth === 0 && mutableTag.seedDepth === 0) {
+        const seedRoots = new Set([
+          ...mutableWork.seedSeedTagIds,
+          ...mutableTag.seedSeedTagIds,
+        ]);
+        for (const seedTagId of [...seedRoots].sort()) {
+          recordDirectionalReach(
+            membershipReach,
+            key,
+            "seed",
+            0,
+            { kind: "visible-interchange", seedTagId, workId, tagId: tag.id },
+            [seedTagId],
+          );
+        }
+      }
+      for (const direction of ["earlier", "later"] as const) {
+        const workDepth = mutableWork[`${direction}Depth`];
+        const tagDepth = mutableTag[`${direction}Depth`];
+        if (
+          workDepth === null &&
+          (mutableWork.seedDepth !== 0 || tagDepth === null)
+        ) {
+          continue;
+        }
+        const depth = Math.max(
+          workDepth ?? (mutableWork.seedDepth === 0 ? 0 : tagDepth!),
+          tagDepth ?? (mutableTag.seedDepth === 0 ? 0 : workDepth!),
+        );
+        const workRoots =
+          workDepth !== null
+            ? direction === "earlier"
+              ? mutableWork.earlierSeedTagIds
+              : mutableWork.laterSeedTagIds
+            : mutableWork.seedSeedTagIds;
+        const tagRoots =
+          tagDepth !== null
+            ? direction === "earlier"
+              ? mutableTag.earlierSeedTagIds
+              : mutableTag.laterSeedTagIds
+            : mutableTag.seedSeedTagIds;
+        // A directional reach to the work proves the membership at that work;
+        // tag-level roots from other stops must not be cross-producted into it.
+        // Fall back to the tag roots only when the work is present as seed
+        // context rather than reached in this direction.
+        const directionalRoots = new Set(
+          workDepth !== null ? workRoots : tagRoots,
+        );
+        for (const seedTagId of [...directionalRoots].sort()) {
+          recordDirectionalReach(
+            membershipReach,
+            key,
+            direction,
+            depth,
+            {
+              kind: "visible-interchange",
+              seedTagId,
+              workId,
+              tagId: tag.id,
+              direction,
+              sourceStationId: graph.stopIdByWorkId.get(workId),
+              resultingDepth: depth,
+            },
+            [seedTagId],
+          );
+        }
+      }
+    }
   }
-
-  addVisibleInterchanges(
-    index,
-    excluded,
-    dateFilters,
-    workReach,
-    tagReach,
-    membershipReach,
-  );
 
   const memberships: VisibleMembership[] = [];
   for (const [key, reach] of membershipReach) {
     const separator = key.indexOf("\u0000");
     const tagId = key.slice(0, separator);
     const workId = key.slice(separator + 1);
-    if (!tagReach.has(tagId) || !workReach.has(workId)) continue;
-    memberships.push({ key, tagId, workId, ...freezeReach(reach) });
+    if (tagReach.get(tagId) === undefined || workReach.get(workId) === undefined) continue;
+    memberships.push({ key, tagId, workId, ...freezeDirectionalReach(reach) });
   }
   memberships.sort(
     (left, right) =>
       left.tagId.localeCompare(right.tagId) || left.workId.localeCompare(right.workId),
   );
-
   const membershipsByTagId = new Map<EntityId, VisibleMembership[]>();
   const membershipsByWorkId = new Map<EntityId, VisibleMembership[]>();
   for (const membership of memberships) {
-    const tagMemberships = membershipsByTagId.get(membership.tagId);
-    if (tagMemberships) tagMemberships.push(membership);
+    const byTag = membershipsByTagId.get(membership.tagId);
+    if (byTag) byTag.push(membership);
     else membershipsByTagId.set(membership.tagId, [membership]);
-    const workMemberships = membershipsByWorkId.get(membership.workId);
-    if (workMemberships) workMemberships.push(membership);
+    const byWork = membershipsByWorkId.get(membership.workId);
+    if (byWork) byWork.push(membership);
     else membershipsByWorkId.set(membership.workId, [membership]);
   }
 
   const tags: VisibleEvolutionTag[] = [];
-  for (const [tagId, reach] of tagReach) {
+  for (const [tagId, mutableReach] of tagReach) {
     const tagMemberships = membershipsByTagId.get(tagId) ?? [];
     if (!tagMemberships.length) continue;
     const workIds = tagMemberships
@@ -762,26 +1294,24 @@ export function buildVisibleEvolution(
     }
     const buckets = [...bucketMap.values()].sort(
       (left, right) =>
-        compareEvolutionDates(left.temporal, right.temporal) ||
-        left.id.localeCompare(right.id),
+        compareEvolutionDates(left.temporal, right.temporal) || left.id.localeCompare(right.id),
     );
-    const temporalGroups = mergeOverlappingBuckets(buckets);
-    const firstGroup = temporalGroups[0]!;
+    const firstGroup = mergeOverlappingBuckets(buckets)[0]!;
     tags.push({
       tag: index.tagById.get(tagId)!,
-      seed: seedOrder.has(tagId),
+      seed: seedSet.has(tagId),
       seedOrder: seedOrder.get(tagId) ?? null,
       workIds,
       bucketIds: buckets.map((bucket) => bucket.id),
-      // Boundary labels represent the outer accepted interval, rather than an
-      // arbitrary total ordering among overlapping exact/month/year buckets.
+      stationIds: [],
       firstTemporal: firstBoundaryTemporal(buckets),
       lastTemporal: lastBoundaryTemporal(buckets),
       origin: {
         id: `origin:${tagId}`,
         targetWorkIds: firstGroup.workIds,
+        targetStationIds: [],
       },
-      ...freezeReach(reach),
+      ...freezeDirectionalReach(mutableReach),
     });
   }
   tags.sort(
@@ -795,21 +1325,19 @@ export function buildVisibleEvolution(
 
   const visibleTagIds = new Set(tags.map((tag) => tag.tag.id));
   const works: VisibleEvolutionWork[] = [];
-  for (const [workId, reach] of workReach) {
+  for (const [workId, mutableReach] of workReach) {
+    const work = index.domain.workById.get(workId);
+    const temporal = index.temporalByWorkId.get(workId);
+    if (!work || !temporal) continue;
     const workMemberships = (membershipsByWorkId.get(workId) ?? []).filter((membership) =>
       visibleTagIds.has(membership.tagId),
     );
     if (!workMemberships.length) continue;
-    const temporal = index.temporalByWorkId.get(workId);
-    const work = index.domain.workById.get(workId);
-    if (!temporal || !work) continue;
     works.push({
       work,
       temporal,
-      visibleTagIds: workMemberships
-        .map((membership) => membership.tagId)
-        .sort((left, right) => left.localeCompare(right)),
-      ...freezeReach(reach),
+      visibleTagIds: workMemberships.map((membership) => membership.tagId).sort(),
+      ...freezeDirectionalReach(mutableReach),
     });
   }
   works.sort(
@@ -817,22 +1345,8 @@ export function buildVisibleEvolution(
       compareEvolutionDates(left.temporal, right.temporal) ||
       left.work.id.localeCompare(right.work.id),
   );
-
-  const visibleWorkIds = new Set(works.map((work) => work.work.id));
-  const explicitRelations = index.explicitRelations
-    .filter(
-      (relation) =>
-        visibleWorkIds.has(relation.sourceId) && visibleWorkIds.has(relation.targetId),
-    )
-    .map((relation): VisibleExplicitRelation => ({
-      ...relation,
-      chronologyConflict:
-        index.temporalByWorkId.get(relation.sourceId)!.intervalStart >
-        index.temporalByWorkId.get(relation.targetId)!.intervalEnd,
-    }));
-
-  const tagById = new Map(tags.map((tag) => [tag.tag.id, tag]));
   const workById = new Map(works.map((work) => [work.work.id, work]));
+  const tagById = new Map(tags.map((tag) => [tag.tag.id, tag]));
   const visibleMemberships = memberships.filter(
     (membership) => tagById.has(membership.tagId) && workById.has(membership.workId),
   );
@@ -846,6 +1360,48 @@ export function buildVisibleEvolution(
     if (byWork) byWork.push(membership);
     else visibleMembershipsByWorkId.set(membership.workId, [membership]);
   }
+
+  const provisionalStationIdByWorkId = new Map(
+    works.map((work) => [
+      work.work.id,
+      aggregateStationId(work.temporal.bucketId, work.visibleTagIds),
+    ]),
+  );
+  for (const tag of tags) remapReachReasons(tag, graph, provisionalStationIdByWorkId);
+  for (const work of works) remapReachReasons(work, graph, provisionalStationIdByWorkId);
+  for (const membership of visibleMemberships) {
+    remapReachReasons(membership, graph, provisionalStationIdByWorkId);
+  }
+
+  const visibleWorkIds = new Set(works.map((work) => work.work.id));
+  const explicitRelations = index.explicitRelations
+    .filter(
+      (relation) =>
+        visibleWorkIds.has(relation.sourceId) && visibleWorkIds.has(relation.targetId),
+    )
+    .map((relation): VisibleExplicitRelation => ({
+      ...relation,
+      chronologyConflict:
+        index.temporalByWorkId.get(relation.sourceId)!.intervalStart >
+        index.temporalByWorkId.get(relation.targetId)!.intervalEnd,
+    }));
+  const aggregate = buildAggregateProjection(tags, works, visibleMemberships, explicitRelations);
+  const traversalStates = [
+    ...new Map(
+      processedStates.map((state) => {
+        const workId = graph.stopById.get(state.stopId)?.workIds[0];
+        const stopId = workId ? aggregate.stationIdByWorkId.get(workId) ?? state.stopId : state.stopId;
+        const remapped = { ...state, stopId };
+        return [`${remapped.tagId}\u0000${remapped.stopId}\u0000${remapped.direction}`, remapped];
+      }),
+    ).values(),
+  ].sort(
+    (left, right) =>
+      left.direction.localeCompare(right.direction) ||
+      left.tagId.localeCompare(right.tagId) ||
+      left.stopId.localeCompare(right.stopId),
+  );
+
   return {
     filters,
     tags,
@@ -856,6 +1412,14 @@ export function buildVisibleEvolution(
     workById,
     membershipsByTagId: visibleMembershipsByTagId,
     membershipsByWorkId: visibleMembershipsByWorkId,
+    stations: aggregate.stations,
+    stationById: aggregate.stationById,
+    stationIdByWorkId: aggregate.stationIdByWorkId,
+    aggregateMemberships: aggregate.memberships,
+    aggregateMembershipsByTagId: aggregate.membershipsByTagId,
+    aggregateMembershipsByStationId: aggregate.membershipsByStationId,
+    aggregateRelations: aggregate.relations,
+    traversalStates,
     emptySeedTagIds,
   };
 }

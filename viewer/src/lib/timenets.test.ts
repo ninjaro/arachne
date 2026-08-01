@@ -4,16 +4,17 @@ import {
   buildVisibleEvolution,
 } from "./evolution";
 import type { EvolutionFilters } from "./evolution";
+import { buildEvolutionTooltip } from "./evolution-interaction";
 import { buildTimeNetScene } from "./timenets";
 import { fixtureDomain, fixtureWork } from "./test-fixtures";
 
 const FILTERS: EvolutionFilters = {
   seedTagIds: ["S"],
   excludedTagIds: [],
-  depth: 0,
+  earlierDepth: 0,
+  laterDepth: 0,
   includeYearOnly: true,
   includeAmbiguous: false,
-  neighborDirection: "both",
 };
 
 function sceneFor(
@@ -177,7 +178,7 @@ describe("adaptive temporal metro layout", () => {
     expect(longGap).toBeLessThanOrEqual(108);
   });
 
-  it("branches simultaneous stations without label-based historical ordering", () => {
+  it("collapses simultaneous works with the same visible tag set into one stop", () => {
     const works = [
       fixtureWork({
         id: "work-b",
@@ -199,17 +200,19 @@ describe("adaptive temporal metro layout", () => {
     const { visible, scene } = sceneFor(works);
     expect(scene.buckets).toHaveLength(1);
     expect(scene.buckets[0]!.workIds).toEqual(["work-a", "work-b"]);
-    expect(
-      scene.stations.every(
-        (station) =>
-          station.bucket.id === "day:1950-05-01" &&
-          station.x > scene.buckets[0]!.xStart &&
-          station.x < scene.buckets[0]!.xEnd,
-      ),
-    ).toBe(true);
-    expect(scene.stations[0]!.y).not.toBe(scene.stations[1]!.y);
-    expect(visible.tags[0]!.origin.targetWorkIds).toEqual(["work-a", "work-b"]);
-    expect((scene.trajectories[0]!.path.match(/M /g) ?? []).length).toBeGreaterThan(2);
+    expect(scene.buckets[0]!.stationIds).toHaveLength(1);
+    expect(scene.stations).toHaveLength(1);
+    expect(scene.stations[0]).toMatchObject({
+      aggregate: true,
+      visibleTagIds: ["S"],
+    });
+    expect(scene.stations[0]!.entry.workIds).toEqual(["work-a", "work-b"]);
+    expect(scene.stationByWorkId.get("work-a")).toBe(scene.stations[0]);
+    expect(scene.stationByWorkId.get("work-b")).toBe(scene.stations[0]);
+    expect(visible.tags[0]!.origin.targetStationIds).toEqual([
+      scene.stations[0]!.id,
+    ]);
+    expect(scene.trajectories[0]!.stationIds).toEqual([scene.stations[0]!.id]);
   });
 
   it("visibly splits tied stations, rejoins their interval, then continues later", () => {
@@ -224,7 +227,7 @@ describe("adaptive temporal metro layout", () => {
       fixtureWork({
         id: "tie-b",
         year: 1950,
-        tags: ["S"],
+        tags: ["S", "T"],
         precision: "exact",
         startText: "1950-05-01",
       }),
@@ -236,13 +239,16 @@ describe("adaptive temporal metro layout", () => {
         startText: "1950-06-01",
       }),
     ];
-    const { scene } = sceneFor(works);
+    const { scene } = sceneFor(works, {
+      ...FILTERS,
+      seedTagIds: ["S", "T"],
+    });
     const tiedBucket = scene.bucketById.get("day:1950-05-01")!;
     const laterBucket = scene.bucketById.get("day:1950-06-01")!;
     const trajectory = scene.trajectoryById.get("S")!;
     const tiedStations = [
-      scene.stationById.get("tie-a")!,
-      scene.stationById.get("tie-b")!,
+      scene.stationByWorkId.get("tie-a")!,
+      scene.stationByWorkId.get("tie-b")!,
     ];
 
     expect(
@@ -272,7 +278,7 @@ describe("adaptive temporal metro layout", () => {
     );
   });
 
-  it("allocates year-only stops across a visible interval branch", () => {
+  it("uses one aggregate stop for equivalent year-only works", () => {
     const works = [
       fixtureWork({ id: "year-a", year: 1970, tags: ["S"] }),
       fixtureWork({ id: "year-b", year: 1970, tags: ["S"] }),
@@ -280,12 +286,12 @@ describe("adaptive temporal metro layout", () => {
     ];
     const { scene } = sceneFor(works);
     const bucket = scene.bucketById.get("year:1970")!;
-    const stations = [scene.stationById.get("year-a")!, scene.stationById.get("year-b")!];
+    const station = scene.stationByWorkId.get("year-a")!;
     expect(bucket.interval).toBe(true);
-    expect(stations[0]!.x).not.toBe(stations[1]!.x);
-    expect(stations.every((station) => station.x > bucket.xStart && station.x < bucket.xEnd)).toBe(
-      true,
-    );
+    expect(scene.stationByWorkId.get("year-b")).toBe(station);
+    expect(station.entry.workIds).toEqual(["year-a", "year-b"]);
+    expect(station.x).toBeGreaterThan(bucket.xStart);
+    expect(station.x).toBeLessThan(bucket.xEnd);
     expect(scene.years[0]!.hasYearInterval).toBe(true);
   });
 
@@ -302,8 +308,8 @@ describe("adaptive temporal metro layout", () => {
       fixtureWork({ id: "year", year: 1970, tags: ["S"] }),
     ];
     const { scene } = sceneFor(works);
-    const exact = scene.stationById.get("exact")!;
-    const year = scene.stationById.get("year")!;
+    const exact = scene.stationByWorkId.get("exact")!;
+    const year = scene.stationByWorkId.get("year")!;
     expect(Math.hypot(exact.x - year.x, exact.y - year.y)).toBeGreaterThanOrEqual(
       18,
     );
@@ -330,7 +336,7 @@ describe("adaptive temporal metro layout", () => {
       includeAmbiguous: true,
     });
     expect(scene.years.map((year) => year.year)).toEqual([1900]);
-    expect(scene.stationById.get("range")?.entry.temporal.bucketId).toBe(
+    expect(scene.stationByWorkId.get("range")?.entry.temporal.bucketId).toBe(
       "day:1900-02-01",
     );
   });
@@ -404,8 +410,8 @@ describe("trajectory isolation and determinism", () => {
         ),
       ).size,
     ).toBe(2);
-    expect(unfilteredS.entry.origin.targetWorkIds).toEqual([
-      "s-early-ambiguous",
+    expect(unfilteredS.entry.origin.targetStationIds).toEqual([
+      withAmbiguity.stationByWorkId.get("s-early-ambiguous")!.id,
     ]);
     expect(unfilteredS.start.x).toBe(
       withAmbiguity.bucketById.get("year:1890")!.xStart,
@@ -413,8 +419,12 @@ describe("trajectory isolation and determinism", () => {
     expect(unfilteredS.end.x).toBe(
       withAmbiguity.bucketById.get("year:1940")!.xEnd,
     );
-    expect(filteredS.entry.origin.targetWorkIds).toEqual(["joint"]);
-    expect(filteredT.entry.origin.targetWorkIds).toEqual(["joint"]);
+    expect(filteredS.entry.origin.targetStationIds).toEqual([
+      filtered.stationByWorkId.get("joint")!.id,
+    ]);
+    expect(filteredT.entry.origin.targetStationIds).toEqual([
+      filtered.stationByWorkId.get("joint")!.id,
+    ]);
     expect(filteredS.start.x).toBe(
       filtered.bucketById.get("day:1910-01-01")!.xStart,
     );
@@ -440,17 +450,100 @@ describe("trajectory isolation and determinism", () => {
     ]);
     expect(related.scene.trajectories[0]!.path).toBe(base.scene.trajectories[0]!.path);
     expect(related.scene.explicitRelations).toHaveLength(1);
-    expect(related.scene.explicitRelations[0]!.relation.chronologyConflict).toBe(true);
+    expect(
+      related.scene.explicitRelations[0]!.relation.relations[0]!
+        .chronologyConflict,
+    ).toBe(true);
+  });
+
+  it("routes one aggregate relation while retaining every underlying relation", () => {
+    const works = [
+      fixtureWork({ id: "early-a", year: 1900, tags: ["S"] }),
+      fixtureWork({ id: "early-b", year: 1900, tags: ["S"] }),
+      fixtureWork({ id: "late-a", year: 1910, tags: ["S"] }),
+      fixtureWork({ id: "late-b", year: 1910, tags: ["S"] }),
+    ];
+    const { visible, scene } = sceneFor(works, FILTERS, [
+      {
+        subjectId: "late-a",
+        objectId: "early-a",
+        relationType: "influenced_by",
+      },
+      {
+        subjectId: "late-b",
+        objectId: "early-b",
+        relationType: "based_on",
+      },
+    ]);
+
+    expect(scene.stations).toHaveLength(2);
+    expect(visible.explicitRelations).toHaveLength(2);
+    expect(scene.explicitRelations).toHaveLength(1);
+    const relation = scene.explicitRelations[0]!;
+    expect(relation.source.entry.workIds).toEqual(["early-a", "early-b"]);
+    expect(relation.target.entry.workIds).toEqual(["late-a", "late-b"]);
+    expect(relation.relation.relations).toHaveLength(2);
+    expect(relation.relation.relationTypes).toEqual([
+      "based_on",
+      "influenced_by",
+    ]);
+    expect(relation.path).not.toBe("");
+  });
+
+  it("renders a deterministic self-loop when explicit endpoints share an aggregate station", () => {
+    const works = [
+      fixtureWork({ id: "same-stop-a", year: 1900, tags: ["S"] }),
+      fixtureWork({ id: "same-stop-b", year: 1900, tags: ["S"] }),
+    ];
+    const relations = [
+      {
+        subjectId: "same-stop-a",
+        objectId: "same-stop-b",
+        relationType: "references",
+      },
+    ];
+    const first = sceneFor(works, FILTERS, relations);
+    const reordered = sceneFor(works.slice().reverse(), FILTERS, relations);
+
+    expect(first.scene.stations).toHaveLength(1);
+    expect(first.scene.explicitRelations).toHaveLength(1);
+    const selfLoop = first.scene.explicitRelations[0]!;
+    expect(selfLoop.source).toBe(selfLoop.target);
+    expect(selfLoop.path).toMatch(/^M .* C .* C /);
+    expect(selfLoop.relation.relations).toMatchObject([
+      {
+        sourceId: "same-stop-a",
+        targetId: "same-stop-b",
+        relationType: "references",
+      },
+    ]);
+    expect(
+      buildEvolutionTooltip(first.scene, first.visible, {
+        kind: "relation",
+        id: selfLoop.key,
+      }),
+    ).toMatchObject({
+      relationCount: 1,
+      endpoints: [
+        {
+          sourceWorkId: "same-stop-a",
+          targetWorkId: "same-stop-b",
+          relationType: "references",
+        },
+      ],
+    });
+    expect(reordered.scene.explicitRelations[0]!.path).toBe(selfLoop.path);
   });
 
   it("produces deterministic semantic and geometric output", () => {
     const works = [
       fixtureWork({ id: "c", year: 1920, tags: ["S", "T"] }),
       fixtureWork({ id: "a", year: 1900, tags: ["S"] }),
+      fixtureWork({ id: "a2", year: 1900, tags: ["S"] }),
       fixtureWork({ id: "b", year: 1910, tags: ["S", "T"] }),
       fixtureWork({ id: "t", year: 1930, tags: ["T"] }),
     ];
-    const filters = { ...FILTERS, depth: 1 };
+    const filters = { ...FILTERS, earlierDepth: 1, laterDepth: 1 };
     const first = sceneFor(works, filters).scene;
     const shuffled = works
       .slice()
@@ -465,6 +558,7 @@ describe("trajectory isolation and determinism", () => {
         x: station.x,
         y: station.y,
         tags: station.visibleTagIds,
+        works: station.entry.workIds,
       })),
       trajectories: scene.trajectories.map((trajectory) => ({
         id: trajectory.id,

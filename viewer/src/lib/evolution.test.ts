@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  aggregateStationId,
   buildEvolutionIndex,
   buildVisibleEvolution,
 } from "./evolution";
@@ -9,10 +10,10 @@ import { fixtureDomain, fixtureWork } from "./test-fixtures";
 const DEFAULT_FILTERS: EvolutionFilters = {
   seedTagIds: ["S"],
   excludedTagIds: [],
-  depth: 0,
+  earlierDepth: 0,
+  laterDepth: 0,
   includeYearOnly: true,
   includeAmbiguous: false,
-  neighborDirection: "both",
 };
 
 function traversalWorks() {
@@ -77,7 +78,11 @@ describe("tag-work temporal expansion", () => {
   });
 
   it("expands all same-round pivots and deduplicates their nearest stop windows", () => {
-    const visible = visibleFor({ depth: 1, excludedTagIds: ["X"] });
+    const visible = visibleFor({
+      earlierDepth: 1,
+      laterDepth: 1,
+      excludedTagIds: ["X"],
+    });
     expect(visible.tags.map((tag) => tag.tag.id)).toEqual(["S", "A", "B"]);
     expect(visible.tagById.get("A")?.workIds).toEqual([
       "a-prev",
@@ -95,16 +100,22 @@ describe("tag-work temporal expansion", () => {
   });
 
   it("continues through newly reached works over multiple levels", () => {
-    const depthOne = visibleFor({ depth: 1, excludedTagIds: ["X"] });
+    const depthOne = visibleFor({
+      earlierDepth: 1,
+      laterDepth: 1,
+      excludedTagIds: ["X"],
+    });
     expect(depthOne.tagById.has("C")).toBe(false);
 
-    const depthTwo = visibleFor({ depth: 2, excludedTagIds: ["X"] });
+    const depthTwo = visibleFor({
+      earlierDepth: 2,
+      laterDepth: 2,
+      excludedTagIds: ["X"],
+    });
     expect(depthTwo.tagById.get("C")?.depth).toBe(2);
-    expect(depthTwo.tagById.get("C")?.workIds).toEqual([
-      "c-prev",
-      "a-prev",
-      "c-later",
-    ]);
+    // Direction is fixed for a traversal path: C is discovered while moving
+    // earlier through A, so that path cannot spend a later-depth step.
+    expect(depthTwo.tagById.get("C")?.workIds).toEqual(["c-prev", "a-prev"]);
     expect(depthTwo.workById.get("c-prev")?.depth).toBe(2);
   });
 
@@ -112,7 +123,8 @@ describe("tag-work temporal expansion", () => {
     const visible = visibleFor({
       seedTagIds: ["S", "X"],
       excludedTagIds: ["X"],
-      depth: 3,
+      earlierDepth: 3,
+      laterDepth: 3,
     });
     expect(visible.tagById.has("X")).toBe(false);
     expect(visible.memberships.some((membership) => membership.tagId === "X")).toBe(
@@ -124,13 +136,49 @@ describe("tag-work temporal expansion", () => {
   });
 
   it("preserves every equal-minimum-depth provenance path", () => {
-    const visible = visibleFor({ depth: 1, excludedTagIds: ["X"] });
+    const visible = visibleFor({
+      earlierDepth: 1,
+      laterDepth: 1,
+      excludedTagIds: ["X"],
+    });
     const aMid = visible.workById.get("a-mid")!;
     const pivotIds = aMid.reasons
       .filter((reason) => reason.kind === "temporal-neighbor")
       .map((reason) => reason.fromWorkId);
     expect(pivotIds).toEqual(["s0", "s1"]);
     expect(aMid.depth).toBe(1);
+  });
+
+  it("keeps interchange provenance roots separated by direction", () => {
+    const works = [
+      fixtureWork({ id: "early-pivot", year: 1900, tags: ["EARLY", "A"] }),
+      fixtureWork({ id: "middle", year: 1910, tags: ["A"] }),
+      fixtureWork({ id: "late-pivot", year: 1920, tags: ["LATE", "A"] }),
+    ];
+    const visible = buildVisibleEvolution(buildEvolutionIndex(fixtureDomain(works)), {
+      ...DEFAULT_FILTERS,
+      seedTagIds: ["EARLY", "LATE"],
+      earlierDepth: 1,
+      laterDepth: 1,
+    });
+    const membership = visible.memberships.find(
+      (item) => item.tagId === "A" && item.workId === "middle",
+    )!;
+    const rootsFor = (direction: "earlier" | "later") => [
+      ...new Set(
+        membership.reasons
+          .filter(
+            (reason) =>
+              (reason.kind === "temporal-neighbor" ||
+                reason.kind === "visible-interchange") &&
+              reason.direction === direction,
+          )
+          .map((reason) => reason.seedTagId),
+      ),
+    ];
+
+    expect(rootsFor("earlier")).toEqual(["LATE"]);
+    expect(rootsFor("later")).toEqual(["EARLY"]);
   });
 });
 
@@ -196,6 +244,7 @@ describe("filtered trajectories and relation isolation", () => {
     expect(visible.tags[0]!.origin).toEqual({
       id: "origin:S",
       targetWorkIds: ["tie-a", "tie-b"],
+      targetStationIds: [aggregateStationId("year:1900", ["S"])],
     });
     expect(visible.tags[0]!.bucketIds).toEqual(["year:1900", "year:1910"]);
   });
@@ -316,7 +365,12 @@ describe("filtered trajectories and relation isolation", () => {
       .slice()
       .reverse()
       .map((work) => ({ ...work, concepts: work.concepts.slice().reverse() }));
-    const filters = { ...DEFAULT_FILTERS, depth: 2, excludedTagIds: ["X"] };
+    const filters = {
+      ...DEFAULT_FILTERS,
+      earlierDepth: 2,
+      laterDepth: 2,
+      excludedTagIds: ["X"],
+    };
     const first = buildVisibleEvolution(buildEvolutionIndex(fixtureDomain(works)), filters);
     const second = buildVisibleEvolution(
       buildEvolutionIndex(fixtureDomain(shuffled)),

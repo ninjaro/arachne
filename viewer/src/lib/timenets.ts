@@ -1,9 +1,9 @@
 import type { EntityId } from "./types";
 import type {
+  AggregateStation,
   VisibleEvolution,
   VisibleEvolutionTag,
-  VisibleEvolutionWork,
-  VisibleExplicitRelation,
+  VisibleAggregateRelation,
 } from "./evolution";
 import type { EvolutionDate } from "./evolution-date";
 
@@ -18,6 +18,7 @@ export interface MetroYearBand {
   xEnd: number;
   contentStart: number;
   contentEnd: number;
+  stationIds: string[];
   workIds: EntityId[];
   hasYearInterval: boolean;
   hasAmbiguity: boolean;
@@ -29,19 +30,21 @@ export interface MetroBucket {
   x: number;
   xStart: number;
   xEnd: number;
+  stationIds: string[];
   workIds: EntityId[];
   interval: boolean;
   ambiguous: boolean;
 }
 
 export interface MetroStation {
-  id: EntityId;
-  entry: VisibleEvolutionWork;
+  id: string;
+  entry: AggregateStation;
   bucket: MetroBucket;
   x: number;
   y: number;
   visibleTagIds: EntityId[];
   interchange: boolean;
+  aggregate: boolean;
 }
 
 export interface MetroTrajectory {
@@ -53,12 +56,12 @@ export interface MetroTrajectory {
   origin: MetroPoint;
   start: MetroPoint;
   end: MetroPoint;
-  stationIds: EntityId[];
+  stationIds: string[];
 }
 
 export interface MetroExplicitRelation {
   key: string;
-  relation: VisibleExplicitRelation;
+  relation: VisibleAggregateRelation;
   source: MetroStation;
   target: MetroStation;
   path: string;
@@ -66,6 +69,9 @@ export interface MetroExplicitRelation {
 
 export interface MetroLabel {
   key: string;
+  stationId: string;
+  workIds: EntityId[];
+  /** First contained work, retained for compatibility with work-level consumers. */
   workId: EntityId;
   text: string;
   x: number;
@@ -87,7 +93,8 @@ export interface MetroScene {
   stations: MetroStation[];
   trajectories: MetroTrajectory[];
   explicitRelations: MetroExplicitRelation[];
-  stationById: Map<EntityId, MetroStation>;
+  stationById: Map<string, MetroStation>;
+  stationByWorkId: Map<EntityId, MetroStation>;
   trajectoryById: Map<EntityId, MetroTrajectory>;
   bucketById: Map<string, MetroBucket>;
   dateLabels: MetroDateLabel[];
@@ -129,8 +136,8 @@ function compressedBucketGap(valueDelta: number): number {
   return clamp(11 + 7 * Math.log1p(Math.max(0, valueDelta)), 11, 46);
 }
 
-function bucketWidth(workCount: number): number {
-  return Math.max(22, 22 + Math.max(0, workCount - 1) * STATION_SPACING);
+function bucketWidth(stationCount: number): number {
+  return Math.max(22, 22 + Math.max(0, stationCount - 1) * STATION_SPACING);
 }
 
 function average(values: readonly number[]): number {
@@ -151,17 +158,17 @@ function tagLaneOrder(visible: VisibleEvolution): VisibleEvolutionTag[] {
   visible.tags
     .filter((tag) => tag.seed)
     .forEach((tag, index) => seedRank.set(tag.tag.id, index));
-  const seedTagsByWork = new Map<EntityId, number[]>();
-  visible.works.forEach((work) => {
-    const ranks = work.visibleTagIds
+  const seedTagsByStation = new Map<string, number[]>();
+  visible.stations.forEach((station) => {
+    const ranks = station.visibleTagIds
       .map((tagId) => seedRank.get(tagId))
       .filter((rank): rank is number => rank !== undefined);
-    seedTagsByWork.set(work.work.id, ranks);
+    seedTagsByStation.set(station.id, ranks);
   });
   const seedBarycenterByTagId = new Map<EntityId, number>();
   for (const tag of visible.tags) {
-    const ranks = tag.workIds.flatMap(
-      (workId) => seedTagsByWork.get(workId) ?? [],
+    const ranks = tag.stationIds.flatMap(
+      (stationId) => seedTagsByStation.get(stationId) ?? [],
     );
     seedBarycenterByTagId.set(
       tag.tag.id,
@@ -186,7 +193,7 @@ function tagLaneOrder(visible: VisibleEvolution): VisibleEvolutionTag[] {
 interface MutableBucket {
   id: string;
   temporal: EvolutionDate;
-  works: VisibleEvolutionWork[];
+  stations: AggregateStation[];
 }
 
 interface MutableTemporalGroup {
@@ -227,14 +234,14 @@ function groupOverlappingBuckets(
     );
     const pointWidth = pointBuckets.reduce(
       (total, bucket, index) =>
-        total + bucketWidth(bucket.works.length) + (index ? 11 : 0),
+        total + bucketWidth(bucket.stations.length) + (index ? 11 : 0),
       0,
     );
     const intervalWidth = group.buckets
       .filter((bucket) => bucket.temporal.precision !== "day")
       .reduce(
         (maximum, bucket) =>
-          Math.max(maximum, 34 + bucketWidth(bucket.works.length)),
+          Math.max(maximum, 34 + bucketWidth(bucket.stations.length)),
         0,
       );
     group.width = Math.max(28, pointWidth, intervalWidth);
@@ -246,31 +253,35 @@ function buildTemporalGeometry(visible: VisibleEvolution): {
   years: MetroYearBand[];
   buckets: MetroBucket[];
 } {
-  const worksByYear = new Map<number, VisibleEvolutionWork[]>();
-  for (const work of visible.works) {
-    const works = worksByYear.get(work.temporal.year);
-    if (works) works.push(work);
-    else worksByYear.set(work.temporal.year, [work]);
+  const stationsByYear = new Map<number, AggregateStation[]>();
+  for (const station of visible.stations) {
+    const stations = stationsByYear.get(station.temporal.year);
+    if (stations) stations.push(station);
+    else stationsByYear.set(station.temporal.year, [station]);
   }
 
   const years: MetroYearBand[] = [];
   const buckets: MetroBucket[] = [];
   let previousYear: number | null = null;
   let cursor = CHART_LEFT;
-  for (const year of [...worksByYear.keys()].sort((left, right) => left - right)) {
-    const works = worksByYear.get(year)!.slice().sort((left, right) =>
-      left.work.id.localeCompare(right.work.id),
+  for (const year of [...stationsByYear.keys()].sort((left, right) => left - right)) {
+    const stations = stationsByYear.get(year)!.slice().sort((left, right) =>
+      left.id.localeCompare(right.id),
     );
     if (previousYear !== null) cursor += compressedHistoricalGap(year - previousYear);
 
     const mutableBuckets = new Map<string, MutableBucket>();
-    for (const work of works) {
-      let bucket = mutableBuckets.get(work.temporal.bucketId);
+    for (const station of stations) {
+      let bucket = mutableBuckets.get(station.temporalBucketId);
       if (!bucket) {
-        bucket = { id: work.temporal.bucketId, temporal: work.temporal, works: [] };
+        bucket = {
+          id: station.temporalBucketId,
+          temporal: station.temporal,
+          stations: [],
+        };
         mutableBuckets.set(bucket.id, bucket);
       }
-      bucket.works.push(work);
+      bucket.stations.push(station);
     }
     const yearInterval = mutableBuckets.get(`year:${year}`) ?? null;
     const temporalGroups = groupOverlappingBuckets(
@@ -288,9 +299,9 @@ function buildTemporalGeometry(visible: VisibleEvolution): {
       );
     }, 0);
     const intervalWidth = yearInterval
-      ? 34 + bucketWidth(yearInterval.works.length)
+      ? 34 + bucketWidth(yearInterval.stations.length)
       : 0;
-    const densityWidth = 90 + Math.sqrt(works.length) * 22;
+    const densityWidth = 90 + Math.sqrt(stations.length) * 22;
     const yearWidth = Math.max(
       MIN_YEAR_WIDTH,
       groupedWidth + YEAR_PADDING * 2,
@@ -307,9 +318,12 @@ function buildTemporalGeometry(visible: VisibleEvolution): {
       xEnd,
       contentStart,
       contentEnd,
-      workIds: works.map((work) => work.work.id),
+      stationIds: stations.map((station) => station.id),
+      workIds: stations.flatMap((station) => station.workIds).sort(),
       hasYearInterval: Boolean(yearInterval),
-      hasAmbiguity: works.some((work) => work.temporal.quality === "ambiguous"),
+      hasAmbiguity: stations.some(
+        (station) => station.temporal.quality === "ambiguous",
+      ),
     };
     years.push(band);
 
@@ -334,24 +348,27 @@ function buildTemporalGeometry(visible: VisibleEvolution): {
           );
         const pointWidth = pointBuckets.reduce(
           (total, bucket, index) =>
-            total + bucketWidth(bucket.works.length) + (index ? 11 : 0),
+            total + bucketWidth(bucket.stations.length) + (index ? 11 : 0),
           0,
         );
         let pointCursor = groupStart + Math.max(0, (group.width - pointWidth) / 2);
         for (const bucket of pointBuckets) {
-          const width = bucketWidth(bucket.works.length);
+          const width = bucketWidth(bucket.stations.length);
           const center = pointCursor + width / 2;
-          const singleton = bucket.works.length === 1;
+          const singleton = bucket.stations.length === 1;
           buckets.push({
             id: bucket.id,
             temporal: bucket.temporal,
             x: center,
             xStart: singleton ? center : pointCursor,
             xEnd: singleton ? center : pointCursor + width,
-            workIds: bucket.works.map((work) => work.work.id).sort(),
+            stationIds: bucket.stations.map((station) => station.id).sort(),
+            workIds: bucket.stations
+              .flatMap((station) => station.workIds)
+              .sort(),
             interval: false,
-            ambiguous: bucket.works.some(
-              (work) => work.temporal.quality === "ambiguous",
+            ambiguous: bucket.stations.some(
+              (station) => station.temporal.quality === "ambiguous",
             ),
           });
           pointCursor += width + 11;
@@ -365,10 +382,13 @@ function buildTemporalGeometry(visible: VisibleEvolution): {
             x: (groupStart + groupEnd) / 2,
             xStart: groupStart,
             xEnd: groupEnd,
-            workIds: bucket.works.map((work) => work.work.id).sort(),
+            stationIds: bucket.stations.map((station) => station.id).sort(),
+            workIds: bucket.stations
+              .flatMap((station) => station.workIds)
+              .sort(),
             interval: true,
-            ambiguous: bucket.works.some(
-              (work) => work.temporal.quality === "ambiguous",
+            ambiguous: bucket.stations.some(
+              (station) => station.temporal.quality === "ambiguous",
             ),
           });
         }
@@ -382,10 +402,15 @@ function buildTemporalGeometry(visible: VisibleEvolution): {
         x: (contentStart + contentEnd) / 2,
         xStart: contentStart,
         xEnd: contentEnd,
-        workIds: yearInterval.works.map((work) => work.work.id).sort(),
+        stationIds: yearInterval.stations
+          .map((station) => station.id)
+          .sort(),
+        workIds: yearInterval.stations
+          .flatMap((station) => station.workIds)
+          .sort(),
         interval: true,
-        ambiguous: yearInterval.works.some(
-          (work) => work.temporal.quality === "ambiguous",
+        ambiguous: yearInterval.stations.some(
+          (station) => station.temporal.quality === "ambiguous",
         ),
       });
     }
@@ -408,14 +433,14 @@ interface TagLaneLayout {
   laneCount: number;
 }
 
-function stationXInBucket(bucket: MetroBucket, workId: EntityId): number {
-  if (bucket.workIds.length === 1) return bucket.x;
-  const index = bucket.workIds.indexOf(workId);
+function stationXInBucket(bucket: MetroBucket, stationId: string): number {
+  if (bucket.stationIds.length === 1) return bucket.x;
+  const index = bucket.stationIds.indexOf(stationId);
   const inset = Math.min(12, Math.max(4, (bucket.xEnd - bucket.xStart) / 8));
   return (
     bucket.xStart +
     inset +
-    ((index + 0.5) / bucket.workIds.length) *
+    ((index + 0.5) / bucket.stationIds.length) *
       Math.max(0, bucket.xEnd - bucket.xStart - inset * 2)
   );
 }
@@ -425,16 +450,18 @@ function buildTagLaneLayout(
   buckets: readonly MetroBucket[],
 ): TagLaneLayout {
   const orderedTags = tagLaneOrder(visible);
-  const bucketByWorkId = new Map<EntityId, MetroBucket>();
+  const bucketByStationId = new Map<string, MetroBucket>();
   for (const bucket of buckets) {
-    for (const workId of bucket.workIds) bucketByWorkId.set(workId, bucket);
+    for (const stationId of bucket.stationIds) {
+      bucketByStationId.set(stationId, bucket);
+    }
   }
   const spans = new Map<EntityId, { start: number; end: number }>();
   for (const tag of orderedTags) {
     let start = Infinity;
     let end = -Infinity;
-    for (const workId of tag.workIds) {
-      const bucket = bucketByWorkId.get(workId);
+    for (const stationId of tag.stationIds) {
+      const bucket = bucketByStationId.get(stationId);
       if (!bucket) continue;
       start = Math.min(start, bucket.xStart);
       end = Math.max(end, bucket.xEnd);
@@ -483,7 +510,9 @@ function placeStations(
   laneByTagId: ReadonlyMap<EntityId, number>,
 ): MetroStation[] {
   const bucketById = new Map(buckets.map((bucket) => [bucket.id, bucket]));
-  const workById = new Map(visible.works.map((work) => [work.work.id, work]));
+  const entryById = new Map(
+    visible.stations.map((station) => [station.id, station]),
+  );
   const seedTagIds = new Set(
     visible.tags.filter((tag) => tag.seed).map((tag) => tag.tag.id),
   );
@@ -515,10 +544,10 @@ function placeStations(
     return preferredY;
   };
   for (const bucket of placementBuckets) {
-    const ordered = bucket.workIds.slice().sort();
+    const ordered = bucket.stationIds.slice().sort();
     const branchRows = Math.min(5, ordered.length);
-    ordered.forEach((workId, index) => {
-      const entry = workById.get(workId)!;
+    ordered.forEach((stationId, index) => {
+      const entry = entryById.get(stationId)!;
       const lanes = entry.visibleTagIds.map((tagId) => laneByTagId.get(tagId)!);
       const seedLanes = entry.visibleTagIds
         .filter((tagId) => seedTagIds.has(tagId))
@@ -527,15 +556,16 @@ function placeStations(
       const branchRow = index % branchRows;
       const clusterOffset =
         ordered.length > 1 ? (branchRow - (branchRows - 1) / 2) * 10 : 0;
-      const x = stationXInBucket(bucket, workId);
+      const x = stationXInBucket(bucket, stationId);
       result.push({
-        id: workId,
+        id: stationId,
         entry,
-        bucket: bucketById.get(entry.temporal.bucketId)!,
+        bucket: bucketById.get(entry.temporalBucketId)!,
         x,
         y: collisionFreeY(x, baseY + clusterOffset),
         visibleTagIds: entry.visibleTagIds,
         interchange: entry.visibleTagIds.length > 1,
+        aggregate: entry.workCount > 1,
       });
     });
   }
@@ -545,10 +575,10 @@ function placeStations(
 function buildTrajectory(
   tag: VisibleEvolutionTag,
   laneY: number,
-  stationById: ReadonlyMap<EntityId, MetroStation>,
+  stationById: ReadonlyMap<string, MetroStation>,
 ): MetroTrajectory {
-  const stations = tag.workIds
-    .map((workId) => stationById.get(workId)!)
+  const stations = tag.stationIds
+    .map((stationId) => stationById.get(stationId)!)
     .filter(Boolean)
     .sort(
       (left, right) =>
@@ -590,8 +620,9 @@ function buildTrajectory(
     const groupStations = group.stations.slice().sort((left, right) =>
       left.id.localeCompare(right.id),
     );
+    const branchesAcrossExactBucket = groupStations.length > 1;
     const extent = (station: MetroStation) =>
-      station.bucket.interval || station.bucket.workIds.length > 1
+      station.bucket.interval || branchesAcrossExactBucket
         ? { start: station.bucket.xStart, end: station.bucket.xEnd }
         : { start: station.x, end: station.x };
     const startX = Math.min(...groupStations.map((station) => extent(station).start));
@@ -603,9 +634,7 @@ function buildTrajectory(
       firstStart = start;
     }
     const singleExactPoint =
-      groupStations.length === 1 &&
-      !groupStations[0]!.bucket.interval &&
-      groupStations[0]!.bucket.workIds.length === 1;
+      groupStations.length === 1 && !groupStations[0]!.bucket.interval;
     if (singleExactPoint) {
       const station = groupStations[0]!;
       paths.push(routeBetween(previousEnd ?? origin!, station));
@@ -637,17 +666,40 @@ function buildTrajectory(
 }
 
 function explicitRoute(
-  relation: VisibleExplicitRelation,
+  relation: VisibleAggregateRelation,
   source: MetroStation,
   target: MetroStation,
   index: number,
   height: number,
 ): string {
   const offset = (index % 7) * 8;
-  const gutterY = relation.chronologyConflict ? height - 34 - offset : 82 + offset;
+  const chronologyConflict = relation.relations.some(
+    (underlying) => underlying.chronologyConflict,
+  );
+  const gutterY = chronologyConflict ? height - 34 - offset : 82 + offset;
   const firstBend = source.x + (target.x - source.x) * 0.34;
   const secondBend = source.x + (target.x - source.x) * 0.66;
   return `M ${source.x} ${source.y} C ${firstBend} ${gutterY}, ${secondBend} ${gutterY}, ${target.x} ${target.y}`;
+}
+
+function explicitSelfLoop(
+  relation: VisibleAggregateRelation,
+  station: MetroStation,
+  height: number,
+): string {
+  const variant = stableHash(relation.key) % 3;
+  const loopWidth = 26 + variant * 4;
+  const loopHeight = 28 + variant * 3;
+  const roomAbove = station.y - 88;
+  const roomBelow = height - 34 - station.y;
+  const direction = roomBelow >= roomAbove ? 1 : -1;
+  const apexY = station.y + direction * loopHeight;
+  const endpointOffset = 8;
+  return [
+    `M ${station.x - endpointOffset} ${station.y}`,
+    `C ${station.x - loopWidth} ${station.y}, ${station.x - loopWidth} ${apexY}, ${station.x} ${apexY}`,
+    `C ${station.x + loopWidth} ${apexY}, ${station.x + loopWidth} ${station.y}, ${station.x + endpointOffset} ${station.y}`,
+  ].join(" ");
 }
 
 function buildDateLabels(buckets: readonly MetroBucket[]): MetroDateLabel[] {
@@ -679,11 +731,11 @@ function buildWorkLabels(
   stations: readonly MetroStation[],
   sceneWidth: number,
 ): MetroLabel[] {
-  const seedEndpoints = new Set<EntityId>();
+  const seedEndpoints = new Set<string>();
   for (const tag of visible.tags.filter((candidate) => candidate.seed)) {
-    if (tag.workIds.length) {
-      seedEndpoints.add(tag.workIds[0]!);
-      seedEndpoints.add(tag.workIds.at(-1)!);
+    if (tag.stationIds.length) {
+      seedEndpoints.add(tag.stationIds[0]!);
+      seedEndpoints.add(tag.stationIds.at(-1)!);
     }
   }
   const candidates = stations
@@ -697,7 +749,13 @@ function buildWorkLabels(
   const accepted: Array<{ x1: number; x2: number; y1: number; y2: number }> = [];
   const result: MetroLabel[] = [];
   for (const station of candidates) {
-    const text = station.entry.work.label;
+    const containedWorks = station.entry.workIds
+      .map((workId) => visible.workById.get(workId)?.work)
+      .filter((work) => work !== undefined);
+    const text =
+      containedWorks.length === 1
+        ? containedWorks[0]!.label
+        : `${station.entry.workCount} works`;
     const width = clamp(text.length * 6.1 + 10, 52, 190);
     const preferredX = station.x + 8;
     const x1 =
@@ -724,7 +782,9 @@ function buildWorkLabels(
     accepted.push(box);
     result.push({
       key: `label:${station.id}`,
-      workId: station.id,
+      stationId: station.id,
+      workIds: station.entry.workIds,
+      workId: station.entry.workIds[0]!,
       text,
       x: box.x1,
       y: station.y - 7,
@@ -736,7 +796,7 @@ function buildWorkLabels(
 
 /** Build adaptive metro geometry only for the already-filtered visible scene. */
 export function buildTimeNetScene(visible: VisibleEvolution): MetroScene {
-  if (!visible.tags.length || !visible.works.length) {
+  if (!visible.tags.length || !visible.stations.length) {
     return {
       width: 0,
       height: 0,
@@ -746,6 +806,7 @@ export function buildTimeNetScene(visible: VisibleEvolution): MetroScene {
       trajectories: [],
       explicitRelations: [],
       stationById: new Map(),
+      stationByWorkId: new Map(),
       trajectoryById: new Map(),
       bucketById: new Map(),
       dateLabels: [],
@@ -760,6 +821,12 @@ export function buildTimeNetScene(visible: VisibleEvolution): MetroScene {
   );
   const stations = placeStations(visible, buckets, laneByTagId);
   const stationById = new Map(stations.map((station) => [station.id, station]));
+  const stationByWorkId = new Map<EntityId, MetroStation>();
+  for (const station of stations) {
+    for (const workId of station.entry.workIds) {
+      stationByWorkId.set(workId, station);
+    }
+  }
   const trajectories = orderedTags.map((tag) =>
     buildTrajectory(tag, laneByTagId.get(tag.tag.id)!, stationById),
   );
@@ -768,17 +835,28 @@ export function buildTimeNetScene(visible: VisibleEvolution): MetroScene {
   );
   const height =
     CHART_TOP + Math.max(0, laneCount - 1) * LANE_GAP + CHART_BOTTOM;
-  const explicitRelations = visible.explicitRelations.map((relation, index) => {
-    const source = stationById.get(relation.sourceId)!;
-    const target = stationById.get(relation.targetId)!;
-    return {
+  const explicitRelations: MetroExplicitRelation[] = [];
+  for (const relation of visible.aggregateRelations) {
+    const source = stationById.get(relation.sourceStationId);
+    const target = stationById.get(relation.targetStationId);
+    if (!source || !target) continue;
+    explicitRelations.push({
       key: relation.key,
       relation,
       source,
       target,
-      path: explicitRoute(relation, source, target, index, height),
-    };
-  });
+      path:
+        source.id === target.id
+          ? explicitSelfLoop(relation, source, height)
+          : explicitRoute(
+              relation,
+              source,
+              target,
+              explicitRelations.length,
+              height,
+            ),
+    });
+  }
   const width = years.at(-1)!.xEnd + CHART_RIGHT;
   return {
     width,
@@ -789,6 +867,7 @@ export function buildTimeNetScene(visible: VisibleEvolution): MetroScene {
     trajectories,
     explicitRelations,
     stationById,
+    stationByWorkId,
     trajectoryById,
     bucketById: new Map(buckets.map((bucket) => [bucket.id, bucket])),
     dateLabels: buildDateLabels(buckets),

@@ -791,6 +791,12 @@
   opacity: 0.86;
 }
 
+.metro-copy-legend i.station.aggregate {
+  position: relative;
+  border-width: 1px;
+  box-shadow: inset 0 0 0 2px #14191b, inset 0 0 0 3px #a8c7c2;
+}
+
 .metro-copy-legend i.station.ambiguous {
   border-style: double;
   border-radius: 1px;
@@ -807,7 +813,7 @@
   position: relative;
   z-index: 20;
   display: grid;
-  grid-template-columns: minmax(18rem, 1.2fr) minmax(18rem, 1.2fr) minmax(11rem, 0.65fr) minmax(13rem, 0.7fr) auto;
+  grid-template-columns: minmax(18rem, 1.2fr) minmax(18rem, 1.2fr) repeat(2, minmax(8rem, 0.45fr)) minmax(13rem, 0.7fr) auto;
   align-items: stretch;
   gap: 0.55rem;
   margin-bottom: 0.55rem;
@@ -1098,28 +1104,27 @@
 
 .metro-year-band {
   fill: #fff;
-  opacity: 0.012;
+  opacity: 0.006;
 }
 
 .metro-year-band.alternate {
-  opacity: 0.024;
+  opacity: 0.014;
 }
 
 .metro-year-band.has-interval {
-  stroke: #776f63;
-  stroke-width: 0.6;
-  stroke-dasharray: 3 7;
+  fill: #b9a780;
+  opacity: 0.012;
 }
 
 .metro-year-band.has-ambiguity {
   fill: #c0906f;
-  opacity: 0.02;
+  opacity: 0.015;
 }
 
-.metro-year-grid {
-  stroke: #354044;
-  stroke-width: 0.7;
-  opacity: 0.56;
+.metro-year-tick {
+  stroke: #586467;
+  stroke-width: 0.8;
+  opacity: 0.52;
 }
 
 .metro-year-label {
@@ -1134,36 +1139,50 @@
   stroke: #8a8174;
   stroke-width: 0.8;
   stroke-dasharray: 4 3;
-  opacity: 0.72;
+  opacity: 0.42;
 }
 
 .metro-bucket {
   fill: #91aaa6;
-  opacity: 0.015;
+  opacity: 0.01;
   pointer-events: none;
 }
 
 .metro-bucket.year-only {
   fill: #c2ad86;
-  opacity: 0.025;
+  opacity: 0.018;
 }
 
 .metro-bucket.month-interval {
   fill: #91b3ad;
-  opacity: 0.03;
-  stroke: #7fa9a2;
-  stroke-width: 0.6;
-  stroke-dasharray: 2 4;
+  opacity: 0.018;
 }
 
 .metro-bucket.ambiguous {
   fill: #c88778;
-  opacity: 0.035;
+  opacity: 0.022;
 }
 
-.metro-bucket.active {
+.metro-bucket.preview {
+  opacity: 0.045;
+}
+
+.metro-bucket.selected {
   fill: #f0d089;
-  opacity: 0.1;
+  opacity: 0.085;
+}
+
+.metro-bucket-axis-cue {
+  fill: none;
+  stroke: #81908f;
+  stroke-width: 1;
+  opacity: 0.5;
+}
+
+.metro-bucket-axis-cue.selected {
+  stroke: #e5c879;
+  stroke-width: 1.4;
+  opacity: 0.9;
 }
 
 .metro-date-label {
@@ -1185,6 +1204,20 @@
   cursor: pointer;
   outline: none;
   transition: opacity 100ms ease, filter 100ms ease;
+}
+
+.metro-trajectory.direction-earlier::before,
+.metro-trajectory.direction-later::before,
+.metro-trajectory.direction-both::before {
+  color: inherit;
+}
+
+.metro-direction-marker {
+  fill: var(--tag-color);
+  font-size: 10px;
+  font-weight: 800;
+  opacity: 0.64;
+  pointer-events: none;
 }
 
 .metro-trajectory.seed {
@@ -1212,19 +1245,26 @@
   pointer-events: stroke;
 }
 
-.metro-trajectory.muted {
+.metro-trajectory.muted-by-selection {
   opacity: 0.1;
 }
 
-.metro-trajectory.active,
+.metro-trajectory.selection-related,
+.metro-trajectory.selected,
 .metro-trajectory:focus-visible {
   opacity: 1;
-  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--tag-color), transparent 30%));
 }
 
-.metro-trajectory.active .metro-line-visible,
+.metro-trajectory.selected .metro-line-visible,
 .metro-trajectory:focus-visible .metro-line-visible {
   stroke-width: calc(var(--line-width) + 1.8px);
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--tag-color), transparent 45%));
+}
+
+.metro-trajectory.previewed .metro-line-visible,
+.metro-trajectory.preview-related .metro-line-visible {
+  stroke-width: calc(var(--line-width) + 0.7px);
+  opacity: 1;
 }
 
 .metro-tag-label {
@@ -1241,7 +1281,8 @@
   opacity: 0;
 }
 
-.metro-trajectory.context-line.active .metro-tag-label,
+.metro-trajectory.context-line.selected .metro-tag-label,
+.metro-trajectory.context-line.previewed .metro-tag-label,
 .metro-trajectory.context-line:focus-visible .metro-tag-label {
   opacity: 1;
 }
@@ -1276,12 +1317,37 @@
   stroke-dasharray: 2 4;
 }
 
-.metro-explicit-relation.muted { opacity: 0.2; }
-.metro-explicit-relation.active .metro-relation-visible,
+.metro-explicit-relation.muted-by-selection { opacity: 0.2; }
+.metro-explicit-relation.selected .metro-relation-visible,
 .metro-explicit-relation:focus-visible .metro-relation-visible {
   stroke-width: 3px;
   opacity: 1;
-  filter: drop-shadow(0 0 3px rgba(224, 183, 101, 0.65));
+  filter: drop-shadow(0 0 2px rgba(224, 183, 101, 0.5));
+}
+
+.metro-explicit-relation.previewed .metro-relation-visible,
+.metro-explicit-relation.preview-related .metro-relation-visible {
+  stroke-width: 2.25px;
+  opacity: 1;
+}
+
+.metro-relation-count circle {
+  fill: #182022;
+  stroke: #e0b765;
+  stroke-width: 1;
+}
+
+.metro-relation-count text {
+  fill: #f0d493;
+  font-size: 7px;
+  font-weight: 800;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.metro-explicit-relation.refined .metro-relation-visible {
+  stroke-width: 2.8px;
+  opacity: 1;
 }
 
 .metro-station {
@@ -1326,24 +1392,95 @@
   stroke-width: 2.2;
 }
 
+.metro-aggregate-ring {
+  fill: #101719;
+  stroke: #a8c7c2;
+  stroke-width: 1.5;
+}
+
+.metro-aggregate-count {
+  fill: #eef4f3;
+  font-size: 7px;
+  font-weight: 800;
+  pointer-events: none;
+  text-anchor: middle;
+}
+
 .metro-station.depth-1 { opacity: 0.84; }
 .metro-station.depth-2 { opacity: 0.7; }
 .metro-station.depth-3,
 .metro-station.depth-4 { opacity: 0.58; }
-.metro-station.muted { opacity: 0.12; }
+.metro-station.muted-by-selection { opacity: 0.12; }
 
-.metro-station.active,
+.metro-station.selection-related,
 .metro-station.selected,
 .metro-station:focus-visible {
   opacity: 1;
-  filter: drop-shadow(0 0 3px rgba(242, 220, 155, 0.72));
 }
 
-.metro-station.active .metro-station-core,
+.metro-station.selected {
+  filter: drop-shadow(0 0 2px rgba(242, 220, 155, 0.58));
+}
+
+.metro-station.selected .metro-station-core,
 .metro-station:focus-visible .metro-station-core {
   fill: #fff2bd;
   stroke: #fff;
   stroke-width: 1.7;
+}
+
+.metro-station.previewed .metro-station-core {
+  fill: #f5e8b9;
+  stroke-width: 1.4;
+}
+
+.metro-station.selected .metro-aggregate-ring,
+.metro-station:focus-visible .metro-aggregate-ring {
+  fill: #3a3727;
+  stroke: #fff2bd;
+  stroke-width: 2;
+}
+
+.metro-station.previewed .metro-aggregate-ring {
+  stroke: #e7d8a7;
+  stroke-width: 1.8;
+}
+
+.metro-station.preview-related {
+  opacity: 0.92;
+}
+
+.metro-hover-tooltip {
+  position: fixed;
+  z-index: 120;
+  overflow: auto;
+  width: min(21rem, calc(100vw - 2rem));
+  max-height: min(22rem, calc(100vh - 2rem));
+  padding: 0.6rem 0.7rem;
+  color: #cbd4d5;
+  background: rgba(15, 21, 23, 0.97);
+  border: 1px solid #495659;
+  border-radius: 0.45rem;
+  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.38);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  pointer-events: auto;
+}
+
+.metro-hover-tooltip strong,
+.metro-hover-tooltip span,
+.metro-hover-tooltip small {
+  display: block;
+}
+
+.metro-hover-tooltip small {
+  margin-top: 0.2rem;
+  color: #8f9b9d;
+}
+
+.metro-hover-tooltip ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1rem;
 }
 
 .metro-work-label {
@@ -1482,6 +1619,77 @@
   color: #788487;
 }
 
+.metro-contained-works,
+.metro-provenance-groups {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.metro-contained-works > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.25rem;
+  padding: 0.3rem;
+  background: #111719;
+  border: 1px solid #2d3739;
+  border-radius: 0.38rem;
+}
+
+.metro-contained-works > div.refined {
+  border-color: #987f4c;
+  background: #1d1c18;
+}
+
+.metro-contained-works button {
+  min-width: 0;
+  padding: 0.35rem 0.42rem;
+  text-align: left;
+}
+
+.metro-contained-works button:first-child span,
+.metro-contained-works button:first-child small,
+.metro-contained-works > div > small {
+  display: block;
+}
+
+.metro-contained-works button:first-child small,
+.metro-contained-works > div > small {
+  color: #7f8c8e;
+  font-size: 0.64rem;
+}
+
+.metro-contained-works > div > small {
+  grid-column: 1 / -1;
+}
+
+.metro-provenance-groups details {
+  padding: 0.38rem 0.45rem;
+  color: #9ca8aa;
+  background: #111719;
+  border: 1px solid #2b3537;
+  border-radius: 0.36rem;
+  font-size: 0.68rem;
+}
+
+.metro-provenance-groups summary {
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.metro-provenance-groups ul {
+  margin-top: 0.35rem;
+}
+
+.metro-provenance-groups li strong,
+.metro-provenance-groups li span {
+  display: block;
+}
+
+.metro-provenance-groups li span {
+  color: #7f8c8f;
+  font-size: 0.64rem;
+}
+
 .metro-details-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1564,7 +1772,8 @@
   .metro-relation-visible,
   .metro-station-core,
   .metro-station-halo,
-  .metro-interchange-ring {
+  .metro-interchange-ring,
+  .metro-aggregate-ring {
     forced-color-adjust: auto;
   }
 
