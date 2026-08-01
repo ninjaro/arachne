@@ -1,9 +1,28 @@
-import type { Catalog, Domain, ResearchData } from "./types";
+import type { Catalog, Domain, ResearchData, WorkRelation } from "./types";
+
+function isWorkRelation(value: unknown): value is WorkRelation {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.subjectId === "string" &&
+    record.subjectId.length > 0 &&
+    typeof record.objectId === "string" &&
+    record.objectId.length > 0 &&
+    typeof record.relationType === "string" &&
+    record.relationType.trim().length > 0
+  );
+}
 
 function isCatalog(value: unknown): value is Catalog {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return record.formatVersion === 1 && Array.isArray(record.works);
+  return (
+    record.formatVersion === 1 &&
+    Array.isArray(record.works) &&
+    (record.workRelations === undefined ||
+      (Array.isArray(record.workRelations) &&
+        record.workRelations.every(isWorkRelation)))
+  );
 }
 
 function isResearchData(value: unknown): value is ResearchData {
@@ -54,9 +73,17 @@ export function buildDomain(catalog: Catalog): Domain {
     }
   }
 
+  const workIds = new Set(works.map((work) => work.id));
+
   return {
     works,
     workById: new Map(works.map((work) => [work.id, work])),
+    workRelations: (catalog.workRelations ?? []).filter(
+      (relation) =>
+        workIds.has(relation.subjectId) &&
+        workIds.has(relation.objectId) &&
+        relation.subjectId !== relation.objectId,
+    ),
     conceptOptions: [...conceptCounts.values()].sort(
       (left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id),
     ),

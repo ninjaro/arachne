@@ -1,26 +1,53 @@
-import type { Domain, EntityId, EvolutionSettings, Work } from "./types";
-import type { EdgeFactor, FeatureIndex } from "./features";
-import { similarityBetween, similarityCandidates } from "./features";
+import type {
+  ConceptAssignment,
+  Domain,
+  EntityId,
+  Work,
+  WorkRelation,
+} from "./types";
 
-export interface EvolutionEdgeEvidence {
-  score: number;
-  sharedFeatureCount: number;
-  topFactors: EdgeFactor[];
-}
-
-export interface EvolutionNode {
+export interface HistoricalTag {
   id: EntityId;
-  parent: EntityId | null;
-  evidence: EvolutionEdgeEvidence | null;
+  label: string;
+  conceptType: string;
 }
 
-export interface EvolutionForest {
-  nodes: EvolutionNode[];
-  byId: Map<EntityId, EvolutionNode>;
-  childrenByParent: Map<EntityId, EvolutionNode[]>;
-  roots: EntityId[];
-  subtreeSize: Map<EntityId, number>;
+export interface HistoricalEdge {
+  key: string;
+  sourceId: EntityId;
+  targetId: EntityId;
+  tags: HistoricalTag[];
+  explicitRelations: string[];
+  kind: "tag" | "explicit" | "mixed";
 }
+
+export interface HistoricalDag {
+  nodes: Work[];
+  edges: HistoricalEdge[];
+  incomingById: Map<EntityId, HistoricalEdge[]>;
+  outgoingById: Map<EntityId, HistoricalEdge[]>;
+  roots: EntityId[];
+  tagEdgeCount: number;
+  explicitEdgeCount: number;
+}
+
+interface MutableHistoricalEdge {
+  sourceId: EntityId;
+  targetId: EntityId;
+  tags: Map<EntityId, HistoricalTag>;
+  explicitRelations: Set<string>;
+}
+
+const OBJECT_TO_SUBJECT_RELATIONS = new Set([
+  "adapted_from",
+  "based_on",
+  "derived_from",
+  "influenced_by",
+  "inspired_by",
+  "remake_of",
+  "revival_of",
+  "sequel_to",
+]);
 
 function workOrder(left: Work, right: Work): number {
   return (
@@ -31,132 +58,165 @@ function workOrder(left: Work, right: Work): number {
   );
 }
 
-export function buildEvolutionForest(
-  domain: Domain,
-  index: FeatureIndex,
-  settings: EvolutionSettings,
-): EvolutionForest {
-  const ordered = domain.works.filter((work) => work.yearStart !== null).sort(workOrder);
-  const allowed = new Set(ordered.map((work) => work.id));
-  const nodes: EvolutionNode[] = [];
+function normalizeRelationType(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
 
-  for (const work of ordered) {
-    const workYear = work.yearStart!;
-    let best:
-      | {
-          parent: EntityId;
-          parentYear: number;
-          score: number;
-          shared: number;
-          topFactors: EdgeFactor[];
-        }
-      | undefined;
+function explicitEndpoints(
+  relation: WorkRelation,
+): { sourceId: EntityId; targetId: EntityId } {
+  return OBJECT_TO_SUBJECT_RELATIONS.has(
+    normalizeRelationType(relation.relationType),
+  )
+    ? { sourceId: relation.objectId, targetId: relation.subjectId }
+    : { sourceId: relation.subjectId, targetId: relation.objectId };
+}
 
-    for (const candidateId of similarityCandidates(index, work.id, allowed)) {
-      const candidate = domain.workById.get(candidateId);
-      if (!candidate || candidate.yearStart === null) continue;
+function tagFromAssignment(assignment: ConceptAssignment): HistoricalTag {
+  return {
+    id: assignment.id,
+    label: assignment.label,
+    conceptType: assignment.conceptType,
+  };
+}
 
-      // Alphabetical ordering must never manufacture a temporal direction.
-      // Same-year relationships are contemporary links, not parent/child links.
-      if (candidate.yearStart >= workYear) continue;
+function edgeKey(sourceId: EntityId, targetId: EntityId): string {
+  return `${sourceId}\u0000${targetId}`;
+}
 
-      const similarity = similarityBetween(index, candidateId, work.id);
-      if (similarity.sharedFeatureCount < settings.minimumSharedFeatures) continue;
+function mutableEdge(
+  edges: Map<string, MutableHistoricalEdge>,
+  sourceId: EntityId,
+  targetId: EntityId,
+): MutableHistoricalEdge | null {
+  if (sourceId === targetId) return null;
+  const key = edgeKey(sourceId, targetId);
+  const current = edges.get(key);
+  if (current) return current;
+  const created: MutableHistoricalEdge = {
+    sourceId,
+    targetId,
+    tags: new Map(),
+    explicitRelations: new Set(),
+  };
+  edges.set(key, created);
+  return created;
+}
 
-      const kindFactor =
-        candidate.medium === work.medium ? 1 : settings.kindMismatchFactor;
-      const score = similarity.similarity * kindFactor;
-      if (score < settings.minimumSimilarity) continue;
+/**
+ * Construct historical continuity edges from direct tag succession. For each
+ * tag, every work at one date connects to every work at the nearest strictly
+ * later date carrying that tag. Explicit work relations are then merged into
+ * the same directed node-pair records and retain visual precedence.
+ */
+export function buildHistoricalDag(domain: Domain): HistoricalDag {
+  const nodes = domain.works.slice().sort(workOrder);
+  const knownIds = new Set(nodes.map((work) => work.id));
+  const tagsByDate = new Map<
+    EntityId,
+    { tag: HistoricalTag; worksByYear: Map<number, Work[]> }
+  >();
 
-      if (
-        !best ||
-        score > best.score ||
-        (score === best.score && candidate.yearStart > best.parentYear) ||
-        (score === best.score &&
-          candidate.yearStart === best.parentYear &&
-          candidateId.localeCompare(best.parent) < 0)
-      ) {
-        best = {
-          parent: candidateId,
-          parentYear: candidate.yearStart,
-          score,
-          shared: similarity.sharedFeatureCount,
-          topFactors: similarity.topFactors,
+  for (const work of nodes) {
+    if (work.yearStart === null) continue;
+    const seenTags = new Set<EntityId>();
+    for (const assignment of work.concepts) {
+      if (seenTags.has(assignment.id)) continue;
+      seenTags.add(assignment.id);
+      let entry = tagsByDate.get(assignment.id);
+      if (!entry) {
+        entry = {
+          tag: tagFromAssignment(assignment),
+          worksByYear: new Map(),
         };
+        tagsByDate.set(assignment.id, entry);
+      }
+      const contemporaries = entry.worksByYear.get(work.yearStart);
+      if (contemporaries) contemporaries.push(work);
+      else entry.worksByYear.set(work.yearStart, [work]);
+    }
+  }
+
+  const mutableEdges = new Map<string, MutableHistoricalEdge>();
+  for (const { tag, worksByYear } of tagsByDate.values()) {
+    const years = [...worksByYear.keys()].sort((left, right) => left - right);
+    for (let index = 0; index + 1 < years.length; index += 1) {
+      const sources = worksByYear.get(years[index]!)!.slice().sort(workOrder);
+      const targets = worksByYear.get(years[index + 1]!)!.slice().sort(workOrder);
+      for (const source of sources) {
+        for (const target of targets) {
+          mutableEdge(mutableEdges, source.id, target.id)?.tags.set(tag.id, tag);
+        }
       }
     }
-
-    nodes.push({
-      id: work.id,
-      parent: best?.parent ?? null,
-      evidence: best
-        ? {
-            score: best.score,
-            sharedFeatureCount: best.shared,
-            topFactors: best.topFactors,
-          }
-        : null,
-    });
   }
 
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const childrenByParent = new Map<EntityId, EvolutionNode[]>();
-  const roots: EntityId[] = [];
-
-  for (const node of nodes) {
-    if (node.parent === null) {
-      roots.push(node.id);
-      continue;
-    }
-    const children = childrenByParent.get(node.parent);
-    if (children) children.push(node);
-    else childrenByParent.set(node.parent, [node]);
-  }
-
-  for (const children of childrenByParent.values()) {
-    children.sort(
-      (left, right) =>
-        (right.evidence?.score ?? 0) - (left.evidence?.score ?? 0) ||
-        left.id.localeCompare(right.id),
+  for (const relation of domain.workRelations) {
+    const { sourceId, targetId } = explicitEndpoints(relation);
+    if (!knownIds.has(sourceId) || !knownIds.has(targetId)) continue;
+    mutableEdge(mutableEdges, sourceId, targetId)?.explicitRelations.add(
+      normalizeRelationType(relation.relationType),
     );
   }
 
-  const subtreeSize = new Map<EntityId, number>();
-  const sizeOf = (id: EntityId): number => {
-    const cached = subtreeSize.get(id);
-    if (cached !== undefined) return cached;
-    const size =
-      1 +
-      (childrenByParent.get(id) ?? []).reduce(
-        (total, child) => total + sizeOf(child.id),
-        0,
+  const edges: HistoricalEdge[] = [...mutableEdges.values()]
+    .map((edge) => {
+      const tags = [...edge.tags.values()].sort(
+        (left, right) =>
+          left.label.localeCompare(right.label) || left.id.localeCompare(right.id),
       );
-    subtreeSize.set(id, size);
-    return size;
-  };
+      const explicitRelations = [...edge.explicitRelations].sort((left, right) =>
+        left.localeCompare(right),
+      );
+      return {
+        key: edgeKey(edge.sourceId, edge.targetId),
+        sourceId: edge.sourceId,
+        targetId: edge.targetId,
+        tags,
+        explicitRelations,
+        kind:
+          explicitRelations.length && tags.length
+            ? "mixed"
+            : explicitRelations.length
+              ? "explicit"
+              : "tag",
+      } satisfies HistoricalEdge;
+    })
+    .sort((left, right) => {
+      const leftSource = domain.workById.get(left.sourceId)!;
+      const rightSource = domain.workById.get(right.sourceId)!;
+      const leftTarget = domain.workById.get(left.targetId)!;
+      const rightTarget = domain.workById.get(right.targetId)!;
+      return (
+        workOrder(leftSource, rightSource) ||
+        workOrder(leftTarget, rightTarget) ||
+        left.key.localeCompare(right.key)
+      );
+    });
 
-  for (const root of roots) sizeOf(root);
-  roots.sort(
-    (left, right) =>
-      (subtreeSize.get(right) ?? 1) - (subtreeSize.get(left) ?? 1) ||
-      left.localeCompare(right),
-  );
-
-  return { nodes, byId, childrenByParent, roots, subtreeSize };
-}
-
-export function ancestorPath(
-  forest: EvolutionForest,
-  id: EntityId,
-): EntityId[] {
-  if (!forest.byId.has(id)) return [];
-  const result: EntityId[] = [];
-  const seen = new Set<EntityId>();
-  let current: EntityId | null = id;
-  while (current !== null && !seen.has(current)) {
-    seen.add(current);
-    result.push(current);
-    current = forest.byId.get(current)?.parent ?? null;
+  const incomingById = new Map<EntityId, HistoricalEdge[]>();
+  const outgoingById = new Map<EntityId, HistoricalEdge[]>();
+  for (const work of nodes) {
+    incomingById.set(work.id, []);
+    outgoingById.set(work.id, []);
   }
-  return result.reverse();
+  for (const edge of edges) {
+    incomingById.get(edge.targetId)!.push(edge);
+    outgoingById.get(edge.sourceId)!.push(edge);
+  }
+
+  const roots = nodes
+    .filter((work) => incomingById.get(work.id)!.length === 0)
+    .map((work) => work.id);
+  return {
+    nodes,
+    edges,
+    incomingById,
+    outgoingById,
+    roots,
+    tagEdgeCount: edges.filter((edge) => edge.tags.length > 0).length,
+    explicitEdgeCount: edges.filter(
+      (edge) => edge.explicitRelations.length > 0,
+    ).length,
+  };
 }

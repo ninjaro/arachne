@@ -16,13 +16,6 @@ export const DEFAULT_SETTINGS: Settings = {
     organizationMultiplier: 0.2,
     contentGuideMultiplier: 0.25,
   },
-  evolution: {
-    visibleChildrenPerNode: 5,
-    maxInitialRoots: 24,
-    minimumSimilarity: 0.18,
-    minimumSharedFeatures: 2,
-    kindMismatchFactor: 0.6,
-  },
   islands: {
     maxRecommendationNodes: 120,
     maxInferredNeighborsPerNode: 6,

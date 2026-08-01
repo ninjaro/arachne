@@ -389,6 +389,40 @@
   margin: 0;
 }
 
+.timenet-legends {
+  display: grid;
+  flex: 0 1 auto;
+  gap: 0.32rem;
+  justify-items: end;
+}
+
+.timenet-edge-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  color: #aab4b7;
+  font-size: 0.72rem;
+}
+
+.timenet-edge-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  white-space: nowrap;
+}
+
+.timenet-edge-legend i {
+  width: 1rem;
+  height: 2px;
+  border-radius: 999px;
+  background: #718b88;
+}
+
+.timenet-edge-legend i.explicit {
+  height: 3px;
+  background: #e0b765;
+}
+
 .timenet-legend {
   display: flex;
   flex: 0 1 auto;
@@ -511,10 +545,24 @@
   opacity: 0.58;
 }
 
+.timenet-undated-grid {
+  stroke: #6c6460;
+  stroke-width: 1;
+  stroke-dasharray: 5 5;
+  opacity: 0.75;
+}
+
 .timenet-year-label {
   fill: #adb7b9;
   font-size: 11px;
   letter-spacing: 0.035em;
+}
+
+.timenet-year-label.undated {
+  fill: #c4b7aa;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
 }
 
 .timenet-axis-title,
@@ -527,126 +575,97 @@
 
 .timenet-edge {
   fill: none;
-  stroke: #718185;
-  opacity: 0.34;
+  stroke: #718b88;
+  opacity: 0.11;
   pointer-events: stroke;
-  transition: opacity 120ms ease, stroke 120ms ease;
+  transition: opacity 100ms ease, stroke 100ms ease;
 }
 
 .timenet-edge:hover {
-  stroke: #c6d4d5;
-  opacity: 0.9;
+  stroke: #d6e8e5;
+  opacity: 1;
 }
 
-.timenet-edge.ancestor {
-  stroke: #c8a966;
-  opacity: 0.76;
+.timenet-edge.explicit {
+  stroke: #e0b765;
+  stroke-width: 1.8;
+  opacity: 0.82;
 }
 
 .timenet-edge.selected {
-  stroke: #edf2ed;
-  opacity: 0.95;
+  stroke: #d7f0ec;
+  opacity: 1;
+  filter: drop-shadow(0 0 2px rgba(155, 215, 205, 0.55));
+}
+
+.timenet-edge.explicit.selected {
+  stroke: #ffd67f;
+  stroke-width: 2.6;
+  filter: drop-shadow(0 0 2px rgba(224, 183, 101, 0.6));
 }
 
 .timenet-edge.context {
-  opacity: 0.1;
+  opacity: 0.018;
 }
 
-.timenet-feature-edge {
-  fill: none;
-  transition: opacity 120ms ease, stroke-width 120ms ease;
+.timenet-edge.explicit.context {
+  opacity: 0.38;
 }
 
-.timenet-feature-edge:hover {
-  opacity: 1 !important;
-}
-
-.timenet-node {
-  color: #91a0a3;
-  cursor: pointer;
-  outline: none;
-  transition: opacity 120ms ease;
-}
-
-.timenet-lifeline {
-  stroke: currentColor;
-  stroke-width: 4.5;
-  stroke-linecap: round;
-  opacity: 0.84;
-  transition: opacity 120ms ease, stroke-width 120ms ease;
-}
-
-.timenet-node-marker,
-.timenet-end-marker {
+.timenet-point {
   fill: currentColor;
   stroke: #0e1315;
+  stroke-width: 0.45;
+  opacity: 0.72;
+  cursor: pointer;
+  outline: none;
+  transition: opacity 100ms ease, r 100ms ease;
+}
+
+.timenet-point.selected {
+  fill: #f4d588;
+  stroke: #fff0bd;
+  stroke-width: 1.4;
+  opacity: 1;
+  filter: drop-shadow(0 0 3px rgba(244, 213, 136, 0.8));
+}
+
+.timenet-point.related {
+  stroke: #d9f1ed;
+  stroke-width: 0.9;
+  opacity: 1;
+}
+
+.timenet-point.context {
+  opacity: 0.12;
+}
+
+.timenet-point:hover,
+.timenet-point:focus-visible {
+  stroke: #fff;
+  stroke-width: 1.4;
+  opacity: 1;
+}
+
+.timenet-point.undated {
+  stroke: #d8cabb;
+}
+
+.timenet-point-label rect {
+  fill: #111719;
+  stroke: #687578;
   stroke-width: 1;
 }
 
-.timenet-node-marker {
-  transition: r 120ms ease, stroke 120ms ease;
-}
-
-.timenet-node-halo {
-  fill: currentColor;
-  opacity: 0.14;
-}
-
-.timenet-node-label {
-  fill: #dce3e3;
-  font-size: 10px;
-  font-weight: 620;
-  paint-order: stroke;
-  stroke: #0e1315;
-  stroke-linejoin: round;
-  stroke-width: 3px;
-}
-
-.timenet-hidden-count {
-  fill: #697578;
-  font-size: 8px;
-  letter-spacing: 0.02em;
-}
-
-.timenet-node.root .timenet-node-marker {
-  stroke: #d8ba7b;
-  stroke-width: 1.7;
-}
-
-.timenet-node.ancestor .timenet-lifeline {
-  opacity: 1;
-  stroke-width: 5.5;
-}
-
-.timenet-node.selected .timenet-node-marker {
-  fill: #f4d588;
-  stroke: #fff0bd;
-  stroke-width: 1.5;
-}
-
-.timenet-node.selected .timenet-node-label {
-  fill: #fff1c2;
+.timenet-point-label .node-title {
+  fill: #eef3f3;
   font-size: 11px;
+  font-weight: 650;
 }
 
-.timenet-node.context {
-  opacity: 0.24;
-}
-
-.timenet-node:hover,
-.timenet-node:focus-visible {
-  opacity: 1;
-}
-
-.timenet-node:hover .timenet-lifeline,
-.timenet-node:focus-visible .timenet-lifeline {
-  stroke-width: 7;
-  opacity: 1;
-}
-
-.timenet-node:focus-visible .timenet-node-marker {
-  stroke: #fff;
-  stroke-width: 2;
+.timenet-point-label .node-meta {
+  fill: #9da8aa;
+  font-size: 9px;
 }
 
 @media (max-width: 1100px) {
@@ -657,6 +676,10 @@
   .timenet-legend {
     justify-content: flex-start;
     margin-top: 0.5rem;
+  }
+
+  .timenet-legends {
+    justify-items: start;
   }
 
   .timenet-selection {

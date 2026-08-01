@@ -1,20 +1,14 @@
 import { dagre } from "d3-dag";
-import type { Domain, EntityId, EvolutionSettings, Work } from "./types";
-import type {
-  EvolutionEdgeEvidence,
-  EvolutionForest,
-  EvolutionNode,
-} from "./evolution";
-import { ancestorPath } from "./evolution";
+import type { DagreGraph } from "d3-dag";
+import type { EntityId, Work } from "./types";
+import type { HistoricalDag, HistoricalEdge } from "./evolution";
 
 export interface TimeNetNode {
   id: EntityId;
-  node: EvolutionNode;
   work: Work;
   x: number;
-  xEnd: number;
   y: number;
-  hiddenChildren: number;
+  undated: boolean;
 }
 
 export interface TimeNetPoint {
@@ -24,9 +18,9 @@ export interface TimeNetPoint {
 
 export interface TimeNetEdge {
   key: string;
-  parent: TimeNetNode;
-  child: TimeNetNode;
-  evidence: EvolutionEdgeEvidence;
+  source: TimeNetNode;
+  target: TimeNetNode;
+  edge: HistoricalEdge;
   points: TimeNetPoint[];
 }
 
@@ -34,25 +28,23 @@ export interface TimeNetScene {
   nodes: TimeNetNode[];
   edges: TimeNetEdge[];
   byId: Map<EntityId, TimeNetNode>;
-  emphasisIds: Set<EntityId>;
-  ancestorIds: Set<EntityId>;
   minimumYear: number;
   maximumYear: number;
-  tickStep: number;
   yearTicks: number[];
+  undatedX: number;
   width: number;
   height: number;
+  virtualRootLinks: number;
 }
 
 const CANVAS_LEFT = 92;
-const CANVAS_RIGHT = 250;
-const CHART_TOP = 108;
-const CHART_BOTTOM = 74;
+const CANVAS_RIGHT = 190;
+const CHART_TOP = 104;
+const CHART_BOTTOM = 62;
 const PIXELS_PER_YEAR = 12;
-const MIN_LIFELINE_WIDTH = 11;
-const NODE_LANE_HEIGHT = 34;
-const MAX_SCENE_NODES = 160;
-const LAYOUT_ROOT_ID = "__arachne_timenet_layout_root__";
+const NODE_LANE_HEIGHT = 9;
+const UNDATED_GAP = 150;
+const VIRTUAL_ROOT_ID = "__arachne_historical_virtual_root__";
 
 function stableWorkOrder(left: Work, right: Work): number {
   return (
@@ -61,103 +53,6 @@ function stableWorkOrder(left: Work, right: Work): number {
     left.label.localeCompare(right.label) ||
     left.id.localeCompare(right.id)
   );
-}
-
-function addWithinBudget(
-  ids: Set<EntityId>,
-  id: EntityId,
-  allowed: Set<EntityId>,
-  budget: number,
-): boolean {
-  if (ids.has(id)) return true;
-  if (!allowed.has(id) || ids.size >= budget) return false;
-  ids.add(id);
-  return true;
-}
-
-function overviewSelection(
-  forest: EvolutionForest,
-  allowed: Set<EntityId>,
-  settings: EvolutionSettings,
-): { ids: Set<EntityId>; emphasisIds: Set<EntityId>; ancestorIds: Set<EntityId> } {
-  const ids = new Set<EntityId>();
-  const roots = forest.roots
-    .filter((id) => allowed.has(id))
-    .slice(0, settings.maxInitialRoots);
-  const queue: EntityId[] = [];
-
-  for (const root of roots) {
-    if (addWithinBudget(ids, root, allowed, MAX_SCENE_NODES)) queue.push(root);
-  }
-
-  for (let cursor = 0; cursor < queue.length && ids.size < MAX_SCENE_NODES; cursor += 1) {
-    const parentId = queue[cursor]!;
-    const children = (forest.childrenByParent.get(parentId) ?? []).slice(
-      0,
-      settings.visibleChildrenPerNode,
-    );
-    for (const child of children) {
-      if (addWithinBudget(ids, child.id, allowed, MAX_SCENE_NODES)) {
-        queue.push(child.id);
-      }
-    }
-  }
-
-  return {
-    ids,
-    emphasisIds: new Set(ids),
-    ancestorIds: new Set<EntityId>(),
-  };
-}
-
-function focusSelection(
-  forest: EvolutionForest,
-  allowed: Set<EntityId>,
-  focusId: EntityId,
-  childLimit: number,
-): { ids: Set<EntityId>; emphasisIds: Set<EntityId>; ancestorIds: Set<EntityId> } {
-  const ids = new Set<EntityId>();
-  const emphasisIds = new Set<EntityId>();
-  const path = ancestorPath(forest, focusId).filter((id) => allowed.has(id));
-  const ancestorIds = new Set(path);
-
-  // The complete direct lineage always survives the degree-of-interest budget.
-  for (const id of path) {
-    ids.add(id);
-    emphasisIds.add(id);
-  }
-
-  const focusBudget = Math.max(ids.size, Math.floor(MAX_SCENE_NODES * 0.78));
-  const descendants: EntityId[] = [focusId];
-  for (
-    let cursor = 0;
-    cursor < descendants.length && ids.size < focusBudget;
-    cursor += 1
-  ) {
-    const parentId = descendants[cursor]!;
-    const children = (forest.childrenByParent.get(parentId) ?? []).slice(0, childLimit);
-    for (const child of children) {
-      if (addWithinBudget(ids, child.id, allowed, focusBudget)) {
-        emphasisIds.add(child.id);
-        descendants.push(child.id);
-      }
-    }
-  }
-
-  // A few sibling branches provide context at each ancestral junction without
-  // overwhelming the focused descendant tree.
-  for (let index = path.length - 2; index >= 0 && ids.size < MAX_SCENE_NODES; index -= 1) {
-    const junctionId = path[index]!;
-    const pathChildId = path[index + 1]!;
-    const siblings = (forest.childrenByParent.get(junctionId) ?? [])
-      .filter((child) => child.id !== pathChildId)
-      .slice(0, Math.min(3, childLimit));
-    for (const sibling of siblings) {
-      addWithinBudget(ids, sibling.id, allowed, MAX_SCENE_NODES);
-    }
-  }
-
-  return { ids, emphasisIds, ancestorIds };
 }
 
 function tickStepFor(span: number): number {
@@ -178,211 +73,217 @@ function buildYearTicks(minimumYear: number, maximumYear: number, step: number):
   return result;
 }
 
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value));
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function virtualRootTargets(dag: HistoricalDag): EntityId[] {
+  const roots = new Set(dag.roots);
+  const workById = new Map(dag.nodes.map((work) => [work.id, work]));
+  const neighbors = new Map<EntityId, EntityId[]>();
+  for (const node of dag.nodes) neighbors.set(node.id, []);
+  for (const edge of dag.edges) {
+    neighbors.get(edge.sourceId)!.push(edge.targetId);
+    neighbors.get(edge.targetId)!.push(edge.sourceId);
+  }
+
+  // A valid DAG has a source in every component. The component walk also
+  // gives malformed cyclic explicit-relation input a deterministic anchor so
+  // every work remains connected to the hidden layout root.
+  const seen = new Set<EntityId>();
+  for (const start of dag.nodes) {
+    if (seen.has(start.id)) continue;
+    const component: EntityId[] = [];
+    const queue = [start.id];
+    seen.add(start.id);
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const id = queue[cursor]!;
+      component.push(id);
+      for (const neighbor of neighbors.get(id) ?? []) {
+        if (seen.has(neighbor)) continue;
+        seen.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+    if (!component.some((id) => roots.has(id))) {
+      component.sort((left, right) => {
+        const leftWork = workById.get(left)!;
+        const rightWork = workById.get(right)!;
+        return stableWorkOrder(leftWork, rightWork);
+      });
+      roots.add(component[0]!);
+    }
+  }
+  return [...roots];
+}
+
+function assignCollisionFreeLanes(
+  dag: HistoricalDag,
+  graph: DagreGraph,
+): { laneById: Map<EntityId, number>; laneCount: number } {
+  const groups = new Map<string, Work[]>();
+  for (const work of dag.nodes) {
+    const key = work.yearStart === null ? "undated" : String(work.yearStart);
+    const group = groups.get(key);
+    if (group) group.push(work);
+    else groups.set(key, [work]);
+  }
+  const laneCount = Math.max(1, ...[...groups.values()].map((group) => group.length));
+  const realPositions = dag.nodes.map((work) => graph.node(work.id).x);
+  const minimumRawX = Math.min(...realPositions);
+  const maximumRawX = Math.max(...realPositions);
+  const rawSpan = Math.max(1, maximumRawX - minimumRawX);
+  const laneById = new Map<EntityId, number>();
+
+  for (const group of groups.values()) {
+    group.sort(
+      (left, right) =>
+        graph.node(left.id).x - graph.node(right.id).x ||
+        stableWorkOrder(left, right),
+    );
+    for (let index = 0; index < group.length; index += 1) {
+      const work = group[index]!;
+      const lane =
+        group.length === 1
+          ? Math.round(
+              ((graph.node(work.id).x - minimumRawX) / rawSpan) *
+                (laneCount - 1),
+            )
+          : Math.round(
+              ((index + 0.5) / group.length) * (laneCount - 1),
+            );
+      laneById.set(work.id, lane);
+    }
+  }
+  return { laneById, laneCount };
 }
 
 /**
- * Build a bounded focus-plus-context scene. d3-dag owns the layered ordering
- * and edge control points; its topological axis is mapped to metric time and
- * its cross-axis ordering is packed into collision-free lanes.
+ * Lay out the complete historical graph. d3-dag's linear-time Zherebko layout
+ * supplies a stable topological order and edge routing for the full catalog;
+ * its longitudinal coordinate is remapped to metric dates, while same-date
+ * collisions are separated into compact cross-axis lanes.
  */
-export function buildTimeNetScene(
-  forest: EvolutionForest,
-  domain: Domain,
-  settings: EvolutionSettings,
-  focusId: EntityId | null,
-  childLimit = settings.visibleChildrenPerNode,
-): TimeNetScene {
-  const datedWorks = domain.works
-    .filter((work): work is Work & { yearStart: number } => work.yearStart !== null)
-    .slice()
-    .sort(stableWorkOrder);
-  if (!datedWorks.length) {
+export function buildTimeNetScene(dag: HistoricalDag): TimeNetScene {
+  if (!dag.nodes.length) {
     return {
       nodes: [],
       edges: [],
       byId: new Map(),
-      emphasisIds: new Set(),
-      ancestorIds: new Set(),
       minimumYear: 0,
       maximumYear: 0,
-      tickStep: 1,
       yearTicks: [],
+      undatedX: 0,
       width: 0,
       height: 0,
+      virtualRootLinks: 0,
     };
   }
 
-  const allowed = new Set(datedWorks.map((work) => work.id));
-  const selection =
-    focusId && allowed.has(focusId)
-      ? focusSelection(forest, allowed, focusId, Math.max(1, childLimit))
-      : overviewSelection(forest, allowed, settings);
-  const visibleWorks = datedWorks.filter((work) => selection.ids.has(work.id));
-
-  const minimumDataYear = visibleWorks[0]!.yearStart;
-  const maximumDataYear = visibleWorks.reduce(
-    (maximum, work) => Math.max(maximum, work.yearStart, work.yearEnd ?? work.yearStart),
-    minimumDataYear,
+  const dated = dag.nodes.filter(
+    (work): work is Work & { yearStart: number } => work.yearStart !== null,
   );
+  const minimumDataYear = dated.length ? dated[0]!.yearStart : 0;
+  const maximumDataYear = dated.length
+    ? dated.reduce((maximum, work) => Math.max(maximum, work.yearStart), minimumDataYear)
+    : minimumDataYear;
   const tickStep = tickStepFor(maximumDataYear - minimumDataYear);
   const minimumYear = Math.floor(minimumDataYear / tickStep) * tickStep;
   const maximumYear = Math.ceil(maximumDataYear / tickStep) * tickStep;
+  const undatedX = timeNetYearX(maximumYear, minimumYear) + UNDATED_GAP;
 
   const graph = new dagre.graphlib.Graph();
   graph.setGraph({
     rankdir: "LR",
-    nodesep: 22,
-    ranksep: 62,
-    quality: "fast",
-    ranker: "longest-path",
-    algorithm: "sugiyama",
+    nodesep: 3,
+    ranksep: 8,
+    algorithm: "zherebko",
   });
   graph.setDefaultEdgeLabel(() => ({}));
-  graph.setNode(LAYOUT_ROOT_ID, { width: 1, height: 1 });
-  for (const work of visibleWorks) graph.setNode(work.id, { width: 14, height: 14 });
-
-  for (const work of visibleWorks) {
-    const node = forest.byId.get(work.id);
-    if (node?.parent && selection.ids.has(node.parent)) {
-      graph.setEdge(node.parent, node.id);
-    } else {
-      // A hidden synthetic source gives disconnected overview lineages one
-      // shared d3-dag ordering before collision-free lane packing. Its links
-      // are discarded after routing.
-      graph.setEdge(LAYOUT_ROOT_ID, work.id);
-    }
-  }
+  graph.setNode(VIRTUAL_ROOT_ID, { width: 1, height: 1 });
+  for (const work of dag.nodes) graph.setNode(work.id, { width: 3, height: 3 });
+  for (const edge of dag.edges) graph.setEdge(edge.sourceId, edge.targetId);
+  const rootTargets = virtualRootTargets(dag);
+  for (const id of rootTargets) graph.setEdge(VIRTUAL_ROOT_ID, id);
   dagre.layout(graph);
 
-  const rawPositions = visibleWorks.map((work) => graph.node(work.id));
-  const minimumLayoutY = Math.min(...rawPositions.map((position) => position.y));
-  const orderedLanes = visibleWorks.slice().sort((left, right) => {
-    const leftPosition = graph.node(left.id);
-    const rightPosition = graph.node(right.id);
-    return (
-      leftPosition.y - rightPosition.y ||
-      leftPosition.x - rightPosition.x ||
-      stableWorkOrder(left, right)
-    );
-  });
-  const laneY = new Map(
-    orderedLanes.map((work, index) => [work.id, CHART_TOP + index * NODE_LANE_HEIGHT]),
-  );
-  const provisional = new Map<EntityId, TimeNetNode>();
-
-  for (const work of visibleWorks) {
-    const node = forest.byId.get(work.id)!;
-    const x = timeNetYearX(work.yearStart, minimumYear);
-    const naturalEnd = timeNetYearX(
-      Math.max(work.yearStart, work.yearEnd ?? work.yearStart),
-      minimumYear,
-    );
-    provisional.set(work.id, {
+  const { laneById, laneCount } = assignCollisionFreeLanes(dag, graph);
+  const nodes = dag.nodes
+    .map((work): TimeNetNode => ({
       id: work.id,
-      node,
       work,
-      x,
-      xEnd: Math.max(x + MIN_LIFELINE_WIDTH, naturalEnd),
-      y: laneY.get(work.id)!,
-      hiddenChildren: 0,
-    });
+      x:
+        work.yearStart === null
+          ? undatedX
+          : timeNetYearX(work.yearStart, minimumYear),
+      y: CHART_TOP + laneById.get(work.id)! * NODE_LANE_HEIGHT,
+      undated: work.yearStart === null,
+    }))
+    .sort((left, right) => left.y - right.y || stableWorkOrder(left.work, right.work));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+
+  let maximumRouteY = 1;
+  for (const edge of dag.edges) {
+    for (const point of graph.edge(edge.sourceId, edge.targetId).points) {
+      maximumRouteY = Math.max(maximumRouteY, point.y);
+    }
   }
-
-  for (const entry of provisional.values()) {
-    const visibleChildCount = (forest.childrenByParent.get(entry.id) ?? []).filter((child) =>
-      provisional.has(child.id),
-    ).length;
-    entry.hiddenChildren = Math.max(
-      0,
-      (forest.childrenByParent.get(entry.id) ?? []).length - visibleChildCount,
-    );
-  }
-
-  const edges: TimeNetEdge[] = [];
-  for (const descriptor of graph.edges()) {
-    if (descriptor.v === LAYOUT_ROOT_ID) continue;
-    const parent = provisional.get(descriptor.v);
-    const child = provisional.get(descriptor.w);
-    const evidence = forest.byId.get(descriptor.w)?.evidence ?? null;
-    if (!parent || !child || !evidence) continue;
-
-    const rawParent = graph.node(descriptor.v);
-    const rawChild = graph.node(descriptor.w);
-    const rawSpan = rawChild.x - rawParent.x;
-    const rawPoints = graph.edge(descriptor.v, descriptor.w).points;
+  const routeHeight = Math.max(1, (laneCount - 1) * NODE_LANE_HEIGHT);
+  const edges = dag.edges.map((edge): TimeNetEdge => {
+    const source = byId.get(edge.sourceId)!;
+    const target = byId.get(edge.targetId)!;
+    const rawSource = graph.node(edge.sourceId);
+    const rawTarget = graph.node(edge.targetId);
+    const rawPoints = graph.edge(edge.sourceId, edge.targetId).points;
+    const rawSpan = rawTarget.x - rawSource.x;
     const points = rawPoints.map((point, index): TimeNetPoint => {
+      if (index === 0) return { x: source.x, y: source.y };
+      if (index === rawPoints.length - 1) return { x: target.x, y: target.y };
       const progress =
         Math.abs(rawSpan) > 0.000001
-          ? clamp01((point.x - rawParent.x) / rawSpan)
-          : rawPoints.length <= 1
-            ? 0
-            : index / (rawPoints.length - 1);
+          ? clamp((point.x - rawSource.x) / rawSpan, 0, 1)
+          : index / (rawPoints.length - 1);
       return {
-        x: parent.x + (child.x - parent.x) * progress,
-        y:
-          CHART_TOP +
-          point.y -
-          minimumLayoutY +
-          (parent.y - (CHART_TOP + rawParent.y - minimumLayoutY)) * (1 - progress) +
-          (child.y - (CHART_TOP + rawChild.y - minimumLayoutY)) * progress,
+        x: source.x + (target.x - source.x) * progress,
+        y: CHART_TOP + (point.y / maximumRouteY) * routeHeight,
       };
     });
-    edges.push({
-      key: `${descriptor.v}:${descriptor.w}`,
-      parent,
-      child,
-      evidence,
-      points,
-    });
-  }
+    return { key: edge.key, source, target, edge, points };
+  });
 
-  const nodes = [...provisional.values()].sort(
-    (left, right) => left.y - right.y || stableWorkOrder(left.work, right.work),
-  );
-  const byId = new Map(nodes.map((node) => [node.id, node]));
   return {
     nodes,
     edges,
     byId,
-    emphasisIds: selection.emphasisIds,
-    ancestorIds: selection.ancestorIds,
     minimumYear,
     maximumYear,
-    tickStep,
     yearTicks: buildYearTicks(minimumYear, maximumYear, tickStep),
-    width: timeNetYearX(maximumYear, minimumYear) + CANVAS_RIGHT,
-    height: CHART_TOP + Math.max(0, nodes.length - 1) * NODE_LANE_HEIGHT + CHART_BOTTOM,
+    undatedX,
+    width: undatedX + CANVAS_RIGHT,
+    height: CHART_TOP + routeHeight + CHART_BOTTOM,
+    virtualRootLinks: rootTargets.length,
   };
 }
 
-export function timeNetPath(points: readonly TimeNetPoint[], offset = 0): string {
+export function timeNetPath(points: readonly TimeNetPoint[]): string {
   if (!points.length) return "";
-  const shifted = points.map((point) => ({ x: point.x, y: point.y + offset }));
-  const first = shifted[0]!;
-  if (shifted.length === 1) return `M ${first.x} ${first.y}`;
-  if (shifted.length === 2) {
-    const last = shifted[1]!;
+  const first = points[0]!;
+  if (points.length === 1) return `M ${first.x} ${first.y}`;
+  if (points.length === 2) {
+    const last = points[1]!;
     const bend = (last.x - first.x) * 0.5;
     return `M ${first.x} ${first.y} C ${first.x + bend} ${first.y}, ${last.x - bend} ${last.y}, ${last.x} ${last.y}`;
   }
-  if (shifted.length === 3) {
-    const middle = shifted[1]!;
-    const last = shifted[2]!;
+  if (points.length === 3) {
+    const middle = points[1]!;
+    const last = points[2]!;
     return `M ${first.x} ${first.y} Q ${middle.x} ${middle.y}, ${last.x} ${last.y}`;
-  }
-  if (shifted.length === 4) {
-    const firstControl = shifted[1]!;
-    const secondControl = shifted[2]!;
-    const last = shifted[3]!;
-    return `M ${first.x} ${first.y} C ${firstControl.x} ${firstControl.y}, ${secondControl.x} ${secondControl.y}, ${last.x} ${last.y}`;
   }
 
   let result = `M ${first.x} ${first.y}`;
-  for (let index = 1; index < shifted.length; index += 1) {
-    const previous = shifted[index - 1]!;
-    const current = shifted[index]!;
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1]!;
+    const current = points[index]!;
     const midpoint = (previous.x + current.x) / 2;
     result += ` C ${midpoint} ${previous.y}, ${midpoint} ${current.y}, ${current.x} ${current.y}`;
   }

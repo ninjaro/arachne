@@ -266,6 +266,41 @@ def build_catalog(database: Path) -> dict[str, Any]:
             }
         )
 
+    work_relations: list[dict[str, str]] = []
+    has_work_relations = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_relations'"
+    ).fetchone()
+    if has_work_relations:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(work_relations)")
+        }
+        required_columns = {
+            "subject_work_id",
+            "object_work_id",
+            "relation_type",
+        }
+        if not required_columns.issubset(columns):
+            raise RuntimeError(
+                "work_relations must expose subject_work_id, object_work_id, "
+                "and relation_type"
+            )
+        work_relations = [
+            {
+                "subjectId": row["subject_work_id"],
+                "objectId": row["object_work_id"],
+                "relationType": row["relation_type"],
+            }
+            for row in rows(
+                connection,
+                """
+                SELECT subject_work_id, object_work_id, relation_type
+                FROM work_relations
+                ORDER BY subject_work_id, relation_type, object_work_id
+                """,
+            )
+        ]
+
     works: list[dict[str, Any]] = []
     for row in rows(
         connection,
@@ -310,6 +345,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
         "databaseSha256": database_sha256(database),
         "databaseUserVersion": user_version,
         "works": works,
+        "workRelations": work_relations,
     }
 
 

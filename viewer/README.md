@@ -9,8 +9,9 @@ current Arachne product database.
 - pagination and relevance sorting
 - browser-local like/dislike ratings
 - weighted recommendations with positive and negative explanations
-- [TimeNets-inspired](https://idl.uw.edu/papers/timenets) Evolution lineages with
-  metric time, focus-plus-context expansion, and d3-dag layout and edge routing
+- [TimeNets-inspired](https://idl.uw.edu/papers/timenets) Evolution DAG with one
+  earliest-date point per work, nearest-later tag continuity, explicit work
+  relations, and d3-dag layout and edge routing
 - rated/recommended Islands graph with disconnected components preserved
 - draggable multi-window work details
 - concepts, credits, content-guide assertions, measurements, identifiers,

@@ -306,8 +306,6 @@ export default function App() {
         ) : view === "evolution" ? (
           <EvolutionView
             domain={domain}
-            index={featureIndex}
-            settings={DEFAULT_SETTINGS}
             onOpen={openWindow}
           />
         ) : view === "islands" ? (

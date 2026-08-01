@@ -91,17 +91,25 @@ export interface Work {
   financialFacts: FinancialFact[];
 }
 
+export interface WorkRelation {
+  subjectId: EntityId;
+  objectId: EntityId;
+  relationType: string;
+}
+
 export interface Catalog {
   formatVersion: 1;
   productSnapshotId: string;
   databaseSha256?: string;
   databaseUserVersion?: number;
   works: Work[];
+  workRelations?: WorkRelation[];
 }
 
 export interface Domain {
   works: Work[];
   workById: Map<EntityId, Work>;
+  workRelations: WorkRelation[];
   conceptOptions: Array<{ id: EntityId; label: string; count: number }>;
   mediumOptions: Array<{ value: string; count: number }>;
 }
@@ -169,14 +177,6 @@ export interface FeatureSettings {
   contentGuideMultiplier: number;
 }
 
-export interface EvolutionSettings {
-  visibleChildrenPerNode: number;
-  maxInitialRoots: number;
-  minimumSimilarity: number;
-  minimumSharedFeatures: number;
-  kindMismatchFactor: number;
-}
-
 export interface IslandsSettings {
   maxRecommendationNodes: number;
   maxInferredNeighborsPerNode: number;
@@ -192,7 +192,6 @@ export interface BrowseSettings {
 export interface Settings {
   recommendation: RecommendationSettings;
   features: FeatureSettings;
-  evolution: EvolutionSettings;
   islands: IslandsSettings;
   browse: BrowseSettings;
 }
