@@ -341,148 +341,348 @@
   }
 }
 
-/* Fixed temporal evolution scene */
-.evolution-fixed-view {
+/* TimeNets-inspired historical lineage scene */
+.timenet-view {
   min-width: 0;
 }
 
-.evolution-fixed-selection {
-  display: flex;
+.timenet-toolbar input[type="search"] {
+  min-width: min(22rem, 45vw);
+}
+
+.timenet-toolbar .timenet-zoom {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin: 0 0 0.75rem;
-  padding: 0.7rem 0.85rem;
-  background: #141a1c;
-  border: 1px solid #323b3e;
-  border-radius: 0.55rem;
-}
-
-.evolution-fixed-selection h3,
-.evolution-fixed-selection p {
-  margin: 0;
-}
-
-.evolution-fixed-selection h3 {
-  margin-bottom: 0.18rem;
-  font-size: 1rem;
-}
-
-.evolution-fixed-selection p {
-  color: #9da7aa;
+  gap: 0.35rem;
+  color: #aeb8ba;
   font-size: 0.82rem;
 }
 
-.evolution-fixed-selection button {
-  flex: 0 0 auto;
+.timenet-toolbar input[type="range"] {
+  width: 8rem;
+  padding: 0;
 }
 
-.evolution-fixed-canvas {
+.timenet-count {
+  white-space: nowrap;
+}
+
+.sr-status {
+  position: absolute;
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.timenet-introduction {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.65rem 0;
+}
+
+.timenet-introduction .graph-help {
+  max-width: 66rem;
+  margin: 0;
+}
+
+.timenet-legend {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.28rem 0.7rem;
+  color: #aab4b7;
+  font-size: 0.72rem;
+}
+
+.timenet-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.timenet-legend i {
+  width: 0.7rem;
+  height: 0.18rem;
+  border-radius: 999px;
+}
+
+.timenet-legend small {
+  color: #717d80;
+}
+
+.timenet-selection {
+  display: grid;
+  grid-template-columns: minmax(15rem, 1.1fr) minmax(30rem, 2fr) auto;
+  align-items: center;
+  gap: 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0.75rem 0.85rem;
   background:
-    linear-gradient(rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0.005)),
-    #101416;
+    linear-gradient(100deg, rgba(113, 183, 173, 0.08), transparent 36%),
+    #141a1c;
+  border: 1px solid #354145;
+  border-radius: 0.6rem;
 }
 
-.evolution-timeline-axis {
-  stroke: #687276;
-  stroke-width: 1.1;
+.timenet-selection h3,
+.timenet-selection p,
+.timenet-selection dl,
+.timenet-selection dd {
+  margin: 0;
 }
 
-.evolution-year-label {
-  fill: #a2abad;
-  font-size: 11px;
-  letter-spacing: 0.03em;
+.timenet-selection h3 {
+  margin: 0.08rem 0 0.16rem;
+  font-size: 1rem;
 }
 
-.evolution-fixed-year-grid {
-  stroke: #384044;
+.timenet-selection p,
+.timenet-selection dd {
+  color: #a5afb1;
+  font-size: 0.78rem;
+}
+
+.timenet-kicker {
+  color: #78bdb3;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.timenet-selection dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(7rem, 1fr));
+  gap: 0.6rem;
+}
+
+.timenet-selection dt {
+  margin-bottom: 0.16rem;
+  color: #707d80;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.timenet-selection-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.timenet-selection-actions button {
+  white-space: nowrap;
+}
+
+.timenet-scroll {
+  height: calc(100vh - 15.5rem);
+  min-height: 32rem;
+  background: #0e1315;
+}
+
+.timenet-canvas {
+  display: block;
+  background:
+    radial-gradient(circle at 9rem 2rem, rgba(101, 154, 146, 0.06), transparent 27rem),
+    #0e1315;
+}
+
+.timenet-period-band {
+  fill: #fff;
+  opacity: 0.012;
+}
+
+.timenet-axis {
+  stroke: #697578;
+  stroke-width: 1;
+}
+
+.timenet-year-grid {
+  stroke: #344044;
   stroke-width: 0.7;
   opacity: 0.58;
 }
 
-.evolution-fixed-edge-cloud {
-  fill: none;
-  stroke: #748084;
-  stroke-width: 0.55;
-  opacity: 0.12;
-  pointer-events: none;
+.timenet-year-label {
+  fill: #adb7b9;
+  font-size: 11px;
+  letter-spacing: 0.035em;
 }
 
-.evolution-fixed-selected-edge {
+.timenet-axis-title,
+.timenet-axis-direction {
+  fill: #647174;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.timenet-edge {
   fill: none;
-  stroke: #d5dfe0;
+  stroke: #718185;
+  opacity: 0.34;
   pointer-events: stroke;
+  transition: opacity 120ms ease, stroke 120ms ease;
 }
 
-.evolution-fixed-feature-edge {
+.timenet-edge:hover {
+  stroke: #c6d4d5;
+  opacity: 0.9;
+}
+
+.timenet-edge.ancestor {
+  stroke: #c8a966;
+  opacity: 0.76;
+}
+
+.timenet-edge.selected {
+  stroke: #edf2ed;
+  opacity: 0.95;
+}
+
+.timenet-edge.context {
+  opacity: 0.1;
+}
+
+.timenet-feature-edge {
   fill: none;
   transition: opacity 120ms ease, stroke-width 120ms ease;
 }
 
-.evolution-fixed-feature-edge:hover {
+.timenet-feature-edge:hover {
   opacity: 1 !important;
 }
 
-.evolution-fixed-point {
-  fill: #8b9699;
-  stroke: #101416;
-  stroke-width: 0.5;
-  opacity: 0.62;
+.timenet-node {
+  color: #91a0a3;
   cursor: pointer;
-  transition: fill 100ms ease, opacity 100ms ease, stroke-width 100ms ease;
+  outline: none;
+  transition: opacity 120ms ease;
 }
 
-.evolution-fixed-point:hover {
-  fill: #dce5e6;
-  opacity: 1;
+.timenet-lifeline {
+  stroke: currentColor;
+  stroke-width: 4.5;
+  stroke-linecap: round;
+  opacity: 0.84;
+  transition: opacity 120ms ease, stroke-width 120ms ease;
+}
+
+.timenet-node-marker,
+.timenet-end-marker {
+  fill: currentColor;
+  stroke: #0e1315;
   stroke-width: 1;
 }
 
-.evolution-fixed-point.root {
-  fill: #b99b60;
-  opacity: 0.82;
+.timenet-node-marker {
+  transition: r 120ms ease, stroke 120ms ease;
 }
 
-.evolution-fixed-point.related {
-  fill: #a9d6d0;
-  opacity: 0.98;
+.timenet-node-halo {
+  fill: currentColor;
+  opacity: 0.14;
 }
 
-.evolution-fixed-point.selected {
-  fill: #f0cc78;
-  stroke: #fff0bd;
-  stroke-width: 1.3;
-  opacity: 1;
-}
-
-.evolution-fixed-point.dimmed {
-  opacity: 0.18;
-}
-
-.evolution-fixed-node-label rect {
-  fill: #111719;
-  stroke: #657174;
-  stroke-width: 1;
-}
-
-.evolution-fixed-node-label .node-title {
-  fill: #eef3f3;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.evolution-fixed-node-label .node-meta {
-  fill: #9da8aa;
+.timenet-node-label {
+  fill: #dce3e3;
   font-size: 10px;
+  font-weight: 620;
+  paint-order: stroke;
+  stroke: #0e1315;
+  stroke-linejoin: round;
+  stroke-width: 3px;
+}
+
+.timenet-hidden-count {
+  fill: #697578;
+  font-size: 8px;
+  letter-spacing: 0.02em;
+}
+
+.timenet-node.root .timenet-node-marker {
+  stroke: #d8ba7b;
+  stroke-width: 1.7;
+}
+
+.timenet-node.ancestor .timenet-lifeline {
+  opacity: 1;
+  stroke-width: 5.5;
+}
+
+.timenet-node.selected .timenet-node-marker {
+  fill: #f4d588;
+  stroke: #fff0bd;
+  stroke-width: 1.5;
+}
+
+.timenet-node.selected .timenet-node-label {
+  fill: #fff1c2;
+  font-size: 11px;
+}
+
+.timenet-node.context {
+  opacity: 0.24;
+}
+
+.timenet-node:hover,
+.timenet-node:focus-visible {
+  opacity: 1;
+}
+
+.timenet-node:hover .timenet-lifeline,
+.timenet-node:focus-visible .timenet-lifeline {
+  stroke-width: 7;
+  opacity: 1;
+}
+
+.timenet-node:focus-visible .timenet-node-marker {
+  stroke: #fff;
+  stroke-width: 2;
+}
+
+@media (max-width: 1100px) {
+  .timenet-introduction {
+    display: block;
+  }
+
+  .timenet-legend {
+    justify-content: flex-start;
+    margin-top: 0.5rem;
+  }
+
+  .timenet-selection {
+    grid-template-columns: 1fr;
+  }
+
+  .timenet-selection-actions {
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 700px) {
-  .evolution-fixed-selection {
+  .timenet-toolbar input[type="search"] {
+    min-width: 100%;
+  }
+
+  .timenet-selection dl {
+    grid-template-columns: repeat(2, minmax(7rem, 1fr));
+  }
+
+  .timenet-selection-actions {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .evolution-fixed-selection button {
-    align-self: flex-start;
+  .timenet-selection-actions button {
+    width: 100%;
   }
 }

@@ -323,56 +323,6 @@ tbody tr:focus {
   background-size: 24px 24px;
 }
 
-.evolution-edge {
-  fill: none;
-  stroke: #627077;
-  stroke-width: 1.5;
-}
-
-.evolution-node > rect {
-  fill: #1c2326;
-  stroke: #546168;
-  stroke-width: 1;
-}
-
-.evolution-node:hover > rect,
-.evolution-node:focus > rect {
-  fill: #253034;
-  stroke: #9db0b6;
-}
-
-.evolution-node .node-title {
-  fill: #f0f1ee;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.evolution-node .node-meta {
-  fill: #9fa9ad;
-  font-size: 11px;
-}
-
-.evolution-toggle rect {
-  fill: #313b3f;
-  stroke: #66747a;
-}
-
-.evolution-toggle text {
-  fill: #e8e9e6;
-  font-size: 11px;
-}
-
-.evolution-more rect {
-  fill: #1e2528;
-  stroke: #59676c;
-  stroke-dasharray: 5 4;
-}
-
-.evolution-more text {
-  fill: #aab5b9;
-  font-size: 12px;
-}
-
 .load-more {
   display: block;
   margin: 0.75rem auto 0;
@@ -909,4 +859,3 @@ tbody tr:focus {
 .page-jump input {
   width: 5.25rem;
 }
-

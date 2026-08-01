@@ -1,50 +1,31 @@
-import { useMemo, useState } from "react";
-import type { ChangeEvent, CSSProperties, KeyboardEvent, MouseEvent } from "react";
+import { useMemo, useRef, useState } from "react";
+import type {
+  ChangeEvent,
+  CSSProperties,
+  KeyboardEvent,
+  MouseEvent,
+} from "react";
 import type { Domain, EntityId, Settings, Work } from "../lib/types";
 import type { EdgeFactor, FeatureIndex } from "../lib/features";
 import { factorPhrase, similarityBetween } from "../lib/features";
-import { buildEvolutionForest } from "../lib/evolution";
-import type {
-  EvolutionEdgeEvidence,
-  EvolutionForest,
-  EvolutionNode,
-} from "../lib/evolution";
+import { ancestorPath, buildEvolutionForest } from "../lib/evolution";
+import type { EvolutionEdgeEvidence } from "../lib/evolution";
+import {
+  buildTimeNetScene,
+  timeNetYearX,
+  timeNetPath,
+} from "../lib/timenets";
+import type { TimeNetEdge, TimeNetNode } from "../lib/timenets";
 import type { OpenHandler } from "../components/common";
 import { humanize } from "../lib/format";
 
-interface PositionedNode {
-  node: EvolutionNode;
-  work: Work;
-  year: number;
-  lane: number;
-  x: number;
-  y: number;
-}
-
-interface PositionedEdge {
-  key: string;
-  parent: PositionedNode;
-  child: PositionedNode;
-  evidence: EvolutionEdgeEvidence;
-}
-
-interface FeatureEdge extends PositionedEdge {
+interface FeatureEdge extends TimeNetEdge {
   factors: EdgeFactor[];
 }
 
-const TIMELINE_LEFT = 90;
-const TIMELINE_RIGHT = 150;
-const PIXELS_PER_YEAR = 34;
-const AXIS_Y = 52;
-const NODES_TOP = 86;
-const FIXED_TEMPORAL_NODE_GAP = 12;
-const FIXED_TEMPORAL_LANE_HEIGHT = 14;
-const NODE_RADIUS = 2.4;
-const SELECTED_NODE_RADIUS = 5;
-
-function timelineX(year: number, minimumYear: number): number {
-  return TIMELINE_LEFT + (year - minimumYear) * PIXELS_PER_YEAR;
-}
+const SELECTED_NODE_RADIUS = 5.5;
+const MAX_BRANCH_LIMIT = 20;
+const TIME_AXIS_Y = 74;
 
 function stableWorkOrder(left: Work, right: Work): number {
   return (
@@ -56,57 +37,29 @@ function stableWorkOrder(left: Work, right: Work): number {
   );
 }
 
-function buildFixedPositions(
-  forest: EvolutionForest,
-  domain: Domain,
-  minimumYear: number,
-): { nodes: PositionedNode[]; laneCount: number } {
-  const ordered = forest.nodes
-    .map((node) => ({ node, work: domain.workById.get(node.id) }))
-    .filter(
-      (entry): entry is { node: EvolutionNode; work: Work } =>
-        Boolean(entry.work && entry.work.yearStart !== null),
-    )
-    .sort((left, right) => stableWorkOrder(left.work, right.work));
-
-  const laneEnds: number[] = [];
-  const nodes = ordered.map(({ node, work }) => {
-    const year = work.yearStart!;
-    const x = timelineX(year, minimumYear);
-    let lane = laneEnds.findIndex(
-      (lastX) => lastX + FIXED_TEMPORAL_NODE_GAP <= x,
-    );
-    if (lane < 0) {
-      lane = laneEnds.length;
-      laneEnds.push(x);
-    } else {
-      laneEnds[lane] = x;
-    }
-
-    return {
-      node,
-      work,
-      year,
-      lane,
-      x,
-      y: NODES_TOP + lane * FIXED_TEMPORAL_LANE_HEIGHT,
-    };
-  });
-
-  return { nodes, laneCount: laneEnds.length };
+function stableHash(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
-function edgePath(
-  parent: PositionedNode,
-  child: PositionedNode,
-  offset = 0,
-): string {
-  const x1 = parent.x;
-  const y1 = parent.y + offset;
-  const x2 = child.x;
-  const y2 = child.y + offset;
-  const bend = Math.max(12, Math.min(96, Math.abs(x2 - x1) * 0.34));
-  return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+function mediumColor(medium: string): string {
+  const palette = [
+    "#71b7ad",
+    "#d2ad68",
+    "#8da8d8",
+    "#c98b91",
+    "#9f91c8",
+    "#7fba7d",
+    "#d19568",
+    "#72aabd",
+    "#b3a36b",
+    "#b386b5",
+  ];
+  return palette[stableHash(medium) % palette.length]!;
 }
 
 function factorBaseHue(factor: EdgeFactor): number {
@@ -120,15 +73,6 @@ function factorBaseHue(factor: EdgeFactor): number {
   if (category.includes("theme") || category.includes("topic")) return 155;
   if (category.includes("style") || category.includes("technique")) return 275;
   return 195;
-}
-
-function stableHash(value: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
 }
 
 function factorColor(factor: EdgeFactor): string {
@@ -146,8 +90,8 @@ function factorEdgeStyle(
   );
   return {
     stroke: factorColor(factor),
-    strokeWidth: 0.7 + 3.1 * Math.sqrt(ratio),
-    opacity: 0.18 + 0.76 * ratio,
+    strokeWidth: 0.7 + 3 * Math.sqrt(ratio),
+    opacity: 0.22 + 0.73 * ratio,
     strokeLinecap: "round",
     pointerEvents: "stroke",
   };
@@ -161,8 +105,34 @@ function searchRank(label: string, query: string): number {
   return Number.MAX_SAFE_INTEGER;
 }
 
-function relationLabel(edge: PositionedEdge): string {
+function relationLabel(edge: TimeNetEdge): string {
   return `${edge.parent.work.label} → ${edge.child.work.label}`;
+}
+
+function truncatedLabel(label: string, limit = 31): string {
+  return label.length > limit ? `${label.slice(0, limit - 1)}…` : label;
+}
+
+function evidenceSummary(evidence: EvolutionEdgeEvidence | null): string | null {
+  if (!evidence) return null;
+  return `${evidence.sharedFeatureCount} shared features · similarity ${evidence.score.toFixed(2)}`;
+}
+
+function nodeClassName(
+  entry: TimeNetNode,
+  selectedId: EntityId | null,
+  emphasisIds: ReadonlySet<EntityId>,
+  ancestorIds: ReadonlySet<EntityId>,
+): string {
+  return [
+    "timenet-node",
+    entry.node.parent === null ? "root" : "",
+    ancestorIds.has(entry.id) ? "ancestor" : "",
+    selectedId === entry.id ? "selected" : "",
+    selectedId && !emphasisIds.has(entry.id) ? "context" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function EvolutionView({
@@ -181,8 +151,13 @@ export function EvolutionView({
     [domain, index, settings.evolution],
   );
   const [search, setSearch] = useState("");
+  const [searchStatus, setSearchStatus] = useState("");
   const [zoom, setZoom] = useState(1);
   const [selectedId, setSelectedId] = useState<EntityId | null>(null);
+  const [branchLimit, setBranchLimit] = useState(
+    settings.evolution.visibleChildrenPerNode,
+  );
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const datedWorks = useMemo(
     () =>
@@ -192,43 +167,16 @@ export function EvolutionView({
         .sort(stableWorkOrder),
     [domain.works],
   );
-  const minimumYear = datedWorks[0]?.yearStart ?? 0;
-  const maximumYear = datedWorks[datedWorks.length - 1]?.yearStart ?? minimumYear;
-  const yearTickStep = maximumYear - minimumYear > 90 ? 10 : 5;
-  const yearTicks = useMemo(() => {
-    const first = Math.floor(minimumYear / yearTickStep) * yearTickStep;
-    const last = Math.ceil(maximumYear / yearTickStep) * yearTickStep;
-    const result: number[] = [];
-    for (let year = first; year <= last; year += yearTickStep) result.push(year);
-    return result;
-  }, [maximumYear, minimumYear, yearTickStep]);
-
-  const fixedLayout = useMemo(
-    () => buildFixedPositions(forest, domain, minimumYear),
-    [domain, forest, minimumYear],
-  );
-  const positionedById = useMemo(
-    () => new Map(fixedLayout.nodes.map((entry) => [entry.node.id, entry])),
-    [fixedLayout.nodes],
-  );
-  const edges = useMemo(() => {
-    const result: PositionedEdge[] = [];
-    for (const child of fixedLayout.nodes) {
-      if (child.node.parent === null || child.node.evidence === null) continue;
-      const parent = positionedById.get(child.node.parent);
-      if (!parent) continue;
-      result.push({
-        key: `${parent.node.id}:${child.node.id}`,
-        parent,
-        child,
-        evidence: child.node.evidence,
-      });
-    }
-    return result;
-  }, [fixedLayout.nodes, positionedById]);
-  const baseEdgePath = useMemo(
-    () => edges.map((edge) => edgePath(edge.parent, edge.child)).join(" "),
-    [edges],
+  const scene = useMemo(
+    () =>
+      buildTimeNetScene(
+        forest,
+        domain,
+        settings.evolution,
+        selectedId,
+        branchLimit,
+      ),
+    [branchLimit, domain, forest, selectedId, settings.evolution],
   );
 
   const selectedNode = selectedId ? forest.byId.get(selectedId) ?? null : null;
@@ -239,22 +187,15 @@ export function EvolutionView({
   const selectedChildren = selectedId
     ? forest.childrenByParent.get(selectedId) ?? []
     : [];
-  const selectedRelatedIds = useMemo(() => {
-    const result = new Set<EntityId>();
-    if (!selectedNode) return result;
-    if (selectedNode.parent) result.add(selectedNode.parent);
-    for (const child of selectedChildren) result.add(child.id);
-    return result;
-  }, [selectedChildren, selectedNode]);
+  const selectedPath = selectedId ? ancestorPath(forest, selectedId) : [];
   const selectedEdges = useMemo(
     () =>
       selectedId
-        ? edges.filter(
-            (edge) =>
-              edge.parent.node.id === selectedId || edge.child.node.id === selectedId,
+        ? scene.edges.filter(
+            (edge) => edge.parent.id === selectedId || edge.child.id === selectedId,
           )
         : [],
-    [edges, selectedId],
+    [scene.edges, selectedId],
   );
   const selectedFeatureEdges = useMemo<FeatureEdge[]>(
     () =>
@@ -262,26 +203,54 @@ export function EvolutionView({
         ...edge,
         factors: similarityBetween(
           index,
-          edge.parent.node.id,
-          edge.child.node.id,
+          edge.parent.id,
+          edge.child.id,
           Number.MAX_SAFE_INTEGER,
         ).topFactors,
       })),
     [index, selectedEdges],
   );
+  const selectedSceneNode = selectedId ? scene.byId.get(selectedId) ?? null : null;
+  const hiddenSelectedBranches = selectedSceneNode?.hiddenChildren ?? 0;
 
-  const width = Math.max(
-    1200,
-    timelineX(maximumYear + 1, minimumYear) + TIMELINE_RIGHT,
-  );
-  const height = Math.max(
-    640,
-    NODES_TOP + Math.max(1, fixedLayout.laneCount) * FIXED_TEMPORAL_LANE_HEIGHT + 80,
-  );
+  const mediumLegend = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const node of scene.nodes) {
+      counts.set(node.work.medium, (counts.get(node.work.medium) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .slice(0, 8);
+  }, [scene.nodes]);
+
+  function scrollToWork(id: EntityId) {
+    window.setTimeout(() => {
+      document
+        .querySelector(`[data-evolution-id="${CSS.escape(id)}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    }, 0);
+  }
+
+  function selectWork(id: EntityId) {
+    setSelectedId(id);
+    setBranchLimit(settings.evolution.visibleChildrenPerNode);
+    setSearchStatus("");
+    scrollToWork(id);
+  }
+
+  function resetOverview() {
+    setSelectedId(null);
+    setBranchLimit(settings.evolution.visibleChildrenPerNode);
+    setSearchStatus("");
+    scrollRef.current?.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+  }
 
   function reveal() {
     const query = search.trim().toLocaleLowerCase();
-    if (!query) return;
+    if (!query) {
+      setSearchStatus("Enter a work title to reveal it.");
+      return;
+    }
     const target = datedWorks
       .map((work) => ({ work, rank: searchRank(work.label, query) }))
       .filter((candidate) => candidate.rank !== Number.MAX_SAFE_INTEGER)
@@ -289,41 +258,47 @@ export function EvolutionView({
         (left, right) =>
           left.rank - right.rank || stableWorkOrder(left.work, right.work),
       )[0]?.work;
-    if (!target) return;
+    if (!target) {
+      setSearchStatus("No matching dated work.");
+      return;
+    }
 
-    setSelectedId(target.id);
-    window.setTimeout(() => {
-      document
-        .querySelector(`[data-evolution-id="${CSS.escape(target.id)}"]`)
-        ?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
-    }, 0);
+    selectWork(target.id);
+    setSearchStatus(`Focused ${target.label}.`);
   }
 
-  if (!fixedLayout.nodes.length) {
+  if (!scene.nodes.length) {
     return <section className="empty">No dated works are available.</section>;
   }
 
   return (
-    <section className="graph-view evolution-fixed-view">
-      <div className="graph-toolbar">
+    <section className="graph-view timenet-view">
+      <div className="graph-toolbar timenet-toolbar">
         <input
           type="search"
           value={search}
-          placeholder="Find a work"
-          onChange={(event: ChangeEvent<HTMLInputElement>) => setSearch(event.target.value)}
+          aria-label="Find a dated work"
+          placeholder="Find a dated work"
+          onChange={(event: ChangeEvent<HTMLInputElement>) => {
+            setSearch(event.target.value);
+            setSearchStatus("");
+          }}
           onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
             if (event.key === "Enter") reveal();
           }}
         />
         <button type="button" onClick={reveal}>
-          Reveal
+          Reveal lineage
         </button>
-        <label>
+        <button type="button" disabled={!selectedId} onClick={resetOverview}>
+          Overview
+        </button>
+        <label className="timenet-zoom">
           Zoom{" "}
           <input
             type="range"
             min="0.55"
-            max="1.8"
+            max="1.65"
             step="0.05"
             value={zoom}
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
@@ -331,119 +306,203 @@ export function EvolutionView({
             }
           />
         </label>
-        <span>
-          {fixedLayout.nodes.length.toLocaleString()} dated works ·{" "}
-          {edges.length.toLocaleString()} strongest-parent links
+        <span className="timenet-count">
+          {scene.nodes.length.toLocaleString()} in view · {datedWorks.length.toLocaleString()} dated
+        </span>
+        <span className="sr-status" aria-live="polite">
+          {searchStatus}
         </span>
       </div>
 
-      <p className="graph-help">
-        Every dated work is present at a permanent position. Horizontal position
-        is the actual start year; vertical lanes exist only to prevent marker
-        collisions. The current strongest-parent model is unchanged. Selecting a
-        work reveals independent feature strokes for its incoming and outgoing
-        links.
-      </p>
+      <div className="timenet-introduction">
+        <p className="graph-help">
+          Time runs left to right. Each colored lifeline marks a work and its
+          duration; routed joins show its inferred strongest earlier relative.
+          Select a work to preserve its ancestors, expand its descendants, and
+          retain only nearby branch context. These are similarity lineages, not
+          claims of direct historical influence.
+        </p>
+        <div className="timenet-legend" aria-label="Medium color legend">
+          {mediumLegend.map(([medium, count]) => (
+            <span key={medium}>
+              <i style={{ background: mediumColor(medium) }} />
+              {humanize(medium)} <small>{count}</small>
+            </span>
+          ))}
+        </div>
+      </div>
 
       {selectedWork ? (
-        <aside className="evolution-fixed-selection" aria-live="polite">
-          <div>
+        <aside className="timenet-selection" aria-live="polite">
+          <div className="timenet-selection-main">
+            <span className="timenet-kicker">Focused lineage</span>
             <h3>{selectedWork.label}</h3>
             <p>
               {[selectedWork.yearStart, humanize(selectedWork.medium)]
                 .filter(Boolean)
                 .join(" · ")}
             </p>
-            <p>
-              {selectedParent
-                ? `Parent: ${selectedParent.label}`
-                : "Root of an inferred branch"}
-              {` · ${selectedChildren.length} direct children`}
-            </p>
           </div>
-          <button type="button" onClick={() => onOpen(selectedWork.id)}>
-            Open record
-          </button>
+          <dl>
+            <div>
+              <dt>Earlier relative</dt>
+              <dd>{selectedParent?.label ?? "Lineage root"}</dd>
+            </div>
+            <div>
+              <dt>Lineage depth</dt>
+              <dd>{Math.max(0, selectedPath.length - 1)}</dd>
+            </div>
+            <div>
+              <dt>Direct branches</dt>
+              <dd>{selectedChildren.length}</dd>
+            </div>
+            <div>
+              <dt>Link basis</dt>
+              <dd>{evidenceSummary(selectedNode?.evidence ?? null) ?? "—"}</dd>
+            </div>
+          </dl>
+          <div className="timenet-selection-actions">
+            {hiddenSelectedBranches > 0 && branchLimit < MAX_BRANCH_LIMIT ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setBranchLimit((current) =>
+                    Math.min(MAX_BRANCH_LIMIT, current + 5),
+                  );
+                  scrollToWork(selectedWork.id);
+                }}
+              >
+                Show more branches ({hiddenSelectedBranches})
+              </button>
+            ) : null}
+            <button type="button" onClick={() => onOpen(selectedWork.id)}>
+              Open record
+            </button>
+          </div>
         </aside>
       ) : null}
 
-      <div className="graph-scroll evolution-scroll">
+      <div ref={scrollRef} className="graph-scroll timenet-scroll">
         <svg
-          className="evolution-canvas evolution-fixed-canvas"
-          width={width * zoom}
-          height={height * zoom}
-          viewBox={`0 0 ${width} ${height}`}
+          className="evolution-canvas timenet-canvas"
+          width={scene.width * zoom}
+          height={scene.height * zoom}
+          viewBox={`0 0 ${scene.width} ${scene.height}`}
           role="img"
-          aria-label="Fixed temporal similarity graph"
+          aria-labelledby="timenet-title timenet-description"
         >
-          <g className="evolution-fixed-grid">
+          <title id="timenet-title">Historical similarity lineages</title>
+          <desc id="timenet-description">
+            A chronological directed acyclic graph of dated works. Time advances
+            from left to right. Branches connect each work to its inferred strongest
+            earlier relative.
+          </desc>
+
+          <g className="timenet-time-context" aria-hidden="true">
+            {scene.yearTicks.slice(0, -1).map((year, index) => {
+              const nextYear = scene.yearTicks[index + 1]!;
+              const x = timeNetYearX(year, scene.minimumYear);
+              const nextX = timeNetYearX(nextYear, scene.minimumYear);
+              return index % 2 === 0 ? (
+                <rect
+                  key={`band:${year}`}
+                  x={x}
+                  y={TIME_AXIS_Y}
+                  width={nextX - x}
+                  height={scene.height - 108}
+                  className="timenet-period-band"
+                />
+              ) : null;
+            })}
             <line
-              x1={timelineX(minimumYear, minimumYear)}
-              y1={AXIS_Y}
-              x2={timelineX(maximumYear + 1, minimumYear)}
-              y2={AXIS_Y}
-              className="evolution-timeline-axis"
+              x1={timeNetYearX(scene.minimumYear, scene.minimumYear)}
+              y1={TIME_AXIS_Y}
+              x2={timeNetYearX(scene.maximumYear, scene.minimumYear)}
+              y2={TIME_AXIS_Y}
+              className="timenet-axis"
               vectorEffect="non-scaling-stroke"
             />
-            {yearTicks.map((year) => {
-              const x = timelineX(year, minimumYear);
+            {scene.yearTicks.map((year) => {
+              const x = timeNetYearX(year, scene.minimumYear);
               return (
                 <g key={year} transform={`translate(${x} 0)`}>
                   <line
-                    y1={AXIS_Y - 5}
-                    y2={height - 28}
-                    className="evolution-fixed-year-grid"
+                    y1={68}
+                    y2={scene.height - 28}
+                    className="timenet-year-grid"
                     vectorEffect="non-scaling-stroke"
                   />
-                  <text
-                    y={AXIS_Y - 12}
-                    textAnchor="middle"
-                    className="evolution-year-label"
-                  >
+                  <text y={57} textAnchor="middle" className="timenet-year-label">
                     {year}
                   </text>
                 </g>
               );
             })}
+            <text
+              x={timeNetYearX(scene.minimumYear, scene.minimumYear)}
+              y={27}
+              className="timenet-axis-title"
+            >
+              HISTORICAL TIME
+            </text>
+            <text
+              x={timeNetYearX(scene.maximumYear, scene.minimumYear)}
+              y={27}
+              textAnchor="end"
+              className="timenet-axis-direction"
+            >
+              EARLIER → LATER
+            </text>
           </g>
 
-          <g className="evolution-fixed-base-edges">
-            <path
-              d={baseEdgePath}
-              className="evolution-fixed-edge-cloud"
-              vectorEffect="non-scaling-stroke"
-            />
-            {selectedEdges.map((edge) => (
-              <path
-                key={`selected:${edge.key}`}
-                d={edgePath(edge.parent, edge.child)}
-                className="evolution-fixed-selected-edge"
-                style={{
-                  strokeWidth: 0.8 + 2.8 * edge.evidence.score,
-                  opacity: 0.45 + 0.5 * edge.evidence.score,
-                }}
-                vectorEffect="non-scaling-stroke"
-              >
-                <title>
-                  {`${relationLabel(edge)} · similarity ${edge.evidence.score.toFixed(2)} · ${edge.evidence.sharedFeatureCount} shared features`}
-                </title>
-              </path>
-            ))}
+          <g className="timenet-edges">
+            {scene.edges.map((edge) => {
+              const isSelected = selectedEdges.some((selected) => selected.key === edge.key);
+              const isAncestor =
+                scene.ancestorIds.has(edge.parent.id) &&
+                scene.ancestorIds.has(edge.child.id);
+              const isContext =
+                Boolean(selectedId) &&
+                (!scene.emphasisIds.has(edge.parent.id) ||
+                  !scene.emphasisIds.has(edge.child.id));
+              return (
+                <path
+                  key={edge.key}
+                  d={timeNetPath(edge.points)}
+                  className={[
+                    "timenet-edge",
+                    isAncestor ? "ancestor" : "",
+                    isSelected ? "selected" : "",
+                    isContext ? "context" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  style={{
+                    strokeWidth: 1 + 2.2 * edge.evidence.score,
+                  }}
+                  vectorEffect="non-scaling-stroke"
+                >
+                  <title>
+                    {`${relationLabel(edge)} · similarity ${edge.evidence.score.toFixed(2)} · ${edge.evidence.sharedFeatureCount} shared features`}
+                  </title>
+                </path>
+              );
+            })}
           </g>
 
-          <g className="evolution-fixed-feature-edges">
+          <g className="timenet-feature-edges">
             {selectedFeatureEdges.flatMap((edge) => {
               const strongestContribution = edge.factors[0]?.contribution ?? 1;
-              return edge.factors.map((factor, index) => {
+              return edge.factors.map((factor, factorIndex) => {
                 const offset =
                   edge.factors.length <= 1
                     ? 0
-                    : -10 + (20 * index) / (edge.factors.length - 1);
+                    : -7 + (14 * factorIndex) / (edge.factors.length - 1);
                 return (
                   <path
                     key={`${edge.key}:${factor.id}`}
-                    d={edgePath(edge.parent, edge.child, offset)}
-                    className="evolution-fixed-feature-edge"
+                    d={timeNetPath(edge.points, offset)}
+                    className="timenet-feature-edge"
                     style={factorEdgeStyle(factor, strongestContribution)}
                     vectorEffect="non-scaling-stroke"
                   >
@@ -456,68 +515,85 @@ export function EvolutionView({
             })}
           </g>
 
-          <g
-            className="evolution-fixed-points"
-            onClick={(event: MouseEvent<SVGGElement>) => {
-              const target = event.target as SVGCircleElement;
-              const id = target.dataset.evolutionId;
-              if (id) setSelectedId(id);
-            }}
-          >
-            {fixedLayout.nodes.map((entry) => {
-              const isSelected = selectedId === entry.node.id;
-              const isRelated = selectedRelatedIds.has(entry.node.id);
-              const className = [
-                "evolution-fixed-point",
-                entry.node.parent === null ? "root" : "",
-                isRelated ? "related" : "",
-                isSelected ? "selected" : "",
-                selectedId && !isSelected && !isRelated ? "dimmed" : "",
+          <g className="timenet-nodes">
+            {scene.nodes.map((entry) => {
+              const isSelected = selectedId === entry.id;
+              const durationWidth = entry.xEnd - entry.x;
+              const ariaLabel = [
+                entry.work.label,
+                entry.work.yearStart,
+                humanize(entry.work.medium),
+                entry.hiddenChildren ? `${entry.hiddenChildren} branches hidden` : null,
               ]
                 .filter(Boolean)
-                .join(" ");
+                .join(", ");
               return (
-                <circle
-                  key={entry.node.id}
-                  cx={entry.x}
-                  cy={entry.y}
-                  r={isSelected ? SELECTED_NODE_RADIUS : NODE_RADIUS}
-                  data-evolution-id={entry.node.id}
-                  className={className}
-                  vectorEffect="non-scaling-stroke"
+                <g
+                  key={entry.id}
+                  transform={`translate(${entry.x} ${entry.y})`}
+                  data-evolution-id={entry.id}
+                  className={nodeClassName(
+                    entry,
+                    selectedId,
+                    scene.emphasisIds,
+                    scene.ancestorIds,
+                  )}
+                  style={{ color: mediumColor(entry.work.medium) }}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={ariaLabel}
+                  onClick={(event: MouseEvent<SVGGElement>) => {
+                    event.stopPropagation();
+                    selectWork(entry.id);
+                  }}
+                  onDoubleClick={() => onOpen(entry.id)}
+                  onKeyDown={(event: KeyboardEvent<SVGGElement>) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      selectWork(entry.id);
+                    }
+                  }}
                 >
-                  <title>
-                    {[entry.work.label, entry.year, humanize(entry.work.medium)]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </title>
-                </circle>
+                  {isSelected ? (
+                    <circle r={SELECTED_NODE_RADIUS + 4} className="timenet-node-halo" />
+                  ) : null}
+                  <line
+                    x1={0}
+                    x2={durationWidth}
+                    className="timenet-lifeline"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <circle
+                    r={isSelected ? SELECTED_NODE_RADIUS : 3.2}
+                    className="timenet-node-marker"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  {entry.work.yearEnd !== null &&
+                  entry.work.yearEnd > (entry.work.yearStart ?? entry.work.yearEnd) ? (
+                    <circle
+                      cx={durationWidth}
+                      r={2.1}
+                      className="timenet-end-marker"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ) : null}
+                  <text x={durationWidth + 8} y={4} className="timenet-node-label">
+                    {truncatedLabel(entry.work.label)}
+                  </text>
+                  {entry.hiddenChildren > 0 ? (
+                    <text
+                      x={durationWidth + 8}
+                      y={18}
+                      className="timenet-hidden-count"
+                    >
+                      +{entry.hiddenChildren} branches
+                    </text>
+                  ) : null}
+                  <title>{ariaLabel}</title>
+                </g>
               );
             })}
           </g>
-
-          {selectedId && positionedById.has(selectedId) ? (() => {
-            const selected = positionedById.get(selectedId)!;
-            return (
-              <g
-                className="evolution-fixed-node-label"
-                transform={`translate(${selected.x + 9} ${selected.y - 10})`}
-                pointerEvents="none"
-              >
-                <rect width="238" height="42" rx="7" />
-                <text x="10" y="17" className="node-title">
-                  {selected.work.label.length > 34
-                    ? `${selected.work.label.slice(0, 33)}…`
-                    : selected.work.label}
-                </text>
-                <text x="10" y="33" className="node-meta">
-                  {[selected.year, humanize(selected.work.medium)]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </text>
-              </g>
-            );
-          })() : null}
         </svg>
       </div>
     </section>

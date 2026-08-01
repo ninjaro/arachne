@@ -9,7 +9,8 @@ current Arachne product database.
 - pagination and relevance sorting
 - browser-local like/dislike ratings
 - weighted recommendations with positive and negative explanations
-- inferred temporal Evolution forest
+- [TimeNets-inspired](https://idl.uw.edu/papers/timenets) Evolution lineages with
+  metric time, focus-plus-context expansion, and d3-dag layout and edge routing
 - rated/recommended Islands graph with disconnected components preserved
 - draggable multi-window work details
 - concepts, credits, content-guide assertions, measurements, identifiers,
@@ -71,4 +72,3 @@ viewer. Browse filters and pagination are represented in the URL query string.
 GitHub Pages cannot perform content negotiation or dynamic filtering, so the
 JSON API uses explicit `.json` resources and precomputes only the default browse
 ordering. The UI can still apply arbitrary filters locally against the catalog.
-
