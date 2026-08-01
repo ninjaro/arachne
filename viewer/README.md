@@ -9,9 +9,10 @@ current Arachne product database.
 - pagination and relevance sorting
 - browser-local like/dislike ratings
 - weighted recommendations with positive and negative explanations
-- [TimeNets-inspired](https://idl.uw.edu/papers/timenets) Evolution DAG with one
-  earliest-date point per work, nearest-later tag continuity, explicit work
-  relations, and d3-dag layout and edge routing
+- [TimeNets](https://idl.uw.edu/papers/timenets)/metro-inspired Evolution
+  storylines with tags as continuous lines,
+  works as earliest-date stations, depth-limited temporal expansion, explicit
+  relation overlays, and adaptive compressed chronology
 - rated/recommended Islands graph with disconnected components preserved
 - draggable multi-window work details
 - concepts, credits, content-guide assertions, measurements, identifiers,
@@ -25,6 +26,9 @@ From `viewer/`:
 npm run data
 npm run dev
 ```
+
+Run the viewer model tests with `npm test`; `npm run test:watch` keeps them open
+during development.
 
 The data command reads `../database/art-islands.sqlite` and writes the generated,
 ignored files `public/data/catalog.json` and `public/data/research.json`.
@@ -52,6 +56,17 @@ canonical SQLite database and is about 12 MiB for the current corpus.
 
 The SQLite database remains the source of truth. `catalog.json` and
 `research.json` are disposable viewer projections.
+
+## Evolution date contract
+
+Evolution interprets dates behind a viewer-only helper until normalized
+machine-readable dates are available. A safely validated exact day is preferred;
+month-level dates rank ahead of year-only dates; and a year-only value represents
+an interval, not an exact point. Ranged, alternative, approximate, or conflicting
+dates remain explicitly ambiguous and are never silently ordered. Only the
+earliest accepted value places a station—end dates, manifestations, reissues, and
+later refinements never extend its geometry. The database schema and ingest
+pipeline are intentionally unchanged by the viewer implementation.
 
 ## JSON-first static API
 
