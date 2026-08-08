@@ -33,7 +33,6 @@ endif()
 find_package(CURL REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(SQLite3 REQUIRED)
-find_package(rapidfuzz CONFIG REQUIRED)
 find_path(UTF8PROC_INCLUDE_DIR utf8proc.h REQUIRED)
 find_library(UTF8PROC_LIBRARY utf8proc REQUIRED)
 
@@ -71,12 +70,18 @@ target_compile_features(pheidippides_transport PUBLIC cxx_std_23)
 # Ariadne owns algorithms, projections, and the static viewer.
 add_library(ariadne_engine STATIC
     src/ariadne/candidates.cpp
+    src/ariadne/merge_hints.cpp
     src/ariadne/viewer.cpp
 )
-target_include_directories(ariadne_engine PUBLIC include)
+target_include_directories(
+    ariadne_engine
+    PUBLIC include
+    PRIVATE ${UTF8PROC_INCLUDE_DIR}
+)
 target_link_libraries(
     ariadne_engine PUBLIC arachne_common arachne_contracts
     nlohmann_json::nlohmann_json
+    PRIVATE ${UTF8PROC_LIBRARY}
 )
 target_compile_features(ariadne_engine PUBLIC cxx_std_23)
 
@@ -84,20 +89,13 @@ target_compile_features(ariadne_engine PUBLIC cxx_std_23)
 add_library(penelope_store STATIC
     src/penelope/store.cpp
     src/penelope/inbox.cpp
+    src/penelope/merge_hint_store.cpp
 )
-target_include_directories(
-    penelope_store
-    PUBLIC include
-    PRIVATE
-        ${UTF8PROC_INCLUDE_DIR}
-)
+target_include_directories(penelope_store PUBLIC include)
 target_link_libraries(
     penelope_store
     PUBLIC arachne_common arachne_contracts nlohmann_json::nlohmann_json
-    PRIVATE
-        ${ARACHNE_SQLITE_TARGET}
-        ${UTF8PROC_LIBRARY}
-        rapidfuzz::rapidfuzz
+    PRIVATE ${ARACHNE_SQLITE_TARGET}
 )
 target_compile_features(penelope_store PUBLIC cxx_std_23)
 target_compile_definitions(
@@ -194,6 +192,12 @@ if(BUILD_TESTS)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/product_inbox_tests.cpp")
         list(APPEND ARACHNE_CORE_TEST_SOURCES tests/product_inbox_tests.cpp)
     endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_hints_tests.cpp")
+        list(APPEND ARACHNE_CORE_TEST_SOURCES tests/merge_hints_tests.cpp)
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_hint_store_tests.cpp")
+        list(APPEND ARACHNE_CORE_TEST_SOURCES tests/merge_hint_store_tests.cpp)
+    endif()
 
     add_executable(core_tests ${ARACHNE_CORE_TEST_SOURCES})
     target_link_libraries(
@@ -248,6 +252,11 @@ if(BUILD_TESTS)
             tests.test_product_v5_migration -v
     )
     add_test(
+        NAME product_v6_migration_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_product_v6_migration -v
+    )
+    add_test(
         NAME viewer_research_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest
             tests.test_viewer_research -v
@@ -262,7 +271,8 @@ if(BUILD_TESTS)
         actor_boundary_tests intake_adapter_tests workflow_yaml_tests
         publication_adapter_tests
         wikidata_hpc_worker_tests source_refresh_tests
-        product_v5_migration_tests viewer_research_tests operations_cli_tests
+        product_v5_migration_tests product_v6_migration_tests
+        viewer_research_tests operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 

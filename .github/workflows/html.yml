@@ -8,11 +8,11 @@ on:
       - 'src/**/*.cpp'
       - 'include/**/*.hpp'
       - 'tests/**'
-      - 'scripts/compact_merge_hints.py'
       - 'scripts/patch_doxygen_pages.py'
       - 'viewer/**'
       - 'database/art-islands.sqlite'
       - 'database/merge-hints-review.json'
+      - 'database/merge-hint-decisions.json'
       - 'docs/**'
       - 'readme.md'
       - 'Doxyfile'
@@ -55,7 +55,6 @@ jobs:
             llvm \
             graphviz \
             libcurl4-openssl-dev \
-            librapidfuzz-cpp-dev \
             libsqlite3-dev \
             libutf8proc-dev \
             nlohmann-json3-dev

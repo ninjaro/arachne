@@ -31,7 +31,7 @@ jobs:
           python3 scripts/validate_repository.py
           yamllint .github/workflows .github/ISSUE_TEMPLATE/arachne-batch.yml
 
-      - name: Refuse disposable merge-hint state
+      - name: Validate canonical product database
         run: python3 scripts/check_product_database_clean.py
 
       - name: Validate Python and shell syntax

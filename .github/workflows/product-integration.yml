@@ -38,59 +38,11 @@ jobs:
           ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
 
-      - name: Validate strict inbox batches
-        run: build/arachne product check-inbox
+      - name: Validate and apply strict inbox batches
+        run: build/arachne product check-inbox apply-inbox
 
-      - name: Apply strict inbox batches
-        run: build/arachne product apply-inbox
-
-      - name: Detect product changes
-        id: product
-        run: |
-          if git diff --quiet -- database/art-islands.sqlite; then
-            echo "changed=false" >> "${GITHUB_OUTPUT}"
-          else
-            echo "changed=true" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Rebuild merge hints for review export
-        if: steps.product.outputs.changed == 'true'
-        run: build/arachne product rebuild-merge-hints
-
-      - name: Export review hints and compact derived state
-        if: steps.product.outputs.changed == 'true'
-        run: |
-          python3 scripts/compact_merge_hints.py \
-            database/art-islands.sqlite \
-            database/merge-hints-review.json \
-            --minimum-score 0.65 \
-            --per-type 500 \
-            --per-entity 5 \
-            --report "${RUNNER_TEMP}/merge-hints-compaction.json"
-
-      - name: Add compaction summary
-        if: steps.product.outputs.changed == 'true'
-        run: |
-          python3 - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
-          import json
-          import os
-          from pathlib import Path
-
-          report = json.loads(
-              Path(os.environ["RUNNER_TEMP"], "merge-hints-compaction.json")
-              .read_text(encoding="utf-8")
-          )
-          before = report["before"]["bytes"]
-          after = report["after"]["bytes"]
-          print("## Merge hint compaction")
-          print()
-          print(f"- Review items: {report['reviewItems']}")
-          print(f"- Database before: {before} bytes")
-          print(f"- Database after: {after} bytes")
-          print(f"- Reduction: {before - after} bytes")
-          print("- Integrity check: ok")
-          print("- Foreign key check: ok")
-          PY
+      - name: Rebuild and export disposable merge hints
+        run: build/arachne product rebuild-merge-hints export-merge-hints
 
       - name: Propose the database change for review
         env:

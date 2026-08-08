@@ -256,6 +256,7 @@ class OperationsCliTests(unittest.TestCase):
                 "product-check-inbox",
                 "product-apply-inbox",
                 "product-rebuild-merge-hints",
+                "product-export-merge-hints",
                 "candidate-plan",
                 "candidate-rebuild",
                 "viewer-build",
@@ -271,6 +272,15 @@ class OperationsCliTests(unittest.TestCase):
                 result = self.run_cli("product", command, *unexpected)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertTrue(result.stderr.strip())
+
+    def test_product_queue_rejects_unknown_task_before_execution(self) -> None:
+        result = self.run_cli(
+            "product", "check-inbox", "not-a-product-task"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown product task", result.stderr)
+        self.assertFalse(result.stdout.strip())
 
     def test_contract_validate_reports_valid_and_invalid_documents(self) -> None:
         batch = self.valid_batch()

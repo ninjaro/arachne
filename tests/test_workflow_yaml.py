@@ -95,15 +95,21 @@ class WorkflowYamlTests(unittest.TestCase):
 
     def test_product_workflow_uses_fixed_inbox_commands_in_order(self) -> None:
         text = (WORKFLOWS / "product-integration.yml").read_text(encoding="utf-8")
-        check = "build/arachne product check-inbox"
-        apply = "build/arachne product apply-inbox"
-        self.assertIn(check, text)
-        self.assertIn(apply, text)
-        self.assertLess(text.index(check), text.index(apply))
+        product_tasks = "build/arachne product check-inbox apply-inbox"
+        hint_tasks = (
+            "build/arachne product rebuild-merge-hints export-merge-hints"
+        )
+        self.assertIn(product_tasks, text)
+        self.assertIn(hint_tasks, text)
+        self.assertLess(text.index(product_tasks), text.index(hint_tasks))
         for obsolete in (
             "product-integrate",
             "import-normalized",
             "cleanup_merged_inbox.py",
+            "compact_merge_hints.py",
+            "--minimum-score",
+            "--per-type",
+            "--per-entity",
             "--database",
             "--manifest",
             "--apply",

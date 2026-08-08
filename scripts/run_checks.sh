@@ -5,8 +5,7 @@ source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="${ARACHNE_BUILD_DIR:-${source_root}/build}"
 
 python3 "${source_root}/scripts/validate_repository.py"
-python3 "${source_root}/scripts/check_product_database_clean.py" \
-  "${source_root}/database/art-islands.sqlite"
+python3 "${source_root}/scripts/check_product_database_clean.py"
 yamllint \
   "${source_root}/.github/workflows" \
   "${source_root}/.github/ISSUE_TEMPLATE/arachne-batch.yml"

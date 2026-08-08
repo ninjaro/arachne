@@ -12,6 +12,7 @@ on:
       - 'scripts/**/*.py'
       - 'viewer/**'
       - 'database/merge-hints-review.json'
+      - 'database/merge-hint-decisions.json'
       - 'hpc/**/*.py'
       - 'hpc/**/*.json'
       - 'contracts/**/*.json'
@@ -35,7 +36,6 @@ jobs:
           sudo apt-get install -y \
             libcxxopts-dev \
             nlohmann-json3-dev \
-            librapidfuzz-cpp-dev \
             libsqlite3-dev \
             libutf8proc-dev \
             libcurl4-openssl-dev

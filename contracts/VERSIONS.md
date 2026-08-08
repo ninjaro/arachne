@@ -79,6 +79,13 @@ artifacts always use the original referenced bytes instead.
 The following are data-file formats, not actor-boundary contract names and not
 members of the C++ `contract_name` enumeration:
 
+- `arachne_merge_hint_decisions_v1` is the durable, closed list of canonical
+  ignored entity pairs. Its exact file bytes and ignored-pair count identify the
+  human decisions used by a merge-hint rebuild.
+- `arachne_merge_hint_review_v1` is the disposable, bounded viewer projection of
+  selected merge hints. Its source identity binds the projection to the exact
+  product-database SHA-256 and to the decision artifact's SHA-256 and pair
+  count; it is never product-database state.
 - `external_candidate_source_graph_v1` is Ariadne's compact, untrusted input
   adjacency for one immutable external source snapshot. It is not a product
   graph contract and cannot introduce accepted research claims.
@@ -96,8 +103,11 @@ members of the C++ `contract_name` enumeration:
   medium/year/evidence, soft-guidance, or UI-style data.
 
 Legacy normalized imports and unresolved JSONL formats are not active contracts.
-Routine inbox processing mutates product schema v5 directly and records
-idempotency, ingest issues, and review-only merge hints in that database.
+Routine inbox processing mutates product schema v6 directly and records only
+canonical product state, batch idempotency, and durable ingest issues. Merge
+hints are a disposable Ariadne projection with an explicit review artifact;
+only ignored-pair decisions are durable, and neither artifact is part of the
+product database contract.
 
 ## Compatibility policy
 

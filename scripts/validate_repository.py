@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -221,6 +222,105 @@ def check_repository_surface(root: Path) -> None:
         )
 
 
+def check_merge_hint_decisions(root: Path) -> None:
+    path = root / "database" / "merge-hint-decisions.json"
+    document = load_json(path)
+    require(isinstance(document, dict), f"{path}: root must be an object")
+    require(
+        set(document) == {"artifact_type", "format_version", "ignored_pairs"},
+        f"{path}: decisions artifact must be closed",
+    )
+    require(
+        document.get("artifact_type") == "arachne_merge_hint_decisions_v1",
+        f"{path}: wrong artifact_type",
+    )
+    require(
+        type(document.get("format_version")) is int
+        and document["format_version"] == 1,
+        f"{path}: format_version must be integer 1",
+    )
+    pairs = document.get("ignored_pairs")
+    require(isinstance(pairs, list), f"{path}: ignored_pairs must be an array")
+    identities: list[tuple[str, str, str]] = []
+    for index, pair in enumerate(pairs):
+        require(
+            isinstance(pair, dict)
+            and set(pair) == {"family", "left_id", "right_id"},
+            f"{path}: ignored_pairs[{index}] must be a closed identity object",
+        )
+        family = pair.get("family")
+        left = pair.get("left_id")
+        right = pair.get("right_id")
+        require(
+            family in {"agent", "work", "concept"}
+            and isinstance(left, str)
+            and isinstance(right, str)
+            and bool(left)
+            and left < right,
+            f"{path}: ignored_pairs[{index}] has invalid canonical identity",
+        )
+        identities.append((family, left, right))
+    require(
+        identities == sorted(set(identities)),
+        f"{path}: ignored pairs must be unique and canonically sorted",
+    )
+
+
+def check_merge_hint_decision_references(root: Path) -> None:
+    """Verify ignored-pair identities against the canonical product database.
+
+    Keep this check separate from ``check_merge_hint_decisions`` so callers can
+    validate an artifact's closed shape and canonical ordering without needing
+    a product database fixture.
+    """
+
+    check_merge_hint_decisions(root)
+    decisions_path = root / "database" / "merge-hint-decisions.json"
+    database_path = root / "database" / "art-islands.sqlite"
+    require(
+        database_path.is_file(),
+        f"missing canonical product database: {database_path}",
+    )
+    document = load_json(decisions_path)
+    family_tables = {
+        "agent": "agents",
+        "work": "works",
+        "concept": "concepts",
+    }
+    try:
+        connection = sqlite3.connect(
+            f"{database_path.resolve().as_uri()}?mode=ro", uri=True
+        )
+        try:
+            known: dict[tuple[str, str], bool] = {}
+            for index, pair in enumerate(document["ignored_pairs"]):
+                family = pair["family"]
+                table = family_tables[family]
+                for side in ("left_id", "right_id"):
+                    entity_id = pair[side]
+                    identity = (family, entity_id)
+                    exists = known.get(identity)
+                    if exists is None:
+                        exists = (
+                            connection.execute(
+                                f"SELECT 1 FROM {table} WHERE entity_id = ?",
+                                (entity_id,),
+                            ).fetchone()
+                            is not None
+                        )
+                        known[identity] = exists
+                    require(
+                        exists,
+                        f"{decisions_path}: ignored_pairs[{index}].{side} "
+                        f"does not reference an existing canonical {family}: "
+                        f"{entity_id}",
+                    )
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise CheckFailure(f"{database_path}: {error}") from error
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
@@ -240,6 +340,7 @@ def main() -> int:
         check_artifacts(root)
         check_configuration(root)
         check_repository_surface(root)
+        check_merge_hint_decision_references(root)
     except CheckFailure as error:
         print(f"repository validation failed: {error}", file=sys.stderr)
         return 2

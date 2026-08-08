@@ -12,6 +12,9 @@ Bots and operators use fixed paths relative to the repository root:
 inbox/
 inbox/rejected/
 database/art-islands.sqlite
+database/merge-hints-review.json
+database/merge-hint-decisions.json
+.arachne/tmp/merge-hints.sqlite
 build/arachne
 ```
 
@@ -27,16 +30,18 @@ Validate and apply pending batches:
 build/arachne product apply-inbox
 ```
 
-Neither command accepts positional arguments, path options, an `--apply` flag,
-or a configuration file. `check-inbox` is always read-only. `apply-inbox`
-always applies eligible batches.
+Product task names form a fixed ordered queue; they are the only positional
+values after `product`. No task accepts path options, an `--apply` flag, policy
+thresholds, or a configuration file. `check-inbox` is always read-only.
+`apply-inbox` always applies eligible batches and never maintains merge hints.
 
 The repository Issue Form accepts one `.json` attachment. Its workflow acquires
 the bytes through Pheidippides, places them at the fixed `inbox/` path, runs
 `check-inbox`, and proposes the validated file in a pull request. It never
 applies the database in the intake job. After that pull request is merged, the
 separately serialized product-integration workflow runs `check-inbox` followed
-by `apply-inbox` and proposes the resulting database change for review.
+by `apply-inbox`, then explicitly rebuilds and exports the disposable merge-hint
+projection. It proposes the product change and review JSON for review.
 
 Only plain UTF-8 JSON files are accepted. Each file contains exactly one batch
 object. ZIP files, archive members, sidecars, CSV, Markdown, hashes, run
@@ -230,7 +235,7 @@ strict validation
   -> BEGIN IMMEDIATE
   -> allocate readable canonical IDs
   -> create, update, delete, and merge
-  -> maintain issues and merge hints
+  -> maintain ingest issues
   -> PRAGMA foreign_key_check
   -> insert applied_batches row
   -> COMMIT
@@ -238,10 +243,10 @@ strict validation
 ```
 
 Any constraint failure, unresolved reference, conflicting update, invalid
-merge, hint-maintenance failure, foreign-key error, or database error rolls
-back that complete batch. No successful inbox file is deleted before commit.
-An inbox file is also retained if it changed after being read, even if its
-original bytes were applied successfully.
+merge, foreign-key error, or database error rolls back that complete batch. No
+successful inbox file is deleted before commit. An inbox file is also retained
+if it changed after being read, even if its original bytes were applied
+successfully.
 
 The canonical SQLite file is updated in place for routine inbox application.
 There is no normalized-manifest generation, accumulated unresolved JSONL,
@@ -291,32 +296,56 @@ Open issues cannot be deleted. Old unresolved JSONL rows are not migrated.
 
 ## Merge hints
 
-`merge_hints` contains review candidates only. Each agent, work, or concept
-pair is stored once in canonical ID order, with a combined score, component
-scores, machine-readable signals, and either `open` or `ignored` status.
-Ignored pairs are retained so incremental recalculation does not recreate
-them.
+The canonical product database has no merge-hint, block, or block-membership
+tables. Hint generation is deterministic, disposable Ariadne work and never
+runs as part of `apply-inbox`.
 
-Candidate generation uses normalized labels and bounded blocking keys rather
-than comparing every possible pair. The disposable derived index stores block
-keys once and compact integer-key memberships separately. Exact fingerprints,
-multiple rare title trigrams, shared graph neighbors, and normalized external
-identifiers supply candidates. Work date and medium blocks always include a
-normalized title fingerprint or trigram; a year or medium alone never creates
-a quadratic candidate block. Over-common blocks are skipped before scoring.
+Run the fixed tasks explicitly after product work:
 
-Creating, updating, or merging an entity refreshes only its derived memberships
-and open hints, in the same transaction as the product change. The first
-affected batch after a v4-to-v5 migration bootstraps empty derived tables using
-the same C++ Unicode normalization as normal intake. Deleting a merged member
-cascades its memberships and hints. Derived blocks are candidate-lookup data,
-not product provenance or compatibility metadata.
+```sh
+build/arachne product rebuild-merge-hints export-merge-hints
+```
 
-Text and graph scores only order the review queue; a blocked pair is not
-discarded because its combined score is low. No score, including an exact
-fingerprint match, performs an automatic merge. Every actual merge must arrive
-in a later explicit `arachne_batch_v2` batch.
+Rebuild creates `.arachne/tmp/merge-hints.sqlite` as writable `main` and attaches
+`database/art-islands.sqlite` read-only as `product`. Canonical entities, names,
+identifiers, credits, works, concepts, assertions, and measurements are queried
+through `product.*`; they are not copied into the temporary database. Only
+blocks, memberships, supported candidate pairs, deterministic signals, scores,
+temporary indexes, and review-distribution statistics are stored there. No
+cross-database foreign keys are required.
 
-`build/arachne product rebuild-merge-hints` replaces all derived block
-definitions, memberships, and open hints while preserving ignored pairs. Run it
-after direct/offline SQL edits that bypass inbox maintenance.
+The temporary metadata records the product schema version, exact product
+SHA-256, merge-hint generator/schema version, and the exact durable-decision
+artifact SHA-256. `export-merge-hints` refuses missing or stale state and never
+performs a hidden rebuild. A successful export atomically writes
+`database/merge-hints-review.json`, includes the product hash, and deletes the
+temporary database.
+
+Ignored human decisions survive disposable rebuilds in the fixed, versioned
+`database/merge-hint-decisions.json` artifact. Its closed form is:
+
+```json
+{"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[{"family":"work","left_id":"work-000001","right_id":"work-000002"}]}
+```
+
+Pairs use canonical ID order, are unique and sorted, and may use only the
+`agent`, `work`, or `concept` family. The repository validator checks this file
+before integration. Rebuild incorporates it into Ariadne input; export fails if
+the file changes after that rebuild.
+
+Text normalization keeps ordered normalized text separate from a sorted token
+fingerprint. Ordered edit and character-trigram similarity therefore cannot
+turn a strict title subset into a perfect match merely because its tokens are a
+subset. Explicit installment markers partition different parts or volumes
+before fuzzy scoring. High-frequency generic labels require an independent
+identity anchor. Exact normalized external identifiers, rare exact names,
+matching creator/title context, comparable measurements, credited roles, and
+shared assertion provenance provide typed positive evidence; graph overlap by
+itself is not identity evidence.
+
+Strong identity candidates remain reviewable. The fuzzy tail uses deterministic
+family-specific score distributions rather than operator-supplied thresholds or
+fixed per-entity caps. The exported messages explain the positive reasons for
+selection and preserve machine-readable component signals. Hints are advisory:
+no score or signal performs a merge, and every identity change must arrive in a
+later explicit `arachne_batch_v2` batch.

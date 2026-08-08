@@ -30,10 +30,21 @@ npm run dev
 Run the viewer model tests with `npm test`; `npm run test:watch` keeps them open
 during development.
 
-The data command reads `../database/art-islands.sqlite` and writes the generated,
-ignored files `public/data/catalog.json` and `public/data/research.json`.
-Research data comes directly from the schema-v5 `ingest_issues` and
-`merge_hints` tables; only open rows are included in the review queue.
+The data command reads three explicit inputs:
+
+- `../database/art-islands.sqlite`, the schema-v6 product database;
+- `../database/merge-hints-review.json`, the disposable bounded hint
+  projection; and
+- `../database/merge-hint-decisions.json`, the durable ignored-pair decisions.
+
+It then writes the generated, ignored files `public/data/catalog.json` and
+`public/data/research.json`. Ingest issues come from the product database, while
+merge-hint content comes only from the review artifact. The review's source
+identity must match both the product bytes used for the catalog and the exact
+decision artifact: its `productSha256` must match the catalog database hash,
+and its `decisionsSha256` and `ignoredPairCount` must match the decision file's
+byte hash and ignored-pair count. A missing or stale review or decision artifact
+is an error rather than a database fallback.
 
 Open the Vite URL printed by the command, normally `http://localhost:5173/`.
 

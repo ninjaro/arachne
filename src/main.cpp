@@ -2,8 +2,10 @@
 #include "arachne/coordinator.hpp"
 #include "arachne/crypto.hpp"
 #include "ariadne/candidates.hpp"
+#include "ariadne/merge_hints.hpp"
 #include "ariadne/viewer.hpp"
 #include "penelope/inbox.hpp"
+#include "penelope/merge_hint_store.hpp"
 #include "penelope/store.hpp"
 #include "pheidippides/hardened_transport.hpp"
 #include "pheidippides/transport.hpp"
@@ -1294,13 +1296,15 @@ int command_inbox_verify(const options& arguments) {
     return 0;
 }
 
-int command_product_inbox(const bool apply) {
+struct product_task_result final {
+    ordered_json document;
+    int exit_code {};
+};
+
+[[nodiscard]] product_task_result command_product_inbox(const bool apply) {
     const auto result = apply
         ? arachne::penelope::apply_product_inbox(repository_root())
         : arachne::penelope::check_product_inbox(repository_root());
-    if (apply) {
-        arachne::penelope::compact_product_merge_hints(repository_root());
-    }
     ordered_json batches = ordered_json::array();
     for (const auto& batch : result.batches) {
         ordered_json issues = ordered_json::array();
@@ -1326,32 +1330,147 @@ int command_product_inbox(const bool apply) {
             }
         );
     }
-    emit(
-        ordered_json {
+    return {
+        .document = {
+            { "task", apply ? "apply-inbox" : "check-inbox" },
             { "status", result.ok ? "ok" : "fail" },
-            { "command",
-              apply ? "product-apply-inbox" : "product-check-inbox" },
             { "valid_count", result.valid_count },
             { "applied_count", result.applied_count },
             { "already_applied_count", result.already_applied_count },
             { "rejected_count", result.rejected_count },
             { "batches", std::move(batches) },
-        }
-    );
-    return result.ok ? 0 : 3;
+        },
+        .exit_code = result.ok ? 0 : 3,
+    };
 }
 
-int command_product_rebuild_merge_hints() {
-    const std::size_t count
-        = arachne::penelope::rebuild_product_merge_hints(repository_root());
+[[nodiscard]] product_task_result command_product_rebuild_merge_hints() {
+    const json input
+        = arachne::penelope::prepare_merge_hint_rebuild(
+            repository_root(),
+            arachne::ariadne::merge_hint_generator_version
+        );
+    const json projection
+        = arachne::ariadne::merge_hint_planner::build(input);
+    arachne::penelope::store_merge_hint_projection(
+        repository_root(), projection
+    );
+    const auto selected = static_cast<std::size_t>(std::ranges::count_if(
+        projection.at("candidates"), [](const json& value) {
+            return value.value("selected", false);
+        }
+    ));
+    return {
+        .document = {
+            { "task", "rebuild-merge-hints" },
+            { "status", "ok" },
+            { "candidate_count", projection.at("candidates").size() },
+            { "selected_count", selected },
+            { "product_sha256",
+              projection.at("product_snapshot").at("sha256") },
+        },
+        .exit_code = 0,
+    };
+}
+
+[[nodiscard]] product_task_result command_product_export_merge_hints() {
+    const json projection
+        = arachne::penelope::load_merge_hint_export(
+            repository_root(),
+            arachne::ariadne::merge_hint_generator_version
+        );
+    const json review
+        = arachne::ariadne::merge_hint_planner::export_review(projection);
+    const fs::path destination
+        = arachne::penelope::merge_hint_review_path(repository_root());
+    atomic_write(
+        destination, arachnespace::contracts::canonical_json(review) + "\n",
+        true
+    );
+    arachne::penelope::discard_merge_hint_store(repository_root());
+    return {
+        .document = {
+            { "task", "export-merge-hints" },
+            { "status", "ok" },
+            { "review_count", review.at("items").size() },
+            { "artifact_path",
+              destination.lexically_relative(repository_root())
+                  .generic_string() },
+            { "product_sha256",
+              review.at("source").at("productSha256") },
+        },
+        .exit_code = 0,
+    };
+}
+
+enum class product_task {
+    check_inbox,
+    apply_inbox,
+    rebuild_merge_hints,
+    export_merge_hints,
+};
+
+[[nodiscard]] product_task parse_product_task(const std::string_view value) {
+    if (value == "check-inbox") {
+        return product_task::check_inbox;
+    }
+    if (value == "apply-inbox") {
+        return product_task::apply_inbox;
+    }
+    if (value == "rebuild-merge-hints") {
+        return product_task::rebuild_merge_hints;
+    }
+    if (value == "export-merge-hints") {
+        return product_task::export_merge_hints;
+    }
+    throw cli_error("unknown product task: " + std::string(value));
+}
+
+int command_product_queue(const std::vector<std::string>& arguments) {
+    if (arguments.size() < 3U) {
+        throw cli_error("at least one product task is required");
+    }
+    std::vector<product_task> tasks;
+    tasks.reserve(arguments.size() - 2U);
+    for (std::size_t index = 2U; index < arguments.size(); ++index) {
+        if (arguments[index].starts_with('-')) {
+            throw cli_error("product tasks do not accept command-line flags");
+        }
+        tasks.push_back(parse_product_task(arguments[index]));
+    }
+
+    ordered_json results = ordered_json::array();
+    int exit_code = 0;
+    for (const product_task task : tasks) {
+        product_task_result result;
+        switch (task) {
+        case product_task::check_inbox:
+            result = command_product_inbox(false);
+            break;
+        case product_task::apply_inbox:
+            result = command_product_inbox(true);
+            break;
+        case product_task::rebuild_merge_hints:
+            result = command_product_rebuild_merge_hints();
+            break;
+        case product_task::export_merge_hints:
+            result = command_product_export_merge_hints();
+            break;
+        }
+        exit_code = result.exit_code;
+        results.push_back(std::move(result.document));
+        if (exit_code != 0) {
+            break;
+        }
+    }
     emit(
         ordered_json {
-            { "status", "ok" },
-            { "command", "product-rebuild-merge-hints" },
-            { "candidate_count", count },
+            { "command", "product" },
+            { "status", exit_code == 0 ? "ok" : "fail" },
+            { "tasks", std::move(results) },
         }
     );
-    return 0;
+    return exit_code;
 }
 
 int command_candidate_rebuild(const options& arguments) {
@@ -2111,7 +2230,7 @@ int command_viewer_build(const options& arguments) {
             "contract-validate", "fetch", "fetch-plan-translate",
             "inbox-baseline", "inbox-verify", "intake",
             "product-check-inbox", "product-apply-inbox",
-            "product-rebuild-merge-hints",
+            "product-rebuild-merge-hints", "product-export-merge-hints",
             "viewer-build" } },
     };
 }
@@ -2153,20 +2272,8 @@ int dispatch(const std::vector<std::string>& arguments) {
         && arguments[2] == "verify") {
         return command_inbox_verify(options(arguments, 3U, { "--config" }));
     }
-    if (arguments[1] == "product" && arguments.size() >= 3U
-        && arguments[2] == "check-inbox") {
-        static_cast<void>(options(arguments, 3U, {}));
-        return command_product_inbox(false);
-    }
-    if (arguments[1] == "product" && arguments.size() >= 3U
-        && arguments[2] == "apply-inbox") {
-        static_cast<void>(options(arguments, 3U, {}));
-        return command_product_inbox(true);
-    }
-    if (arguments[1] == "product" && arguments.size() >= 3U
-        && arguments[2] == "rebuild-merge-hints") {
-        static_cast<void>(options(arguments, 3U, {}));
-        return command_product_rebuild_merge_hints();
+    if (arguments[1] == "product") {
+        return command_product_queue(arguments);
     }
     if (arguments[1] == "candidate" && arguments.size() >= 3U
         && arguments[2] == "rebuild") {

@@ -29,9 +29,11 @@ operations. Unknown fields and legacy batch variants are rejected. See
 
 All external operations enter through Arachne. Pheidippides is the sole transport
 implementation and returns bytes plus evidence; delivery means only that bytes
-arrived. Ariadne produces declarative plans and projections. Penelope alone writes
-either graph. One process may host all actors, but cross-actor data still uses
-versioned contracts rather than private storage access.
+arrived. Ariadne produces declarative plans and projections. Penelope alone
+writes the canonical product and candidate graphs; Ariadne's merge-hint
+calculations use only disposable derived state. One process may host all actors,
+but cross-actor data still uses versioned contracts rather than private storage
+access.
 
 Pheidippides has an internal, declarative door registry rather than source logic.
 Global defaults are narrowed or overridden per door and endpoint before network
@@ -54,7 +56,8 @@ falls back to stale bytes.
 | Remainders | Arachne | Reserved for future untransferred portions; currently unused because no schema exists |
 | Operational state | Arachne | Queue/run coordination; permanent per-batch audit metadata is not required |
 | Product inbox | Penelope | Strict JSON files at repository `inbox/`; successful files are removed only after commit and rejected files move to `inbox/rejected/` |
-| Product SQLite | Penelope | `database/art-islands.sqlite`; schema v5 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, ingest issues, and review-only merge hints |
+| Product SQLite | Penelope | `database/art-islands.sqlite`; schema v6 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, and ingest issues, with no disposable merge-hint state |
+| Merge-hint projection | Ariadne | `.arachne/tmp/merge-hints.sqlite` is disposable generation state; `database/merge-hints-review.json` is the small hash-bound review projection; `database/merge-hint-decisions.json` durably preserves ignored pairs |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
 
@@ -103,15 +106,21 @@ the inbox file is deleted. A rejected batch is recorded as structured
 `ingest_issues` rows and moved to `inbox/rejected/`. A previously applied,
 structurally valid batch is not replayed.
 
-Schema v5 stores readable `agent-*`, `work-*`, `concept-*`, and
+Schema v6 stores readable `agent-*`, `work-*`, `concept-*`, and
 `manifestation-*` IDs. Internal and relationship rows use integer primary keys
 with natural uniqueness constraints. It has no redirect, canonical-ID alias,
 source-URL alias, remote-asset, source-archive, or legacy-ID mapping tables.
-Similarity calculations populate `merge_hints` for human review only; an actual
-merge always requires an explicit batch operation. A disposable normalized
-block dictionary and integer-key membership index make routine hint refresh
-affected-entity-only; the separate full rebuild reconstructs that derived index
-and all open hints while retaining ignored pairs.
+It also has no merge-hint candidates, blocks, or block memberships. A normal
+batch transaction never performs similarity calculations or hint maintenance.
+
+Merge hints are an explicit Ariadne projection. Rebuild opens a disposable
+SQLite database as writable `main`, attaches the canonical product database
+read-only, and reads canonical rows through the attached `product` schema. The
+temporary database contains only blocks, candidate support, scores, signals,
+and distribution statistics. Its metadata binds the generator version to the
+exact product schema version and SHA-256. Export refuses missing or stale state,
+writes the fixed review JSON, and removes the temporary database after success.
+No hint can perform a merge; identity changes still require an explicit batch.
 
 ## Candidate graph and viewer
 

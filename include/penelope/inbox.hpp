@@ -62,19 +62,10 @@ check_product_inbox(const std::filesystem::path& repository_root);
 
 /**
  * Validate every pending batch first, then apply valid batches directly to the
- * schema-v5 product database, one BEGIN IMMEDIATE transaction per batch.
+ * schema-v6 product database, one BEGIN IMMEDIATE transaction per batch.
  */
 [[nodiscard]] inbox_result
 apply_product_inbox(const std::filesystem::path& repository_root);
-
-/** Rebuild review-only merge hints without merging any entity. */
-[[nodiscard]] std::size_t
-rebuild_product_merge_hints(const std::filesystem::path& repository_root);
-
-/** Remove disposable open merge hints and blocking state, then VACUUM. */
-void compact_product_merge_hints(
-    const std::filesystem::path& repository_root
-);
 
 [[nodiscard]] const char* to_string(inbox_batch_status status) noexcept;
 

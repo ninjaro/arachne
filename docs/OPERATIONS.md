@@ -36,6 +36,7 @@ python3 scripts/arachne_ops.py capabilities
 | `product-check-inbox` | `arachne product check-inbox` |
 | `product-apply-inbox` | `arachne product apply-inbox` |
 | `product-rebuild-merge-hints` | `arachne product rebuild-merge-hints` |
+| `product-export-merge-hints` | `arachne product export-merge-hints` |
 | `candidate-plan` | `arachne candidate plan --config CONFIG --external-graph JSON --product-snapshot PRODUCT_SNAPSHOT_CONTROL --output-artifact PATH --output-control PATH` |
 | `candidate-rebuild` | `arachne candidate rebuild --config CONFIG --plan-control FILE --run-id ID` |
 | `viewer-build` | `arachne viewer build --config CONFIG --product-snapshot CONTROL [--candidate-snapshot CONTROL]` |
@@ -100,6 +101,9 @@ The product paths are part of the repository contract:
 ```text
 inbox/
 database/art-islands.sqlite
+database/merge-hints-review.json
+database/merge-hint-decisions.json
+.arachne/tmp/merge-hints.sqlite
 build/arachne
 ```
 
@@ -115,24 +119,36 @@ The authorized writer applies the same validated set directly:
 build/arachne product apply-inbox
 ```
 
-Neither command accepts positional arguments, path options, or `--apply`.
-`check-inbox` never writes. `apply-inbox` uses one immediate transaction per
-batch, records the batch ID in that transaction, checks foreign keys before
-commit, and deletes the source file only after commit. Rejected files move to
-`inbox/rejected/`, with concrete problems stored in `ingest_issues`.
+Names after `product` form a fixed ordered task queue. They are not paths or
+arbitrary positional values, and product tasks accept no path or policy flags:
 
-Explicit merge operations are authoritative after validation. Similarity
-calculations only maintain review candidates in `merge_hints`; they never mutate
-entity identity. See [Product inbox](PRODUCT_INBOX.md) for the closed format and
-operation details.
+```sh
+build/arachne product check-inbox apply-inbox \
+  rebuild-merge-hints export-merge-hints
+```
 
-Routine batches refresh only affected derived block memberships and hints. After
-direct/offline product SQL edits, reconstruct the complete derived block index
-and all open hints (ignored decisions are retained):
+Tasks execute strictly in the written order and stop on failure. `check-inbox`
+never writes. `apply-inbox` uses one immediate transaction per batch, records
+the batch ID in that transaction, checks foreign keys before commit, and deletes
+the source file only after commit. Rejected files move to `inbox/rejected/`,
+with concrete problems stored in `ingest_issues`.
+
+Explicit merge operations are authoritative after validation. Normal product
+batches do not create, update, delete, rebuild, or compact merge hints. Rebuild
+is an explicit Ariadne-derived operation against the completed product state:
 
 ```sh
 build/arachne product rebuild-merge-hints
+build/arachne product export-merge-hints
 ```
+
+Rebuild writes only `.arachne/tmp/merge-hints.sqlite` and leaves the canonical
+database bytes unchanged. Export never rebuilds implicitly: it rejects missing
+temporary state, a generator-version mismatch, a product SHA-256 mismatch, or
+a changed `database/merge-hint-decisions.json` decision artifact.
+On success it atomically writes `database/merge-hints-review.json` and removes
+the temporary database. See [Product inbox](PRODUCT_INBOX.md) for the closed
+batch format and complete derived-hint lifecycle.
 
 The canonical product database must be tracked through Git LFS. Before
 initializing a repository:
@@ -216,7 +232,7 @@ branches and never push the base directly.
 |---|---|---|
 | `validation.yml` | Read-only contracts, scripts, unit/build tests | `scripts/run_checks.sh` |
 | `intake.yml` | Acquire one issue attachment, materialize and validate a strict product batch, then propose the inbox file | `issue_fetch_request.py`, `arachne_ops.py fetch`, `materialize_product_batch.py`, `build/arachne product check-inbox` |
-| `product-integration.yml` | Validate and transactionally apply repository inbox batches, then propose the database change | `build/arachne product check-inbox`, then `build/arachne product apply-inbox` |
+| `product-integration.yml` | Validate and transactionally apply inbox batches, then explicitly rebuild and export the separate merge-hint projection | `build/arachne product check-inbox apply-inbox`, then `build/arachne product rebuild-merge-hints export-merge-hints` |
 | `candidate-rebuild.yml` | Ariadne plan or HPC handoff; Penelope rebuild | `arachne_ops.py candidate-plan/candidate-rebuild` |
 | `source-refresh.yml` | Cadence-gated bulk acquisition, streaming HPC graph, full candidate rebuild | `source_refresh_gate.py`, `fetch-plan-translate`, `hpc/wikidata/build_external_graph.py` |
 | `publication.yml` | Protected, verified immutable Pages artifact | `arachne_ops.py viewer-build`, then `resolve_site_bundle.py` |

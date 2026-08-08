@@ -68,9 +68,9 @@ def build_catalog(database: Path) -> dict[str, Any]:
         raise RuntimeError(f"database quick_check failed: {integrity}")
 
     user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if user_version != 5:
+    if user_version != 6:
         raise RuntimeError(
-            f"unsupported product schema version {user_version}; expected 5"
+            f"unsupported product schema version {user_version}; expected 6"
         )
 
     preferred_names: dict[str, str] = {}

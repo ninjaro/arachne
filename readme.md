@@ -78,9 +78,24 @@ python3 scripts/arachne_ops.py capabilities
 ```
 
 The local adapter negotiates the advertised capabilities it uses for actor
-operations. Product-database intake deliberately bypasses configurable adapters:
-the only normal commands are `build/arachne product check-inbox` and
-`build/arachne product apply-inbox`.
+operations. Product-database work deliberately bypasses configurable adapters
+and exposes four explicit tasks:
+
+```sh
+build/arachne product check-inbox
+build/arachne product apply-inbox
+build/arachne product rebuild-merge-hints
+build/arachne product export-merge-hints
+```
+
+`check-inbox` is a read-only preflight. `apply-inbox` transactionally applies
+eligible batches but never updates merge hints. After product work, an operator
+must explicitly rebuild the disposable Ariadne hint store and then export its
+bounded review artifact. Export does not rebuild implicitly: it rejects stale
+product, generator, or durable-decision identity, atomically replaces
+`database/merge-hints-review.json`, and removes the temporary hint store after
+success. Tasks can be supplied in one command and execute strictly in the order
+written.
 
 Remote writes are disabled by default. A production deployment needs protected
 branches, Git LFS for the canonical SQLite database, and a least-privilege token.

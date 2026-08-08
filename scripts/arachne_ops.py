@@ -26,6 +26,7 @@ REQUIRED_CAPABILITIES = frozenset(
         "product-apply-inbox",
         "product-check-inbox",
         "product-rebuild-merge-hints",
+        "product-export-merge-hints",
         "candidate-plan",
         "candidate-rebuild",
         "viewer-build",

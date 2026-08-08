@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject canonical SQLite files containing disposable merge-hint state."""
+"""Validate the canonical product database's integrity and structure."""
 
 from __future__ import annotations
 
@@ -10,66 +10,70 @@ import sqlite3
 import sys
 
 
+PRODUCT_SCHEMA_VERSION = 6
+DEFAULT_DATABASE = (
+    Path(__file__).resolve().parents[1] / "database" / "art-islands.sqlite"
+)
+DISPOSABLE_TABLES = {
+    "merge_hints",
+    "merge_hint_blocks",
+    "merge_hint_block_members",
+}
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
         "database",
         nargs="?",
         type=Path,
-        default=Path("database/art-islands.sqlite"),
+        default=DEFAULT_DATABASE,
     )
     return result
-
-
-def scalar(connection: sqlite3.Connection, query: str) -> int:
-    row = connection.execute(query).fetchone()
-    if row is None:
-        raise RuntimeError(f"query returned no row: {query}")
-    return int(row[0])
 
 
 def main() -> int:
     database = parser().parse_args().database.resolve(strict=True)
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
-        quick_check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
-        counts = {
-            "open_hints": scalar(
-                connection,
-                "SELECT count(*) FROM merge_hints WHERE status='open'",
-            ),
-            "ignored_hints": scalar(
-                connection,
-                "SELECT count(*) FROM merge_hints WHERE status='ignored'",
-            ),
-            "blocks": scalar(connection, "SELECT count(*) FROM merge_hint_blocks"),
-            "block_members": scalar(
-                connection,
-                "SELECT count(*) FROM merge_hint_block_members",
-            ),
-            "freelist_pages": scalar(connection, "PRAGMA freelist_count"),
+        schema_version = int(
+            connection.execute("PRAGMA user_version").fetchone()[0]
+        )
+        integrity = [
+            str(row[0]) for row in connection.execute("PRAGMA integrity_check")
+        ]
+        foreign_keys = [
+            tuple(row) for row in connection.execute("PRAGMA foreign_key_check")
+        ]
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table'"
+            )
         }
+        disposable_tables = sorted(DISPOSABLE_TABLES & tables)
     finally:
         connection.close()
 
     dirty = (
-        quick_check != "ok"
-        or counts["open_hints"] != 0
-        or counts["blocks"] != 0
-        or counts["block_members"] != 0
-        or counts["freelist_pages"] != 0
+        schema_version != PRODUCT_SCHEMA_VERSION
+        or integrity != ["ok"]
+        or bool(foreign_keys)
+        or bool(disposable_tables)
     )
     document = {
         "status": "dirty" if dirty else "clean",
         "database": str(database),
-        "quick_check": quick_check,
-        "disposable": counts,
+        "schemaVersion": schema_version,
+        "expectedSchemaVersion": PRODUCT_SCHEMA_VERSION,
+        "integrityCheck": integrity,
+        "foreignKeyErrors": foreign_keys,
+        "disposableTables": disposable_tables,
     }
     print(json.dumps(document, sort_keys=True))
     if dirty:
         print(
-            "canonical database contains disposable merge-hint state; "
-            "run scripts/compact_merge_hints.py before committing",
+            "canonical product database failed integrity or structure checks",
             file=sys.stderr,
         )
         return 3

@@ -19,9 +19,8 @@ class ProductDatabaseCleanTests(unittest.TestCase):
         connection = sqlite3.connect(path)
         connection.executescript(
             """
-            CREATE TABLE merge_hints(status TEXT NOT NULL);
-            CREATE TABLE merge_hint_blocks(id INTEGER PRIMARY KEY);
-            CREATE TABLE merge_hint_block_members(id INTEGER PRIMARY KEY);
+            PRAGMA user_version = 6;
+            CREATE TABLE entities(id TEXT PRIMARY KEY);
             """
         )
         connection.close()
@@ -35,27 +34,38 @@ class ProductDatabaseCleanTests(unittest.TestCase):
             text=True,
         )
 
-    def test_accepts_empty_disposable_state_and_ignored_decisions(self) -> None:
+    def test_accepts_valid_database_with_free_pages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = self.database(Path(temporary))
             connection = sqlite3.connect(database)
-            connection.execute("INSERT INTO merge_hints VALUES('ignored')")
+            connection.execute("CREATE TABLE discarded(value BLOB)")
+            connection.executemany(
+                "INSERT INTO discarded VALUES(zeroblob(4096))",
+                (() for _ in range(8)),
+            )
+            connection.execute("DROP TABLE discarded")
             connection.commit()
+            freelist = int(
+                connection.execute("PRAGMA freelist_count").fetchone()[0]
+            )
             connection.close()
 
             result = self.run_guard(database)
 
+            self.assertGreater(freelist, 0)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["status"], "clean")
 
-    def test_rejects_open_hints_and_blocks(self) -> None:
+    def test_rejects_disposable_hint_tables_even_when_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = self.database(Path(temporary))
             connection = sqlite3.connect(database)
-            connection.execute("INSERT INTO merge_hints VALUES('open')")
-            connection.execute("INSERT INTO merge_hint_blocks DEFAULT VALUES")
-            connection.execute(
-                "INSERT INTO merge_hint_block_members DEFAULT VALUES"
+            connection.executescript(
+                """
+                CREATE TABLE merge_hints(id INTEGER PRIMARY KEY);
+                CREATE TABLE merge_hint_blocks(id INTEGER PRIMARY KEY);
+                CREATE TABLE merge_hint_block_members(id INTEGER PRIMARY KEY);
+                """
             )
             connection.commit()
             connection.close()
@@ -65,9 +75,50 @@ class ProductDatabaseCleanTests(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             document = json.loads(result.stdout)
             self.assertEqual(document["status"], "dirty")
-            self.assertEqual(document["disposable"]["open_hints"], 1)
-            self.assertEqual(document["disposable"]["blocks"], 1)
-            self.assertEqual(document["disposable"]["block_members"], 1)
+            self.assertEqual(
+                document["disposableTables"],
+                [
+                    "merge_hint_block_members",
+                    "merge_hint_blocks",
+                    "merge_hints",
+                ],
+            )
+
+    def test_rejects_wrong_schema_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = self.database(Path(temporary))
+            connection = sqlite3.connect(database)
+            connection.execute("PRAGMA user_version = 5")
+            connection.close()
+
+            result = self.run_guard(database)
+
+            self.assertEqual(result.returncode, 3)
+            document = json.loads(result.stdout)
+            self.assertEqual(document["schemaVersion"], 5)
+            self.assertEqual(document["expectedSchemaVersion"], 6)
+
+    def test_rejects_foreign_key_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = self.database(Path(temporary))
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE parent(id INTEGER PRIMARY KEY);
+                CREATE TABLE child(
+                    id INTEGER PRIMARY KEY,
+                    parent_id INTEGER NOT NULL REFERENCES parent(id)
+                );
+                INSERT INTO child(parent_id) VALUES(99);
+                """
+            )
+            connection.close()
+
+            result = self.run_guard(database)
+
+            self.assertEqual(result.returncode, 3)
+            document = json.loads(result.stdout)
+            self.assertTrue(document["foreignKeyErrors"])
 
 
 if __name__ == "__main__":

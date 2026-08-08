@@ -8,22 +8,17 @@
 #include "arachne/contracts.hpp"
 
 #include <nlohmann/json.hpp>
-#include <rapidfuzz/fuzz.hpp>
 #include <sqlite3.h>
-#include <utf8proc.h>
 
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <charconv>
-#include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -33,7 +28,6 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -46,7 +40,7 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 constexpr std::uintmax_t maximum_batch_bytes = 32U * 1024U * 1024U;
-constexpr int current_product_schema = 5;
+constexpr int current_product_schema = 6;
 
 class database_error final : public inbox_error {
 public:
@@ -196,9 +190,6 @@ void require_current_product_structure(sqlite3* const sql) {
         "ingest_issues",
         "manifestations",
         "measurements",
-        "merge_hint_block_members",
-        "merge_hint_blocks",
-        "merge_hints",
         "names",
         "parent_guide_assertions",
         "parent_guide_evidence",
@@ -218,7 +209,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_tables != expected_tables) {
         throw database_error(
-            "product database table set does not match schema version 5"
+            "product database table set does not match schema version 6"
         );
     }
 
@@ -232,10 +223,6 @@ void require_current_product_structure(sqlite3* const sql) {
         "financial_facts_logical_unique",
         "ingest_issues_status_idx",
         "measurements_logical_unique",
-        "merge_hint_block_members_peer_idx",
-        "merge_hints_left_idx",
-        "merge_hints_right_idx",
-        "merge_hints_status_score_idx",
         "names_entity_idx",
         "names_logical_unique",
         "sources_bibliography_fallback_unique",
@@ -255,7 +242,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_indexes != expected_indexes) {
         throw database_error(
-            "product database index set does not match schema version 5"
+            "product database index set does not match schema version 6"
         );
     }
 
@@ -267,12 +254,6 @@ void require_current_product_structure(sqlite3* const sql) {
         "entities_agent_type_update",
         "entities_subtype_update_guard",
         "manifestations_entity_type",
-        "merge_hint_block_members_entity_family_insert",
-        "merge_hint_block_members_entity_family_update",
-        "merge_hint_block_members_remove_orphan",
-        "merge_hint_blocks_identity_update_guard",
-        "merge_hints_entity_family_insert",
-        "merge_hints_entity_family_update",
         "parent_guide_last_evidence_delete",
         "work_concept_last_evidence_delete",
         "works_entity_type",
@@ -286,61 +267,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_triggers != expected_triggers) {
         throw database_error(
-            "product database trigger set does not match schema version 5"
-        );
-    }
-    const std::vector<std::string> expected_block_columns {
-        "id", "entity_type", "block_type", "block_key"
-    };
-    std::vector<std::string> actual_block_columns;
-    statement columns(sql, "PRAGMA table_info(merge_hint_blocks)");
-    while (columns.step()) {
-        actual_block_columns.push_back(columns.text(1));
-    }
-    if (actual_block_columns != expected_block_columns) {
-        throw database_error(
-            "merge_hint_blocks columns do not match schema version 5"
-        );
-    }
-    const std::vector<std::string> expected_member_columns {
-        "id", "block_id", "entity_id"
-    };
-    std::vector<std::string> actual_member_columns;
-    statement member_columns(
-        sql, "PRAGMA table_info(merge_hint_block_members)"
-    );
-    while (member_columns.step()) {
-        actual_member_columns.push_back(member_columns.text(1));
-    }
-    if (actual_member_columns != expected_member_columns) {
-        throw database_error(
-            "merge_hint_block_members columns do not match schema version 5"
-        );
-    }
-    statement foreign_keys(
-        sql, "PRAGMA foreign_key_list(merge_hint_block_members)"
-    );
-    bool entity_cascade = false;
-    bool block_cascade = false;
-    while (foreign_keys.step()) {
-        entity_cascade = entity_cascade
-            || (
-                foreign_keys.text(2) == "entities"
-                && foreign_keys.text(3) == "entity_id"
-                && foreign_keys.text(4) == "id"
-                && foreign_keys.text(6) == "CASCADE"
-            );
-        block_cascade = block_cascade
-            || (
-                foreign_keys.text(2) == "merge_hint_blocks"
-                && foreign_keys.text(3) == "block_id"
-                && foreign_keys.text(4) == "id"
-                && foreign_keys.text(6) == "CASCADE"
-            );
-    }
-    if (!entity_cascade || !block_cascade) {
-        throw database_error(
-            "merge-hint block memberships must cascade with blocks and entities"
+            "product database trigger set does not match schema version 6"
         );
     }
 }
@@ -367,7 +294,7 @@ public:
         statement version(value_, "PRAGMA user_version");
         if (!version.step() || version.integer(0) != current_product_schema) {
             throw database_error(
-                "product database must use schema version 5"
+                "product database must use schema version 6"
             );
         }
         require_current_product_structure(value_);
@@ -579,7 +506,6 @@ struct parsed_batch final {
     std::unordered_map<std::string, std::int64_t> source_local_ids;
     std::unordered_map<std::string, std::int64_t> evidence_local_ids;
     std::unordered_map<std::string, std::int64_t> assertion_local_ids;
-    std::set<std::string, std::less<>> affected_entities;
     std::string application_path { "/" };
     std::string application_value_json;
 };
@@ -3081,7 +3007,6 @@ void create_entities(parsed_batch& batch, sqlite3* const sql) {
         entity.bind(1, id);
         entity.bind(2, type);
         entity.execute();
-        batch.affected_entities.emplace(id);
         return id;
     };
 
@@ -3210,9 +3135,6 @@ void create_names_and_identifiers(
                 )
             );
             insert.execute();
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("entity_id"))
-            );
         }
     }
     if (const auto rows = create.find("external_ids");
@@ -3232,9 +3154,6 @@ void create_names_and_identifiers(
             insert.bind_json_value(3, row.at("value"));
             bind_optional(insert, 4, row, "canonical_url");
             insert.execute();
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("entity_id"))
-            );
         }
     }
 }
@@ -3329,12 +3248,6 @@ void create_facts(parsed_batch& batch, sqlite3* const sql) {
             insert.bind_json_value(5, row.at("importance"));
             bind_optional(insert, 6, row, "credited_as");
             insert.execute();
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("work_id"))
-            );
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("agent_id"))
-            );
         }
     }
     if (const auto rows = create.find("measurements");
@@ -3356,9 +3269,6 @@ void create_facts(parsed_batch& batch, sqlite3* const sql) {
             insert.bind_json_value(4, row.at("unit"));
             bind_optional(insert, 5, row, "qualifier");
             insert.execute();
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("entity_id"))
-            );
         }
     }
     if (const auto rows = create.find("financial_facts");
@@ -3388,9 +3298,6 @@ void create_facts(parsed_batch& batch, sqlite3* const sql) {
             );
             bind_optional(insert, 8, row, "confidence");
             insert.execute();
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("work_id"))
-            );
         }
     }
 }
@@ -3444,12 +3351,6 @@ void create_assertions(parsed_batch& batch, sqlite3* const sql) {
             attach_evidence(
                 batch, sql, "work_concept_evidence", id, row.at("evidence")
             );
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("work_id"))
-            );
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("concept_id"))
-            );
         }
     }
     if (const auto rows = create.find("concept_relations");
@@ -3487,12 +3388,6 @@ void create_assertions(parsed_batch& batch, sqlite3* const sql) {
                 batch, sql, "concept_relation_evidence", id,
                 row.at("evidence")
             );
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("subject_concept_id"))
-            );
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("object_concept_id"))
-            );
         }
     }
     if (const auto rows = create.find("parent_guide_assertions");
@@ -3527,12 +3422,6 @@ void create_assertions(parsed_batch& batch, sqlite3* const sql) {
             insert.execute();
             attach_evidence(
                 batch, sql, "parent_guide_evidence", id, row.at("evidence")
-            );
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("work_id"))
-            );
-            batch.affected_entities.emplace(
-                resolve_entity(batch, row.at("concept_id"))
             );
         }
     }
@@ -3599,7 +3488,6 @@ void apply_updates(parsed_batch& batch, sqlite3* const sql) {
             );
             update_row(sql, table, "entity_id", row);
             const std::string id = row.at("id").get<std::string>();
-            batch.affected_entities.emplace(id);
             if (std::string_view(table) == "agents"
                 && row.at("set").contains("agent_type")) {
                 statement entity(
@@ -3691,43 +3579,6 @@ void apply_deletes(parsed_batch& batch, sqlite3* const sql) {
                 ),
                 value
             );
-            std::vector<std::string> entity_columns;
-            if (table == "names" || table == "external_ids"
-                || table == "measurements") {
-                entity_columns = { "entity_id" };
-            } else if (table == "credits") {
-                entity_columns = { "work_id", "agent_id" };
-            } else if (table == "financial_facts") {
-                entity_columns = { "work_id" };
-            } else if (table == "work_concepts"
-                       || table == "parent_guide_assertions") {
-                entity_columns = { "work_id", "concept_id" };
-            } else if (table == "concept_relations") {
-                entity_columns = {
-                    "subject_concept_id", "object_concept_id"
-                };
-            }
-            if (!entity_columns.empty()) {
-                std::string query_text = "SELECT ";
-                for (std::size_t index = 0; index < entity_columns.size();
-                     ++index) {
-                    if (index != 0U) {
-                        query_text += ",";
-                    }
-                    query_text += entity_columns[index];
-                }
-                query_text += " FROM " + table + " WHERE id=?";
-                statement affected(sql, query_text);
-                affected.bind_json_value(1, value);
-                if (affected.step()) {
-                    for (std::size_t index = 0;
-                         index < entity_columns.size(); ++index) {
-                        batch.affected_entities.emplace(
-                            affected.text(static_cast<int>(index))
-                        );
-                    }
-                }
-            }
             sqlite3_reset(remove.native());
             sqlite3_clear_bindings(remove.native());
             remove.bind_json_value(1, value);
@@ -4199,52 +4050,11 @@ void delete_merged_entity(
     return result;
 }
 
-void mark_merge_neighborhood(
-    parsed_batch& batch, sqlite3* const sql, const std::string_view family,
-    const std::string& target, const std::vector<std::string>& members
-) {
-    batch.affected_entities.emplace(target);
-    std::vector<std::string> merged { target };
-    merged.insert(merged.end(), members.begin(), members.end());
-    auto add_values = [&](const std::string_view query_text) {
-        statement query(sql, query_text);
-        for (const auto& id : merged) {
-            sqlite3_reset(query.native());
-            sqlite3_clear_bindings(query.native());
-            query.bind(1, id);
-            while (query.step()) {
-                batch.affected_entities.emplace(query.text(0));
-            }
-        }
-    };
-    if (family == "agent") {
-        add_values("SELECT work_id FROM credits WHERE agent_id=?");
-    } else if (family == "work") {
-        add_values("SELECT agent_id FROM credits WHERE work_id=?");
-        add_values(
-            "SELECT concept_id FROM work_concepts WHERE work_id=?"
-        );
-    } else if (family == "concept") {
-        add_values(
-            "SELECT work_id FROM work_concepts WHERE concept_id=?"
-        );
-        add_values(
-            "SELECT object_concept_id FROM concept_relations "
-            "WHERE subject_concept_id=?"
-        );
-        add_values(
-            "SELECT subject_concept_id FROM concept_relations "
-            "WHERE object_concept_id=?"
-        );
-    }
-}
-
 void merge_agents(
-    parsed_batch& batch, sqlite3* const sql, const json& operation
+    sqlite3* const sql, const json& operation
 ) {
     const std::string target = operation.at("target");
     const auto members = merge_members(operation);
-    mark_merge_neighborhood(batch, sql, "agent", target, members);
     reject_preferred_name_conflict(sql, target, members);
     resolve_scalar_fields(
         sql, "agents", "entity_id", target, members, operation,
@@ -4266,11 +4076,10 @@ void merge_agents(
 }
 
 void merge_works(
-    parsed_batch& batch, sqlite3* const sql, const json& operation
+    sqlite3* const sql, const json& operation
 ) {
     const std::string target = operation.at("target");
     const auto members = merge_members(operation);
-    mark_merge_neighborhood(batch, sql, "work", target, members);
     reject_preferred_name_conflict(sql, target, members);
     resolve_scalar_fields(
         sql, "works", "entity_id", target, members, operation,
@@ -4296,11 +4105,10 @@ void merge_works(
 }
 
 void merge_concepts(
-    parsed_batch& batch, sqlite3* const sql, const json& operation
+    sqlite3* const sql, const json& operation
 ) {
     const std::string target = operation.at("target");
     const auto members = merge_members(operation);
-    mark_merge_neighborhood(batch, sql, "concept", target, members);
     reject_preferred_name_conflict(sql, target, members);
     if (operation.at("set").contains("slug")) {
         const std::string requested = operation.at("set").at("slug");
@@ -4368,7 +4176,7 @@ void apply_merges(parsed_batch& batch, sqlite3* const sql) {
             set_application_context(
                 batch, indexed_path("/merge/agents", index), row
             );
-            merge_agents(batch, sql, row);
+            merge_agents(sql, row);
         }
     }
     if (const auto rows = merge.find("works");
@@ -4378,7 +4186,7 @@ void apply_merges(parsed_batch& batch, sqlite3* const sql) {
             set_application_context(
                 batch, indexed_path("/merge/works", index), row
             );
-            merge_works(batch, sql, row);
+            merge_works(sql, row);
         }
     }
     if (const auto rows = merge.find("concepts");
@@ -4388,1191 +4196,11 @@ void apply_merges(parsed_batch& batch, sqlite3* const sql) {
             set_application_context(
                 batch, indexed_path("/merge/concepts", index), row
             );
-            merge_concepts(batch, sql, row);
+            merge_concepts(sql, row);
         }
     }
 }
 
-[[nodiscard]] std::string normalized_label(const std::string_view value) {
-    utf8proc_uint8_t* mapped = nullptr;
-    const auto options = static_cast<utf8proc_option_t>(
-        UTF8PROC_STABLE | UTF8PROC_COMPOSE | UTF8PROC_COMPAT
-        | UTF8PROC_CASEFOLD
-    );
-    const utf8proc_ssize_t mapped_size = utf8proc_map(
-        reinterpret_cast<const utf8proc_uint8_t*>(value.data()),
-        static_cast<utf8proc_ssize_t>(value.size()), &mapped, options
-    );
-    if (mapped_size < 0 || mapped == nullptr) {
-        std::free(mapped);
-        return {};
-    }
-    std::vector<std::string> tokens;
-    std::string token;
-    utf8proc_ssize_t offset = 0;
-    while (offset < mapped_size) {
-        utf8proc_int32_t codepoint = 0;
-        const utf8proc_ssize_t consumed = utf8proc_iterate(
-            mapped + offset, mapped_size - offset, &codepoint
-        );
-        if (consumed <= 0) {
-            std::free(mapped);
-            return {};
-        }
-        const utf8proc_category_t category = utf8proc_category(codepoint);
-        const bool word = (category >= UTF8PROC_CATEGORY_LU
-                           && category <= UTF8PROC_CATEGORY_LO)
-            || (category >= UTF8PROC_CATEGORY_MN
-                && category <= UTF8PROC_CATEGORY_ME)
-            || (category >= UTF8PROC_CATEGORY_ND
-                && category <= UTF8PROC_CATEGORY_NO);
-        if (word) {
-            std::array<utf8proc_uint8_t, 4> encoded {};
-            const utf8proc_ssize_t encoded_size
-                = utf8proc_encode_char(codepoint, encoded.data());
-            token.append(
-                reinterpret_cast<const char*>(encoded.data()),
-                static_cast<std::size_t>(encoded_size)
-            );
-        } else if (!token.empty()) {
-            tokens.push_back(std::move(token));
-            token.clear();
-        }
-        offset += consumed;
-    }
-    std::free(mapped);
-    if (!token.empty()) {
-        tokens.push_back(std::move(token));
-    }
-    std::ranges::sort(tokens);
-    std::string result;
-    for (const auto& current : tokens) {
-        if (!result.empty()) {
-            result.push_back(' ');
-        }
-        result += current;
-    }
-    return result;
-}
-
-struct hint_label final {
-    std::string id;
-    std::string family;
-    std::string label;
-    std::string fingerprint;
-    std::vector<std::string> fingerprints;
-    std::vector<std::string> preferred_fingerprints;
-    std::vector<std::string> alternate_fingerprints;
-};
-
-[[nodiscard]] std::vector<hint_label>
-all_hint_labels(sqlite3* const sql) {
-    statement query(
-        sql,
-        "SELECT e.id,"
-        "CASE WHEN e.entity_type IN('person','organization','group') "
-        "THEN 'agent' ELSE e.entity_type END,"
-        "CASE WHEN e.entity_type='concept' THEN COALESCE(c.slug,'') "
-        "ELSE COALESCE(("
-        " SELECT n.value FROM names n WHERE n.entity_id=e.id "
-        " ORDER BY n.is_preferred DESC,n.id LIMIT 1"
-        "),'') END "
-        "FROM entities e LEFT JOIN concepts c ON c.entity_id=e.id "
-        "WHERE e.entity_type IN("
-        "'person','organization','group','work','concept') ORDER BY e.id"
-    );
-    std::vector<hint_label> result;
-    std::map<std::string, std::size_t, std::less<>> index_by_id;
-    while (query.step()) {
-        hint_label label {
-            .id = query.text(0),
-            .family = query.text(1),
-            .label = query.text(2),
-            .fingerprint = {},
-            .fingerprints = {},
-            .preferred_fingerprints = {},
-            .alternate_fingerprints = {},
-        };
-        label.fingerprint = normalized_label(label.label);
-        if (!label.fingerprint.empty()) {
-            label.fingerprints.push_back(label.fingerprint);
-            if (label.family == "concept") {
-                label.preferred_fingerprints.push_back(label.fingerprint);
-            }
-        }
-        index_by_id.emplace(label.id, result.size());
-        result.push_back(std::move(label));
-    }
-    statement names(
-        sql,
-        "SELECT n.entity_id,n.value,n.is_preferred FROM names n "
-        "JOIN entities e ON e.id=n.entity_id "
-        "WHERE e.entity_type IN("
-        "'person','organization','group','work','concept') "
-        "ORDER BY n.entity_id,n.id"
-    );
-    while (names.step()) {
-        const auto found = index_by_id.find(names.text(0));
-        if (found == index_by_id.end()) {
-            continue;
-        }
-        std::string normalized = normalized_label(names.text(1));
-        if (!normalized.empty()) {
-            auto& label = result[found->second];
-            label.fingerprints.push_back(normalized);
-            if (label.family != "concept" && names.integer(2) != 0) {
-                label.preferred_fingerprints.push_back(normalized);
-            } else {
-                label.alternate_fingerprints.push_back(std::move(normalized));
-            }
-        }
-    }
-    for (auto& label : result) {
-        const auto deduplicate = [](std::vector<std::string>& values) {
-            std::ranges::sort(values);
-            values.erase(
-                std::unique(values.begin(), values.end()), values.end()
-            );
-        };
-        deduplicate(label.fingerprints);
-        deduplicate(label.preferred_fingerprints);
-        deduplicate(label.alternate_fingerprints);
-        if (label.fingerprint.empty() && !label.fingerprints.empty()) {
-            label.fingerprint = label.fingerprints.front();
-        }
-        if (label.preferred_fingerprints.empty()
-            && !label.fingerprint.empty()) {
-            label.preferred_fingerprints.push_back(label.fingerprint);
-        }
-        std::erase(
-            label.alternate_fingerprints, label.fingerprint
-        );
-    }
-    return result;
-}
-
-[[nodiscard]] std::optional<hint_label> hint_label_for_id(
-    sqlite3* const sql, const std::string& id
-) {
-    statement query(
-        sql,
-        "SELECT e.id,"
-        "CASE WHEN e.entity_type IN('person','organization','group') "
-        "THEN 'agent' ELSE e.entity_type END,"
-        "CASE WHEN e.entity_type='concept' THEN COALESCE(c.slug,'') "
-        "ELSE COALESCE(("
-        " SELECT n.value FROM names n WHERE n.entity_id=e.id "
-        " ORDER BY n.is_preferred DESC,n.id LIMIT 1"
-        "),'') END "
-        "FROM entities e LEFT JOIN concepts c ON c.entity_id=e.id "
-        "WHERE e.id=? AND e.entity_type IN("
-        "'person','organization','group','work','concept')"
-    );
-    query.bind(1, id);
-    if (!query.step()) {
-        return std::nullopt;
-    }
-    hint_label result {
-        .id = query.text(0),
-        .family = query.text(1),
-        .label = query.text(2),
-        .fingerprint = {},
-        .fingerprints = {},
-        .preferred_fingerprints = {},
-        .alternate_fingerprints = {},
-    };
-    result.fingerprint = normalized_label(result.label);
-    if (!result.fingerprint.empty()) {
-        result.fingerprints.push_back(result.fingerprint);
-        if (result.family == "concept") {
-            result.preferred_fingerprints.push_back(result.fingerprint);
-        }
-    }
-
-    statement names(
-        sql,
-        "SELECT value,is_preferred FROM names WHERE entity_id=? ORDER BY id"
-    );
-    names.bind(1, id);
-    while (names.step()) {
-        std::string normalized = normalized_label(names.text(0));
-        if (normalized.empty()) {
-            continue;
-        }
-        result.fingerprints.push_back(normalized);
-        if (result.family != "concept" && names.integer(1) != 0) {
-            result.preferred_fingerprints.push_back(normalized);
-        } else {
-            result.alternate_fingerprints.push_back(std::move(normalized));
-        }
-    }
-    const auto deduplicate = [](std::vector<std::string>& values) {
-        std::ranges::sort(values);
-        values.erase(std::unique(values.begin(), values.end()), values.end());
-    };
-    deduplicate(result.fingerprints);
-    deduplicate(result.preferred_fingerprints);
-    deduplicate(result.alternate_fingerprints);
-    if (result.fingerprint.empty() && !result.fingerprints.empty()) {
-        result.fingerprint = result.fingerprints.front();
-    }
-    if (result.preferred_fingerprints.empty()
-        && !result.fingerprint.empty()) {
-        result.preferred_fingerprints.push_back(result.fingerprint);
-    }
-    std::erase(result.alternate_fingerprints, result.fingerprint);
-    return result;
-}
-
-[[nodiscard]] std::set<std::string, std::less<>>
-trigrams(const std::string_view value) {
-    std::set<std::string, std::less<>> result;
-    std::vector<std::string_view> characters;
-    std::size_t offset = 0;
-    while (offset < value.size()) {
-        utf8proc_int32_t code_point = 0;
-        const utf8proc_ssize_t width = utf8proc_iterate(
-            reinterpret_cast<const utf8proc_uint8_t*>(
-                value.data() + offset
-            ),
-            static_cast<utf8proc_ssize_t>(value.size() - offset),
-            &code_point
-        );
-        if (width <= 0) {
-            throw inbox_error(
-                "normalized label contains invalid UTF-8"
-            );
-        }
-        characters.emplace_back(
-            value.data() + offset, static_cast<std::size_t>(width)
-        );
-        offset += static_cast<std::size_t>(width);
-    }
-    if (characters.size() < 3U) {
-        if (!value.empty()) {
-            result.emplace(value);
-        }
-        return result;
-    }
-    for (std::size_t index = 0; index + 3U <= characters.size(); ++index) {
-        std::string trigram;
-        trigram.reserve(
-            characters[index].size() + characters[index + 1U].size()
-            + characters[index + 2U].size()
-        );
-        trigram += characters[index];
-        trigram += characters[index + 1U];
-        trigram += characters[index + 2U];
-        result.emplace(std::move(trigram));
-    }
-    return result;
-}
-
-[[nodiscard]] double trigram_score(
-    const std::string_view left, const std::string_view right
-) {
-    const auto left_values = trigrams(left);
-    const auto right_values = trigrams(right);
-    std::size_t intersection = 0;
-    for (const auto& value : left_values) {
-        intersection += static_cast<std::size_t>(
-            right_values.contains(value)
-        );
-    }
-    const std::size_t combined
-        = left_values.size() + right_values.size() - intersection;
-    return combined == 0U
-        ? 1.0
-        : static_cast<double>(intersection)
-            / static_cast<double>(combined);
-}
-
-using hint_pair = std::pair<std::string, std::string>;
-
-struct hint_candidate_support final {
-    bool direct {};
-    std::set<std::string, std::less<>> shared_trigrams;
-};
-
-using hint_candidate_map = std::map<
-    hint_pair, hint_candidate_support, std::less<>
->;
-
-[[nodiscard]] bool is_trigram_block(const std::string_view block_type) {
-    return block_type.ends_with("_trigram");
-}
-
-[[nodiscard]] std::size_t maximum_hint_block_size(
-    const std::string_view block_type
-) {
-    if (block_type == "label_fingerprint") {
-        return 100U;
-    }
-    if (block_type == "label_trigram"
-        || block_type == "work_year_title_trigram"
-        || block_type == "work_medium_title_trigram") {
-        return 20U;
-    }
-    if (block_type == "work_year_title_fingerprint"
-        || block_type == "work_medium_title_fingerprint"
-        || block_type == "work_primary_agent") {
-        return 40U;
-    }
-    if (block_type == "agent_work_role"
-        || block_type == "concept_work"
-        || block_type == "concept_neighbor") {
-        return 30U;
-    }
-    if (block_type == "external_identifier") {
-        return 10U;
-    }
-    throw database_error("unknown merge-hint block type");
-}
-
-[[nodiscard]] std::string contextual_block_key(
-    const std::string_view context, const std::string_view value
-) {
-    return std::string(context) + "\n" + std::string(value);
-}
-
-[[nodiscard]] std::string trigram_support_key(
-    const std::string_view block_key
-) {
-    const std::size_t separator = block_key.rfind('\n');
-    return separator == std::string_view::npos
-        ? std::string(block_key)
-        : std::string(block_key.substr(separator + 1U));
-}
-
-void record_hint_candidate(
-    hint_candidate_map& candidates, const std::string& first,
-    const std::string& second, const std::string_view block_type,
-    const std::string_view block_key
-) {
-    if (first == second) {
-        return;
-    }
-    auto& support = candidates[
-        {
-            std::min(first, second),
-            std::max(first, second),
-        }
-    ];
-    if (is_trigram_block(block_type)) {
-        support.shared_trigrams.emplace(trigram_support_key(block_key));
-    } else {
-        support.direct = true;
-    }
-}
-
-[[nodiscard]] std::set<hint_pair> reviewable_blocked_pairs(
-    const hint_candidate_map& candidates
-) {
-    std::set<hint_pair> result;
-    for (const auto& [pair, support] : candidates) {
-        /*
-         * A non-text block supplies explicit context (for example a shared key
-         * agent or exact fingerprint). Text-only discovery requires at least
-         * two distinct rare trigrams; this bounds candidate volume before
-         * scoring without turning the combined score into a persistence gate.
-         */
-        if (support.direct || support.shared_trigrams.size() >= 2U) {
-            result.emplace(pair);
-        }
-    }
-    return result;
-}
-
-void insert_hint_block(
-    statement& block, statement& member, const hint_label& label,
-    const std::string_view block_type, const std::string& block_key
-) {
-    if (block_key.empty()) {
-        return;
-    }
-    sqlite3_reset(block.native());
-    sqlite3_clear_bindings(block.native());
-    block.bind(1, label.family);
-    block.bind(2, block_type);
-    block.bind(3, block_key);
-    if (!block.step()) {
-        throw database_error("cannot resolve merge-hint block key");
-    }
-    const std::int64_t block_id = block.integer(0);
-
-    sqlite3_reset(member.native());
-    sqlite3_clear_bindings(member.native());
-    member.bind(1, block_id);
-    member.bind(2, label.id);
-    member.execute();
-}
-
-void insert_hint_blocks(sqlite3* const sql, const hint_label& label) {
-    statement block(
-        sql,
-        "INSERT INTO merge_hint_blocks("
-        "entity_type,block_type,block_key) VALUES(?,?,?) "
-        "ON CONFLICT(entity_type,block_type,block_key) DO UPDATE SET "
-        "block_key=excluded.block_key RETURNING id"
-    );
-    statement member(
-        sql,
-        "INSERT INTO merge_hint_block_members(block_id,entity_id) "
-        "VALUES(?,?) ON CONFLICT(entity_id,block_id) DO NOTHING"
-    );
-    for (const auto& fingerprint : label.fingerprints) {
-        insert_hint_block(
-            block, member, label, "label_fingerprint", fingerprint
-        );
-        for (const auto& trigram : trigrams(fingerprint)) {
-            insert_hint_block(
-                block, member, label, "label_trigram", trigram
-            );
-        }
-    }
-
-    if (label.family == "work") {
-        statement work(
-            sql,
-            "SELECT medium,year_start FROM works WHERE entity_id=?"
-        );
-        work.bind(1, label.id);
-        if (work.step()) {
-            const std::string medium = work.text(0);
-            const std::optional<std::string> year = work.is_null(1)
-                ? std::nullopt
-                : std::optional<std::string>(
-                      std::to_string(work.integer(1))
-                  );
-            for (const auto& fingerprint : label.fingerprints) {
-                insert_hint_block(
-                    block, member, label, "work_medium_title_fingerprint",
-                    contextual_block_key(medium, fingerprint)
-                );
-                if (year) {
-                    insert_hint_block(
-                        block, member, label, "work_year_title_fingerprint",
-                        contextual_block_key(*year, fingerprint)
-                    );
-                }
-                for (const auto& trigram : trigrams(fingerprint)) {
-                    insert_hint_block(
-                        block, member, label, "work_medium_title_trigram",
-                        contextual_block_key(medium, trigram)
-                    );
-                    if (year) {
-                        insert_hint_block(
-                            block, member, label, "work_year_title_trigram",
-                            contextual_block_key(*year, trigram)
-                        );
-                    }
-                }
-            }
-        }
-        statement agents(
-            sql,
-            "SELECT DISTINCT agent_id FROM credits WHERE work_id=? "
-            "AND importance IN('primary','key')"
-        );
-        agents.bind(1, label.id);
-        while (agents.step()) {
-            insert_hint_block(
-                block, member, label, "work_primary_agent", agents.text(0)
-            );
-        }
-    } else if (label.family == "agent") {
-        statement work_roles(
-            sql,
-            "SELECT DISTINCT work_id,role FROM credits WHERE agent_id=?"
-        );
-        work_roles.bind(1, label.id);
-        while (work_roles.step()) {
-            insert_hint_block(
-                block, member, label, "agent_work_role",
-                json::array({ work_roles.text(0), work_roles.text(1) }).dump()
-            );
-        }
-    } else if (label.family == "concept") {
-        statement works(
-            sql,
-            "SELECT DISTINCT work_id FROM work_concepts WHERE concept_id=?"
-        );
-        works.bind(1, label.id);
-        while (works.step()) {
-            insert_hint_block(
-                block, member, label, "concept_work", works.text(0)
-            );
-        }
-        statement neighbors(
-            sql,
-            "SELECT object_concept_id,relation_type "
-            "FROM concept_relations WHERE subject_concept_id=?1 "
-            "UNION SELECT subject_concept_id,relation_type "
-            "FROM concept_relations WHERE object_concept_id=?1"
-        );
-        neighbors.bind(1, label.id);
-        while (neighbors.step()) {
-            insert_hint_block(
-                block, member, label, "concept_neighbor",
-                json::array({ neighbors.text(0), neighbors.text(1) }).dump()
-            );
-        }
-    }
-
-    statement external_ids(
-        sql,
-        "SELECT DISTINCT lower(trim(scheme)),lower(trim(value)) "
-        "FROM external_ids WHERE entity_id=?"
-    );
-    external_ids.bind(1, label.id);
-    while (external_ids.step()) {
-        insert_hint_block(
-            block, member, label, "external_identifier",
-            json::array({ external_ids.text(0), external_ids.text(1) }).dump()
-        );
-    }
-}
-
-void refresh_hint_blocks(
-    sqlite3* const sql,
-    const std::set<std::string, std::less<>>& affected,
-    std::map<std::string, hint_label, std::less<>>& label_cache
-) {
-    statement remove(
-        sql, "DELETE FROM merge_hint_block_members WHERE entity_id=?"
-    );
-    for (const auto& id : affected) {
-        sqlite3_reset(remove.native());
-        sqlite3_clear_bindings(remove.native());
-        remove.bind(1, id);
-        remove.execute();
-        auto label = hint_label_for_id(sql, id);
-        if (!label) {
-            continue;
-        }
-        insert_hint_blocks(sql, *label);
-        label_cache.insert_or_assign(id, std::move(*label));
-    }
-}
-
-[[nodiscard]] std::set<hint_pair> incrementally_blocked_pairs(
-    sqlite3* const sql,
-    const std::set<std::string, std::less<>>& affected
-) {
-    hint_candidate_map candidates;
-    statement blocks(
-        sql,
-        "SELECT b.id,b.block_type,b.block_key "
-        "FROM merge_hint_block_members m "
-        "JOIN merge_hint_blocks b ON b.id=m.block_id "
-        "WHERE m.entity_id=? ORDER BY b.id"
-    );
-    statement peers(
-        sql,
-        "SELECT entity_id FROM merge_hint_block_members "
-        "WHERE block_id=? ORDER BY entity_id LIMIT ?"
-    );
-    for (const auto& id : affected) {
-        sqlite3_reset(blocks.native());
-        sqlite3_clear_bindings(blocks.native());
-        blocks.bind(1, id);
-        while (blocks.step()) {
-            const std::int64_t block_id = blocks.integer(0);
-            const std::string block_type = blocks.text(1);
-            const std::string block_key = blocks.text(2);
-            const std::size_t maximum
-                = maximum_hint_block_size(block_type);
-            sqlite3_reset(peers.native());
-            sqlite3_clear_bindings(peers.native());
-            peers.bind(1, block_id);
-            peers.bind(2, static_cast<std::int64_t>(maximum + 1U));
-            std::vector<std::string> members;
-            while (peers.step()) {
-                members.push_back(peers.text(0));
-            }
-            if (members.size() > maximum) {
-                continue;
-            }
-            for (const auto& peer : members) {
-                record_hint_candidate(
-                    candidates, id, peer, block_type, block_key
-                );
-            }
-        }
-    }
-    return reviewable_blocked_pairs(candidates);
-}
-
-[[nodiscard]] std::set<hint_pair> all_blocked_pairs(
-    sqlite3* const sql
-) {
-    hint_candidate_map candidates;
-    statement blocks(
-        sql,
-        "SELECT b.entity_type,b.block_type,b.block_key,m.entity_id "
-        "FROM merge_hint_blocks b "
-        "JOIN merge_hint_block_members m ON m.block_id=b.id "
-        "ORDER BY b.entity_type,b.block_type,b.block_key,m.entity_id"
-    );
-    std::string current_family;
-    std::string current_type;
-    std::string current_key;
-    std::vector<std::string> members;
-    auto flush = [&]() {
-        if (members.size() >= 2U
-            && members.size() <= maximum_hint_block_size(current_type)) {
-            for (std::size_t left = 0; left < members.size(); ++left) {
-                for (std::size_t right = left + 1U;
-                     right < members.size(); ++right) {
-                    record_hint_candidate(
-                        candidates, members[left], members[right],
-                        current_type, current_key
-                    );
-                }
-            }
-        }
-        members.clear();
-    };
-    while (blocks.step()) {
-        const std::string family = blocks.text(0);
-        const std::string block_type = blocks.text(1);
-        const std::string block_key = blocks.text(2);
-        if (!current_type.empty()
-            && std::tie(family, block_type, block_key)
-                != std::tie(current_family, current_type, current_key)) {
-            flush();
-        }
-        current_family = family;
-        current_type = block_type;
-        current_key = block_key;
-        members.push_back(blocks.text(3));
-    }
-    if (!current_type.empty()) {
-        flush();
-    }
-    return reviewable_blocked_pairs(candidates);
-}
-
-void bootstrap_hint_blocks_if_empty(sqlite3* const sql) {
-    statement present(
-        sql, "SELECT 1 FROM merge_hint_block_members LIMIT 1"
-    );
-    if (present.step()) {
-        return;
-    }
-    /*
-     * The one-way v4-to-v5 migration creates derived tables empty. Bootstrap
-     * them with the same C++ normalization used by routine and full rebuilds
-     * before the first affected-only refresh, so pre-existing entities can be
-     * peers of the first new or changed entity.
-     */
-    statement clear(sql, "DELETE FROM merge_hint_blocks");
-    clear.execute();
-    for (const auto& label : all_hint_labels(sql)) {
-        insert_hint_blocks(sql, label);
-    }
-}
-
-[[nodiscard]] std::set<std::string, std::less<>> query_value_set(
-    sqlite3* const sql, const std::string_view query_text,
-    const std::string& id
-) {
-    statement query(sql, query_text);
-    query.bind(1, id);
-    std::set<std::string, std::less<>> result;
-    while (query.step()) {
-        result.emplace(query.text(0));
-    }
-    return result;
-}
-
-[[nodiscard]] double jaccard(
-    const std::set<std::string, std::less<>>& left,
-    const std::set<std::string, std::less<>>& right
-) {
-    std::size_t intersection = 0;
-    for (const auto& value : left) {
-        intersection += static_cast<std::size_t>(right.contains(value));
-    }
-    const std::size_t union_size
-        = left.size() + right.size() - intersection;
-    return union_size == 0U
-        ? 0.0
-        : static_cast<double>(intersection)
-            / static_cast<double>(union_size);
-}
-
-[[nodiscard]] std::size_t intersection_count(
-    const std::set<std::string, std::less<>>& left,
-    const std::set<std::string, std::less<>>& right
-) {
-    return static_cast<std::size_t>(std::ranges::count_if(
-        left,
-        [&right](const std::string& value) {
-            return right.contains(value);
-        }
-    ));
-}
-
-[[nodiscard]] double maximum_text_similarity(
-    const std::vector<std::string>& left,
-    const std::vector<std::string>& right
-) {
-    double result = 0.0;
-    for (const auto& left_value : left) {
-        for (const auto& right_value : right) {
-            result = std::max(
-                result,
-                std::max({
-                    rapidfuzz::fuzz::token_sort_ratio(
-                        left_value, right_value
-                    ),
-                    rapidfuzz::fuzz::token_set_ratio(
-                        left_value, right_value
-                    ),
-                    rapidfuzz::fuzz::ratio(
-                        left_value, right_value, 35.0
-                    ),
-                }) / 100.0
-            );
-        }
-    }
-    return result;
-}
-
-[[nodiscard]] double alternate_text_similarity(
-    const hint_label& left, const hint_label& right
-) {
-    /*
-     * An alternate signal is deliberately not the all-label maximum. It
-     * compares each side's alternates with the other entity's known labels,
-     * but excludes the preferred/preferred comparison represented by the
-     * separate preferred-name/title signal.
-     */
-    return std::max(
-        maximum_text_similarity(
-            left.alternate_fingerprints, right.fingerprints
-        ),
-        maximum_text_similarity(
-            left.fingerprints, right.alternate_fingerprints
-        )
-    );
-}
-
-struct hint_components final {
-    double graph {};
-    double context {};
-    json signals = json::object();
-};
-
-[[nodiscard]] hint_components calculate_hint_components(
-    sqlite3* const sql, const hint_label& left, const hint_label& right
-) {
-    hint_components result;
-    if (left.family == "agent") {
-        const double preferred_name_similarity = maximum_text_similarity(
-            left.preferred_fingerprints, right.preferred_fingerprints
-        );
-        const double alias_similarity
-            = alternate_text_similarity(left, right);
-        const auto left_works = query_value_set(
-            sql, "SELECT work_id FROM credits WHERE agent_id=?", left.id
-        );
-        const auto right_works = query_value_set(
-            sql, "SELECT work_id FROM credits WHERE agent_id=?", right.id
-        );
-        const auto left_roles = query_value_set(
-            sql, "SELECT role FROM credits WHERE agent_id=?", left.id
-        );
-        const auto right_roles = query_value_set(
-            sql, "SELECT role FROM credits WHERE agent_id=?", right.id
-        );
-        const double work_score = jaccard(left_works, right_works);
-        const double role_score = jaccard(left_roles, right_roles);
-        result.graph = 0.7 * work_score + 0.3 * role_score;
-        result.signals["preferred_name_similarity"]
-            = preferred_name_similarity;
-        result.signals["alias_similarity"] = alias_similarity;
-        result.signals["shared_work_count"]
-            = intersection_count(left_works, right_works);
-        result.signals["shared_work_jaccard"] = work_score;
-        result.signals["shared_role_count"]
-            = intersection_count(left_roles, right_roles);
-        result.signals["shared_role_jaccard"] = role_score;
-        statement years(
-            sql,
-            "SELECT l.birth_year,r.birth_year,l.death_year,r.death_year "
-            "FROM agents l,agents r WHERE l.entity_id=? AND r.entity_id=?"
-        );
-        years.bind(1, left.id);
-        years.bind(2, right.id);
-        if (years.step()) {
-            double compatibility_sum = 0.0;
-            int comparable = 0;
-            for (const auto [left_column, right_column, signal_prefix] :
-                 {
-                     std::tuple { 0, 1, "birth_year" },
-                     std::tuple { 2, 3, "death_year" },
-                 }) {
-                if (!years.is_null(left_column)
-                    && !years.is_null(right_column)) {
-                    ++comparable;
-                    const auto difference = std::abs(
-                        years.integer(left_column)
-                        - years.integer(right_column)
-                    );
-                    const double compatibility = std::max(
-                        0.0,
-                        1.0 - static_cast<double>(difference) / 5.0
-                    );
-                    compatibility_sum += compatibility;
-                    result.signals[
-                        std::string(signal_prefix) + "_difference"
-                    ] = difference;
-                    result.signals[
-                        std::string(signal_prefix) + "_compatible"
-                    ] = difference == 0;
-                }
-            }
-            result.context = comparable == 0
-                ? 0.0
-                : compatibility_sum / static_cast<double>(comparable);
-            result.signals["life_date_compatibility"] = result.context;
-        }
-        const auto left_external_ids = query_value_set(
-            sql,
-            "SELECT json_array(lower(trim(scheme)),lower(trim(value))) "
-            "FROM external_ids WHERE entity_id=?",
-            left.id
-        );
-        const auto right_external_ids = query_value_set(
-            sql,
-            "SELECT json_array(lower(trim(scheme)),lower(trim(value))) "
-            "FROM external_ids WHERE entity_id=?",
-            right.id
-        );
-        const auto identifier_collisions
-            = intersection_count(left_external_ids, right_external_ids);
-        result.signals["external_identifier_collision_count"]
-            = identifier_collisions;
-        result.signals["external_identifier_collision"]
-            = identifier_collisions != 0U;
-    } else if (left.family == "work") {
-        const double preferred_title_similarity = maximum_text_similarity(
-            left.preferred_fingerprints, right.preferred_fingerprints
-        );
-        const double alternate_title_similarity
-            = alternate_text_similarity(left, right);
-        const auto left_agents = query_value_set(
-            sql,
-            "SELECT agent_id FROM credits WHERE work_id=? "
-            "AND importance IN('primary','key')",
-            left.id
-        );
-        const auto right_agents = query_value_set(
-            sql,
-            "SELECT agent_id FROM credits WHERE work_id=? "
-            "AND importance IN('primary','key')",
-            right.id
-        );
-        const auto left_concepts = query_value_set(
-            sql, "SELECT concept_id FROM work_concepts WHERE work_id=?", left.id
-        );
-        const auto right_concepts = query_value_set(
-            sql, "SELECT concept_id FROM work_concepts WHERE work_id=?", right.id
-        );
-        const double agent_score = jaccard(left_agents, right_agents);
-        const double concept_score = jaccard(left_concepts, right_concepts);
-        result.graph = 0.6 * agent_score + 0.4 * concept_score;
-        result.signals["preferred_title_similarity"]
-            = preferred_title_similarity;
-        result.signals["alternate_title_similarity"]
-            = alternate_title_similarity;
-        result.signals["shared_primary_agent_count"]
-            = intersection_count(left_agents, right_agents);
-        result.signals["primary_agent_jaccard"] = agent_score;
-        result.signals["shared_concept_count"]
-            = intersection_count(left_concepts, right_concepts);
-        result.signals["concept_set_jaccard"] = concept_score;
-        statement context(
-            sql,
-            "SELECT l.medium=r.medium,"
-            "CASE WHEN l.year_start IS NULL OR r.year_start IS NULL THEN NULL "
-            "ELSE abs(l.year_start-r.year_start) END,"
-            "CASE WHEN l.year_end IS NULL OR r.year_end IS NULL THEN NULL "
-            "ELSE abs(l.year_end-r.year_end) END "
-            "FROM works l,works r WHERE l.entity_id=? AND r.entity_id=?"
-        );
-        context.bind(1, left.id);
-        context.bind(2, right.id);
-        if (context.step()) {
-            const double medium_score
-                = context.integer(0) == 0 ? 0.0 : 1.0;
-            double date_score = 0.0;
-            int comparable_dates = 0;
-            for (const auto [column, signal] :
-                 {
-                     std::pair { 1, "start_year_difference" },
-                     std::pair { 2, "end_year_difference" },
-                 }) {
-                if (context.is_null(column)) {
-                    continue;
-                }
-                ++comparable_dates;
-                const auto difference = context.integer(column);
-                date_score += std::max(
-                    0.0, 1.0 - static_cast<double>(difference) / 10.0
-                );
-                result.signals[signal] = difference;
-            }
-            if (comparable_dates != 0) {
-                date_score /= static_cast<double>(comparable_dates);
-            }
-            result.context = 0.6 * medium_score + 0.4 * date_score;
-            result.signals["medium_equal"] = context.integer(0) != 0;
-            result.signals["date_compatibility"] = date_score;
-        }
-    } else if (left.family == "concept") {
-        result.signals["slug_similarity"] = maximum_text_similarity(
-            { left.fingerprint }, { right.fingerprint }
-        );
-        result.signals["token_fingerprint_equal"]
-            = left.fingerprint == right.fingerprint;
-        const auto left_works = query_value_set(
-            sql, "SELECT work_id FROM work_concepts WHERE concept_id=?", left.id
-        );
-        const auto right_works = query_value_set(
-            sql, "SELECT work_id FROM work_concepts WHERE concept_id=?", right.id
-        );
-        const auto left_neighbors = query_value_set(
-            sql,
-            "SELECT object_concept_id||':'||relation_type "
-            "FROM concept_relations WHERE subject_concept_id=?1 "
-            "UNION SELECT subject_concept_id||':'||relation_type "
-            "FROM concept_relations WHERE object_concept_id=?1",
-            left.id
-        );
-        statement right_neighbors_query(
-            sql,
-            "SELECT object_concept_id||':'||relation_type "
-            "FROM concept_relations WHERE subject_concept_id=?1 "
-            "UNION SELECT subject_concept_id||':'||relation_type "
-            "FROM concept_relations WHERE object_concept_id=?1"
-        );
-        right_neighbors_query.bind(1, right.id);
-        std::set<std::string, std::less<>> right_neighbors;
-        while (right_neighbors_query.step()) {
-            right_neighbors.emplace(right_neighbors_query.text(0));
-        }
-        const double work_score = jaccard(left_works, right_works);
-        const double neighbor_score
-            = jaccard(left_neighbors, right_neighbors);
-        result.graph = 0.7 * work_score + 0.3 * neighbor_score;
-        result.signals["shared_work_count"]
-            = intersection_count(left_works, right_works);
-        result.signals["shared_work_jaccard"] = work_score;
-        result.signals["shared_relation_neighbor_count"]
-            = intersection_count(left_neighbors, right_neighbors);
-        result.signals["relation_neighborhood_jaccard"]
-            = neighbor_score;
-        statement type(
-            sql,
-            "SELECT l.concept_type=r.concept_type FROM concepts l,concepts r "
-            "WHERE l.entity_id=? AND r.entity_id=?"
-        );
-        type.bind(1, left.id);
-        type.bind(2, right.id);
-        if (type.step()) {
-            result.context = type.integer(0) == 0 ? 0.0 : 1.0;
-            result.signals["concept_type_equal"] = type.integer(0) != 0;
-        }
-    }
-    return result;
-}
-
-void upsert_hint(
-    sqlite3* const sql, const hint_label& first, const hint_label& second
-) {
-    const hint_label& left = first.id < second.id ? first : second;
-    const hint_label& right = first.id < second.id ? second : first;
-    bool fingerprint_equal = false;
-    double token_sort = 0.0;
-    double token_set = 0.0;
-    double edit = 0.0;
-    double trigram_context = 0.0;
-    double text_score = 0.0;
-    std::string best_left = left.fingerprint;
-    std::string best_right = right.fingerprint;
-    for (const auto& left_value : left.fingerprints) {
-        for (const auto& right_value : right.fingerprints) {
-            fingerprint_equal
-                = fingerprint_equal || left_value == right_value;
-            const double current_sort
-                = rapidfuzz::fuzz::token_sort_ratio(
-                      left_value, right_value
-                  )
-                / 100.0;
-            const double current_set
-                = rapidfuzz::fuzz::token_set_ratio(
-                      left_value, right_value
-                  )
-                / 100.0;
-            const double current_edit
-                = rapidfuzz::fuzz::ratio(left_value, right_value, 35.0)
-                / 100.0;
-            const double current_trigram
-                = trigram_score(left_value, right_value);
-            const double current_text
-                = std::max({ current_sort, current_set, current_edit });
-            token_sort = std::max(token_sort, current_sort);
-            token_set = std::max(token_set, current_set);
-            edit = std::max(edit, current_edit);
-            trigram_context
-                = std::max(trigram_context, current_trigram);
-            if (current_text > text_score) {
-                text_score = current_text;
-                best_left = left_value;
-                best_right = right_value;
-            }
-        }
-    }
-    hint_components components
-        = calculate_hint_components(sql, left, right);
-    components.context = std::max(components.context, trigram_context);
-    const double score = std::clamp(
-        0.65 * text_score + 0.25 * components.graph
-            + 0.10 * components.context,
-        0.0, 1.0
-    );
-    json signals {
-        { "token_fingerprint_equal", fingerprint_equal },
-        { "token_sort_ratio", token_sort },
-        { "token_set_ratio", token_set },
-        { "normalized_edit_similarity", edit },
-        { "trigram_jaccard", trigram_context },
-        { "normalized_left", best_left },
-        { "normalized_right", best_right },
-        { "alternate_label_match",
-          best_left != left.fingerprint || best_right != right.fingerprint },
-    };
-    if (left.family == "concept") {
-        signals["slug_similarity"] = std::max(
-            {
-                rapidfuzz::fuzz::token_sort_ratio(
-                    left.fingerprint, right.fingerprint
-                ),
-                rapidfuzz::fuzz::token_set_ratio(
-                    left.fingerprint, right.fingerprint
-                ),
-                rapidfuzz::fuzz::ratio(
-                    left.fingerprint, right.fingerprint, 35.0
-                ),
-            }
-        ) / 100.0;
-    } else {
-        signals[left.family == "agent"
-                    ? "alias_similarity"
-                    : "alternate_title_similarity"] = text_score;
-    }
-    signals.update(components.signals);
-    statement insert(
-        sql,
-        "INSERT INTO merge_hints("
-        "entity_type,left_id,right_id,score,text_score,graph_score,"
-        "context_score,signals_json,status) VALUES(?,?,?,?,?,?,?,?,'open') "
-        "ON CONFLICT(entity_type,left_id,right_id) DO UPDATE SET "
-        "score=excluded.score,text_score=excluded.text_score,"
-        "graph_score=excluded.graph_score,context_score=excluded.context_score,"
-        "signals_json=excluded.signals_json WHERE merge_hints.status='open'"
-    );
-    insert.bind(1, left.family);
-    insert.bind(2, left.id);
-    insert.bind(3, right.id);
-    insert.bind(4, score);
-    insert.bind(5, text_score);
-    insert.bind(6, components.graph);
-    insert.bind(7, components.context);
-    insert.bind(8, signals.dump());
-    insert.execute();
-}
-
-void regenerate_incremental_hints(
-    sqlite3* const sql,
-    const std::set<std::string, std::less<>>& affected
-) {
-    if (affected.empty()) {
-        return;
-    }
-    statement remove(
-        sql,
-        "DELETE FROM merge_hints WHERE status='open' "
-        "AND (left_id=? OR right_id=?)"
-    );
-    for (const auto& id : affected) {
-        sqlite3_reset(remove.native());
-        sqlite3_clear_bindings(remove.native());
-        remove.bind(1, id);
-        remove.bind(2, id);
-        remove.execute();
-    }
-    bootstrap_hint_blocks_if_empty(sql);
-    std::map<std::string, hint_label, std::less<>> labels;
-    refresh_hint_blocks(sql, affected, labels);
-    for (const auto& [left, right] :
-         incrementally_blocked_pairs(sql, affected)) {
-        auto load = [&](const std::string& id) -> const hint_label* {
-            const auto cached = labels.find(id);
-            if (cached != labels.end()) {
-                return &cached->second;
-            }
-            auto label = hint_label_for_id(sql, id);
-            if (!label) {
-                return nullptr;
-            }
-            return &labels.emplace(id, std::move(*label)).first->second;
-        };
-        const hint_label* const left_label = load(left);
-        const hint_label* const right_label = load(right);
-        if (left_label != nullptr && right_label != nullptr
-            && left_label->family == right_label->family) {
-            upsert_hint(sql, *left_label, *right_label);
-        }
-    }
-}
-
-[[nodiscard]] std::size_t rebuild_hints(database& product) {
-    transaction change(product);
-    product.execute("DELETE FROM merge_hints WHERE status='open'");
-    product.execute("DELETE FROM merge_hint_blocks");
-    const auto labels = all_hint_labels(product.native());
-    std::map<std::string, const hint_label*, std::less<>> by_id;
-    for (const auto& label : labels) {
-        by_id.emplace(label.id, &label);
-        insert_hint_blocks(product.native(), label);
-    }
-    for (const auto& [left, right] :
-         all_blocked_pairs(product.native())) {
-        const auto left_label = by_id.find(left);
-        const auto right_label = by_id.find(right);
-        if (left_label != by_id.end() && right_label != by_id.end()
-            && left_label->second->family == right_label->second->family) {
-            upsert_hint(
-                product.native(), *left_label->second, *right_label->second
-            );
-        }
-    }
-    statement count(
-        product.native(),
-        "SELECT count(*) FROM merge_hints WHERE status='open'"
-    );
-    if (!count.step()) {
-        throw database_error("cannot count rebuilt merge hints");
-    }
-    const std::size_t inserted
-        = static_cast<std::size_t>(count.integer(0));
-    change.commit();
-    return inserted;
-}
 
 [[nodiscard]] bool batch_was_applied(
     sqlite3* const sql, const std::string& batch_id
@@ -5659,11 +4287,6 @@ void apply_one_batch(parsed_batch& batch, database& product) {
     create_assertions(batch, product.native());
     apply_updates(batch, product.native());
     apply_merges(batch, product.native());
-    batch.application_path = "/merge_hints";
-    batch.application_value_json.clear();
-    regenerate_incremental_hints(
-        product.native(), batch.affected_entities
-    );
     {
         statement resolve(
             product.native(),
@@ -5762,7 +4385,7 @@ void ensure_product_database(
     try {
         char* error = nullptr;
         const std::string schema = read_schema(
-            repository_root / "schema" / "product_v5.sql"
+            repository_root / "schema" / "product_v6.sql"
         );
         if (sqlite3_exec(
                 raw, schema.c_str(), nullptr, nullptr, &error
@@ -6150,36 +4773,6 @@ inbox_result check_product_inbox(const fs::path& repository_root) {
 
 inbox_result apply_product_inbox(const fs::path& repository_root) {
     return run_inbox(repository_root, true);
-}
-
-std::size_t rebuild_product_merge_hints(const fs::path& repository_root) {
-    const fs::path path
-        = repository_root / "database" / "art-islands.sqlite";
-    require_real_database_file(path);
-    database product(path, true);
-    return rebuild_hints(product);
-}
-
-void compact_product_merge_hints(const fs::path& repository_root) {
-    const fs::path path
-        = repository_root / "database" / "art-islands.sqlite";
-    require_real_database_file(path);
-    database product(path, true);
-    {
-        transaction change(product);
-        product.execute("DELETE FROM merge_hints WHERE status='open'");
-        product.execute("DELETE FROM merge_hint_block_members");
-        product.execute("DELETE FROM merge_hint_blocks");
-        change.commit();
-    }
-    product.execute("VACUUM");
-    require_clean_foreign_keys(product.native());
-    statement quick_check(product.native(), "PRAGMA quick_check");
-    if (!quick_check.step() || quick_check.text(0) != "ok") {
-        throw database_error(
-            "product database quick_check failed after compaction"
-        );
-    }
 }
 
 } // namespace arachne::penelope

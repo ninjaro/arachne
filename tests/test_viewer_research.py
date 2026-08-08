@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from viewer.scripts.build_catalog import build_catalog
 from viewer.scripts.build_research import build_research
 
 
@@ -18,7 +18,7 @@ class ViewerResearchTests(unittest.TestCase):
         connection = sqlite3.connect(self.database)
         connection.executescript(
             """
-            PRAGMA user_version = 5;
+            PRAGMA user_version = 6;
             CREATE TABLE entities (
                 id TEXT PRIMARY KEY,
                 entity_type TEXT NOT NULL
@@ -42,18 +42,6 @@ class ViewerResearchTests(unittest.TestCase):
                 status TEXT NOT NULL,
                 PRIMARY KEY (batch_id, code, json_path)
             );
-            CREATE TABLE merge_hints (
-                entity_type TEXT NOT NULL,
-                left_id TEXT NOT NULL,
-                right_id TEXT NOT NULL,
-                score REAL NOT NULL,
-                text_score REAL,
-                graph_score REAL,
-                context_score REAL,
-                signals_json TEXT NOT NULL,
-                status TEXT NOT NULL,
-                PRIMARY KEY (entity_type, left_id, right_id)
-            );
             INSERT INTO entities VALUES
                 ('work-000001', 'work'),
                 ('work-000002', 'work'),
@@ -73,29 +61,78 @@ class ViewerResearchTests(unittest.TestCase):
                     'research-0', 'old_problem', '/update/works/0',
                     'Already resolved.', NULL, 'resolved'
                 );
-            INSERT INTO merge_hints VALUES
-                (
-                    'work', 'work-000001', 'work-000002',
-                    0.91, 0.95, 0.5, 1.0,
-                    '{"same_year":true}', 'open'
-                ),
-                (
-                    'agent', 'agent-000001', 'agent-000002',
-                    0.99, 1.0, 0.8, 1.0,
-                    '{"exact_alias":true}', 'ignored'
-                );
             """
         )
         connection.commit()
         connection.close()
+        self.decisions = self.root / "merge-hint-decisions.json"
+        self.decisions.write_text(
+            '{"artifact_type":"arachne_merge_hint_decisions_v1",'
+            '"format_version":1,"ignored_pairs":[]}\n',
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_exports_open_database_issues_and_hints(self) -> None:
+    def database_hash(self) -> str:
+        return hashlib.sha256(self.database.read_bytes()).hexdigest()
+
+    def catalog(self) -> dict[str, object]:
+        return {
+            "formatVersion": 1,
+            "productSnapshotId": "product-1",
+            "databaseSha256": self.database_hash(),
+        }
+
+    def write_export(
+        self,
+        *,
+        product_hash: str | None = None,
+    ) -> Path:
+        export = self.root / "merge-hints-review.json"
+        hash_value = product_hash or self.database_hash()
+        document: dict[str, object] = {
+            "artifactType": "arachne_merge_hint_review_v1",
+            "formatVersion": 1,
+            "source": {
+                "productSha256": hash_value,
+                "decisionsSha256": hashlib.sha256(
+                    self.decisions.read_bytes()
+                ).hexdigest(),
+                "ignoredPairCount": 0,
+            },
+            "items": [
+                {
+                    "id": "merge-hint:work:work-000001:work-000002",
+                    "kind": "merge_hint",
+                    "severity": "info",
+                    "category": "work_duplicate_candidate",
+                    "title": "Possible work duplicate",
+                    "message": "same primary artist · exact normalized title",
+                    "entityType": "work",
+                    "leftId": "work-000001",
+                    "leftLabel": "The Work",
+                    "rightId": "work-000002",
+                    "rightLabel": "Work, The",
+                    "similarityScore": 0.91,
+                    "textScore": 0.95,
+                    "graphScore": 0.5,
+                    "contextScore": 1.0,
+                    "signals": {"same_year": True},
+                }
+            ],
+        }
+        export.write_text(json.dumps(document) + "\n", encoding="utf-8")
+        return export
+
+    def test_exports_open_database_issues_and_explicit_hints(self) -> None:
+        export = self.write_export()
         output = build_research(
             self.database,
-            {"formatVersion": 1, "productSnapshotId": "product-1"},
+            self.catalog(),
+            export,
+            self.decisions,
         )
 
         self.assertEqual(output["productSnapshotId"], "product-1")
@@ -125,64 +162,72 @@ class ViewerResearchTests(unittest.TestCase):
         self.assertEqual(hint["signals"], {"same_year": True})
 
     def test_prefers_external_review_export(self) -> None:
-        export = self.root / "merge-hints-review.json"
-        export.write_text(
-            json.dumps(
-                {
-                    "artifactType": "arachne_merge_hint_review_v1",
-                    "formatVersion": 1,
-                    "items": [
-                        {
-                            "id": "merge-hint:agent:agent-000001:agent-000002",
-                            "kind": "merge_hint",
-                            "severity": "info",
-                            "category": "agent_duplicate_candidate",
-                            "title": "Possible agent duplicate",
-                            "message": "One external review candidate.",
-                            "entityType": "agent",
-                            "leftId": "agent-000001",
-                            "leftLabel": "Open Agent",
-                            "rightId": "agent-000002",
-                            "rightLabel": "Ignored Agent",
-                            "similarityScore": 0.88,
-                            "textScore": 0.9,
-                            "graphScore": 0.7,
-                            "contextScore": 0.8,
-                            "signals": {"external": True},
-                        }
-                    ],
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        export = self.write_export()
 
         output = build_research(
             self.database,
-            {"formatVersion": 1, "productSnapshotId": "product-1"},
+            self.catalog(),
             export,
+            self.decisions,
         )
 
         self.assertEqual(output["summary"]["mergeHints"], 1)
         hint = output["items"][1]
-        self.assertEqual(hint["entityType"], "agent")
-        self.assertEqual(hint["similarityScore"], 0.88)
-        self.assertEqual(hint["signals"], {"external": True})
+        self.assertEqual(hint["entityType"], "work")
+        self.assertEqual(hint["similarityScore"], 0.91)
+        self.assertEqual(hint["signals"], {"same_year": True})
+
+    def test_requires_explicit_review_export(self) -> None:
+        with self.assertRaisesRegex(ValueError, "explicit merge-hint review"):
+            build_research(
+                self.database,
+                self.catalog(),
+                self.root / "missing.json",
+                self.decisions,
+            )
+
+    def test_rejects_stale_review_export(self) -> None:
+        export = self.write_export(product_hash="0" * 64)
+        with self.assertRaisesRegex(ValueError, "different product database"):
+            build_research(
+                self.database, self.catalog(), export, self.decisions
+            )
+
+    def test_rejects_review_export_for_changed_decisions(self) -> None:
+        export = self.write_export()
+        self.decisions.write_text(
+            '{"artifact_type":"arachne_merge_hint_decisions_v1",'
+            '"format_version":1,"ignored_pairs":['
+            '{"family":"work","left_id":"work-000001",'
+            '"right_id":"work-000002"}]}\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "different durable decisions"):
+            build_research(
+                self.database, self.catalog(), export, self.decisions
+            )
+
+    def test_rejects_catalog_for_another_database(self) -> None:
+        export = self.write_export()
+        catalog = self.catalog()
+        catalog["databaseSha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "catalog and product database"):
+            build_research(self.database, catalog, export, self.decisions)
 
     def test_rejects_old_product_schema(self) -> None:
         connection = sqlite3.connect(self.database)
-        connection.execute("PRAGMA user_version = 4")
+        connection.execute("PRAGMA user_version = 5")
+        connection.commit()
         connection.close()
 
-        with self.assertRaisesRegex(RuntimeError, "requires product schema v5"):
+        export = self.write_export()
+        with self.assertRaisesRegex(RuntimeError, "requires product schema v6"):
             build_research(
                 self.database,
-                {"formatVersion": 1, "productSnapshotId": "product-1"},
+                self.catalog(),
+                export,
+                self.decisions,
             )
-        with self.assertRaisesRegex(
-            RuntimeError, "unsupported product schema version 4"
-        ):
-            build_catalog(self.database)
 
 
 if __name__ == "__main__":
