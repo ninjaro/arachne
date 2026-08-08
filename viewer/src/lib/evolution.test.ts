@@ -12,6 +12,7 @@ const DEFAULT_FILTERS: EvolutionFilters = {
   excludedTagIds: [],
   earlierDepth: 0,
   laterDepth: 0,
+  expansionMode: "directional",
   includeYearOnly: true,
   includeAmbiguous: false,
 };

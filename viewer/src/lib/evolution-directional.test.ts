@@ -17,6 +17,7 @@ const DIRECTIONAL_FILTERS: EvolutionFilters = {
   excludedTagIds: [],
   earlierDepth: 0,
   laterDepth: 0,
+  expansionMode: "directional",
   includeYearOnly: true,
   includeAmbiguous: false,
 };
@@ -270,6 +271,24 @@ describe("independent directional traversal", () => {
       ),
     ).toHaveLength(1);
     expect(scene.traversalStates.filter((state) => state.tagId === "P")).toHaveLength(2);
+  });
+
+  it("records same-temporal-group peers as interchanges, not later neighbors", () => {
+    const scene = buildScene(
+      [
+        fixtureWork({ id: "seed", year: 1900, tags: ["S", "A"] }),
+        fixtureWork({ id: "peer", year: 1900, tags: ["A", "B"] }),
+        fixtureWork({ id: "a-later", year: 1910, tags: ["A"] }),
+      ],
+      { laterDepth: 1 },
+    );
+    const peer = scene.workById.get("peer")!;
+
+    expect(peer).toBeDefined();
+    expect(peer.laterDepth).toBeNull();
+    expect(peer.reasons.some((reason) => reason.kind === "visible-interchange")).toBe(true);
+    expect(peer.reasons.some((reason) => reason.kind === "temporal-neighbor")).toBe(false);
+    expect(scene.workById.get("a-later")?.laterDepth).toBe(1);
   });
 });
 

@@ -14,6 +14,19 @@ import type {
   Work,
   WorkRelation,
 } from "./types";
+import {
+  aggregateTagStrength,
+  inferTagStrengthScale,
+  weightedTagMembership,
+  type AggregateTagStrength,
+  type TagStrengthScale,
+  type WeightedTagMembership,
+} from "./evolution-strength";
+
+export type IndexedWeightedTagMembership = Omit<
+  WeightedTagMembership,
+  "stationId"
+>;
 
 export interface EvolutionTag {
   id: EntityId;
@@ -50,8 +63,30 @@ export interface EvolutionIndex {
   tagsByWorkId: Map<EntityId, EvolutionTag[]>;
   workIdsByTagId: Map<EntityId, EntityId[]>;
   bucketsByTagId: Map<EntityId, IndexedTemporalBucket[]>;
+  /** Inferred once for the complete domain projection. */
+  strengthScale: TagStrengthScale;
+  weightedAssignmentByMembershipKey: Map<
+    string,
+    IndexedWeightedTagMembership
+  >;
   tagOptions: EvolutionTag[];
   explicitRelations: OrientedWorkRelation[];
+}
+
+export type ExpansionMode = "directional" | "connected";
+
+export interface EvolutionSafetyLimits {
+  maxVisibleTags: number;
+  maxVisibleStations: number;
+  maxTraversalStates: number;
+}
+
+export type EvolutionSafetyLimitKind = "tags" | "stations" | "states";
+
+export interface EvolutionSafetyStatus {
+  limits: EvolutionSafetyLimits;
+  reached: EvolutionSafetyLimitKind[];
+  warning: string | null;
 }
 
 export interface EvolutionFilters extends EvolutionDateFilters {
@@ -59,6 +94,27 @@ export interface EvolutionFilters extends EvolutionDateFilters {
   excludedTagIds: readonly EntityId[];
   earlierDepth: number;
   laterDepth: number;
+  expansionMode: ExpansionMode;
+  /** Optional viewer/test override; omitted fields use conservative defaults. */
+  safetyLimits?: Partial<EvolutionSafetyLimits>;
+}
+
+export interface ContextTraversalPathStep {
+  tagId: EntityId;
+  direction: "earlier" | "later";
+  sourceTemporalGroupId: string;
+  targetTemporalGroupId: string;
+  /** Aggregate-station IDs after projection; traversal-stop IDs internally. */
+  sourceStationId?: string;
+  targetStationId?: string;
+}
+
+export interface ContextPathProvenance {
+  earlierUsed: number;
+  laterUsed: number;
+  originStationId?: string;
+  entryStationId?: string;
+  path: ContextTraversalPathStep[];
 }
 
 export type ReachReason =
@@ -71,6 +127,7 @@ export type ReachReason =
       viaTagId: EntityId;
       direction?: "earlier" | "later";
       sourceStationId?: string;
+      context?: ContextPathProvenance;
     }
   | {
       kind: "temporal-neighbor";
@@ -82,6 +139,7 @@ export type ReachReason =
       sourceStationId?: string;
       targetStationId?: string;
       resultingDepth?: number;
+      context?: ContextPathProvenance;
     }
   | {
       kind: "visible-interchange";
@@ -91,6 +149,7 @@ export type ReachReason =
       direction?: "earlier" | "later";
       sourceStationId?: string;
       resultingDepth?: number;
+      context?: ContextPathProvenance;
     };
 
 export interface ReachInfo {
@@ -108,7 +167,72 @@ export interface DirectionalReachInfo extends ReachInfo {
 export interface DirectionalTraversalState {
   tagId: EntityId;
   stopId: string;
+  temporalGroupId: string;
   direction: "earlier" | "later";
+}
+
+export interface ContextTraversalState {
+  tagId: EntityId;
+  temporalGroupId: string;
+  earlierUsed: number;
+  laterUsed: number;
+  seedTagId: EntityId;
+  originStationId: string;
+  entryStationId: string;
+  path: ContextTraversalPathStep[];
+}
+
+function contextTraversalProvenanceKey(state: ContextTraversalState): string {
+  return JSON.stringify([
+    state.seedTagId,
+    state.originStationId,
+    state.entryStationId,
+    state.path.map((step) => [
+      step.tagId,
+      step.direction,
+      step.sourceTemporalGroupId,
+      step.targetTemporalGroupId,
+      step.sourceStationId ?? "",
+      step.targetStationId ?? "",
+    ]),
+  ]);
+}
+
+/**
+ * Pareto dominance for one tag + temporal-group frontier. Equal-cost states
+ * dominate only identical provenance; distinct equal-cost histories survive.
+ */
+export function contextTraversalStateDominates(
+  existing: ContextTraversalState,
+  candidate: ContextTraversalState,
+): boolean {
+  if (
+    existing.tagId !== candidate.tagId ||
+    existing.temporalGroupId !== candidate.temporalGroupId
+  ) {
+    return false;
+  }
+  const noMoreExpensive =
+    existing.earlierUsed <= candidate.earlierUsed &&
+    existing.laterUsed <= candidate.laterUsed;
+  if (!noMoreExpensive) return false;
+  const strictlyCheaper =
+    existing.earlierUsed < candidate.earlierUsed ||
+    existing.laterUsed < candidate.laterUsed;
+  return (
+    strictlyCheaper ||
+    contextTraversalProvenanceKey(existing) ===
+      contextTraversalProvenanceKey(candidate)
+  );
+}
+
+export interface TemporalTagStop {
+  id: string;
+  tagId: EntityId;
+  temporalGroupId: string;
+  stationIds: string[];
+  intervalStart: number;
+  intervalEnd: number;
 }
 
 export interface AggregateStation extends DirectionalReachInfo {
@@ -125,6 +249,9 @@ export interface AggregateMembership extends DirectionalReachInfo {
   key: string;
   tagId: EntityId;
   stationId: string;
+  /** Maximum normalized assignment at this aggregate stop. */
+  strength: number | null;
+  strengthSummary: AggregateTagStrength;
   reach: DirectionalReachInfo;
 }
 
@@ -132,6 +259,10 @@ export interface VisibleMembership extends DirectionalReachInfo {
   key: string;
   tagId: EntityId;
   workId: EntityId;
+  strength: number | null;
+  rawStrength: number | null;
+  historicalRole: string | null;
+  confidence: number | null;
 }
 
 export interface VisibleEvolutionTag extends DirectionalReachInfo {
@@ -186,6 +317,9 @@ export interface VisibleEvolution {
   aggregateMembershipsByStationId: Map<string, AggregateMembership[]>;
   aggregateRelations: VisibleAggregateRelation[];
   traversalStates: DirectionalTraversalState[];
+  contextTraversalStates: ContextTraversalState[];
+  temporalTagStops: TemporalTagStop[];
+  safetyStatus: EvolutionSafetyStatus;
   emptySeedTagIds: EntityId[];
 }
 
@@ -240,6 +374,28 @@ function membershipKey(tagId: EntityId, workId: EntityId): string {
   return `${tagId}\u0000${workId}`;
 }
 
+function conceptAssignmentOrder(
+  left: ConceptAssignment,
+  right: ConceptAssignment,
+): number {
+  const centrality = (value: ConceptAssignment) =>
+    value.centrality !== null && Number.isFinite(value.centrality)
+      ? value.centrality
+      : Number.NEGATIVE_INFINITY;
+  const confidence = (value: ConceptAssignment) =>
+    value.confidence !== null && Number.isFinite(value.confidence)
+      ? value.confidence
+      : Number.NEGATIVE_INFINITY;
+  return (
+    left.id.localeCompare(right.id) ||
+    centrality(right) - centrality(left) ||
+    confidence(right) - confidence(left) ||
+    (left.historicalRole ?? "").localeCompare(right.historicalRole ?? "") ||
+    left.label.localeCompare(right.label) ||
+    left.relationType.localeCompare(right.relationType)
+  );
+}
+
 /** Stable scene identifier for an accepted bucket and sorted visible tag set. */
 export function aggregateStationId(
   temporalBucketId: string,
@@ -249,6 +405,22 @@ export function aggregateStationId(
   return `station:${encodeURIComponent(temporalBucketId)}:${signature}`;
 }
 
+const contextReasonKeyCache = new WeakMap<ContextPathProvenance, string>();
+
+function contextReasonKey(context: ContextPathProvenance | undefined): string {
+  if (!context) return "";
+  const cached = contextReasonKeyCache.get(context);
+  if (cached) return cached;
+  const key = `:${context.earlierUsed}:${context.laterUsed}:${context.originStationId ?? ""}:${context.entryStationId ?? ""}:${context.path
+    .map(
+      (step) =>
+        `${step.tagId},${step.direction},${step.sourceTemporalGroupId},${step.targetTemporalGroupId},${step.sourceStationId ?? ""},${step.targetStationId ?? ""}`,
+    )
+    .join(";")}`;
+  contextReasonKeyCache.set(context, key);
+  return key;
+}
+
 function reasonKey(reason: ReachReason): string {
   switch (reason.kind) {
     case "seed-tag":
@@ -256,11 +428,11 @@ function reasonKey(reason: ReachReason): string {
     case "seed-membership":
       return `1:${reason.seedTagId}:${reason.viaTagId}`;
     case "shared-work":
-      return `2:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}:${reason.direction ?? "seed"}:${reason.sourceStationId ?? ""}`;
+      return `2:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}:${reason.direction ?? "seed"}:${reason.sourceStationId ?? ""}${contextReasonKey(reason.context)}`;
     case "temporal-neighbor":
-      return `3:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}:${reason.direction}:${reason.groupId}:${reason.sourceStationId ?? ""}:${reason.targetStationId ?? ""}:${reason.resultingDepth ?? ""}`;
+      return `3:${reason.seedTagId}:${reason.fromWorkId}:${reason.viaTagId}:${reason.direction}:${reason.groupId}:${reason.sourceStationId ?? ""}:${reason.targetStationId ?? ""}:${reason.resultingDepth ?? ""}${contextReasonKey(reason.context)}`;
     case "visible-interchange":
-      return `4:${reason.seedTagId}:${reason.workId}:${reason.tagId}:${reason.direction ?? "seed"}:${reason.sourceStationId ?? ""}:${reason.resultingDepth ?? ""}`;
+      return `4:${reason.seedTagId}:${reason.workId}:${reason.tagId}:${reason.direction ?? "seed"}:${reason.sourceStationId ?? ""}:${reason.resultingDepth ?? ""}${contextReasonKey(reason.context)}`;
   }
 }
 
@@ -389,6 +561,13 @@ export function buildEvolutionIndex(domain: Domain): EvolutionIndex {
     EntityId,
     Map<string, { temporal: EvolutionDate; workIds: Set<EntityId> }>
   >();
+  const strengthScale = inferTagStrengthScale(
+    domain.works.flatMap((work) => work.concepts),
+  );
+  const weightedAssignmentByMembershipKey = new Map<
+    string,
+    IndexedWeightedTagMembership
+  >();
 
   const works = domain.works.slice().sort((left, right) => left.id.localeCompare(right.id));
   for (const work of works) {
@@ -396,12 +575,22 @@ export function buildEvolutionIndex(domain: Domain): EvolutionIndex {
     if (temporal) temporalByWorkId.set(work.id, temporal);
     const assignments = work.concepts
       .slice()
-      .sort((left, right) => left.id.localeCompare(right.id));
+      .sort(conceptAssignmentOrder);
     const seenTags = new Set<EntityId>();
     const workTags: EvolutionTag[] = [];
     for (const assignment of assignments) {
       if (seenTags.has(assignment.id)) continue;
       seenTags.add(assignment.id);
+      const { stationId: _stationId, ...weighted } = weightedTagMembership(
+        assignment,
+        work.id,
+        "",
+        strengthScale,
+      );
+      weightedAssignmentByMembershipKey.set(
+        membershipKey(assignment.id, work.id),
+        weighted,
+      );
       const candidate = assignmentTag(assignment);
       const existing = tagById.get(candidate.id);
       if (!existing) tagById.set(candidate.id, candidate);
@@ -484,6 +673,8 @@ export function buildEvolutionIndex(domain: Domain): EvolutionIndex {
     tagsByWorkId,
     workIdsByTagId,
     bucketsByTagId,
+    strengthScale,
+    weightedAssignmentByMembershipKey,
     tagOptions: [...tagById.values()]
       .filter((tag) => tag.datedWorkCount > 0)
       .sort(
@@ -519,19 +710,46 @@ export function defaultEvolutionSeedTagId(
   return best?.id ?? null;
 }
 
+const DEFAULT_EVOLUTION_SAFETY_LIMITS: EvolutionSafetyLimits = {
+  maxVisibleTags: 5_000,
+  maxVisibleStations: 5_000,
+  // Above the largest normal directional scene while still bounding the
+  // combinatorial route histories available in connected-context mode.
+  maxTraversalStates: 15_000,
+};
+
 interface ResolvedEvolutionFilters extends EvolutionFilters {
   earlierDepth: number;
   laterDepth: number;
+  safetyLimits: EvolutionSafetyLimits;
 }
 
 function normalizedFilters(filters: EvolutionFilters): ResolvedEvolutionFilters {
   const earlierDepth = Math.max(0, Math.trunc(filters.earlierDepth));
   const laterDepth = Math.max(0, Math.trunc(filters.laterDepth));
+  const requestedLimits = filters.safetyLimits ?? {};
+  const positiveLimit = (value: number | undefined, fallback: number) =>
+    Number.isFinite(value) ? Math.max(1, Math.trunc(value!)) : fallback;
   return {
     seedTagIds: deduplicatedIds(filters.seedTagIds),
     excludedTagIds: deduplicatedIds(filters.excludedTagIds).sort(),
     earlierDepth,
     laterDepth,
+    expansionMode: filters.expansionMode ?? "directional",
+    safetyLimits: {
+      maxVisibleTags: positiveLimit(
+        requestedLimits.maxVisibleTags,
+        DEFAULT_EVOLUTION_SAFETY_LIMITS.maxVisibleTags,
+      ),
+      maxVisibleStations: positiveLimit(
+        requestedLimits.maxVisibleStations,
+        DEFAULT_EVOLUTION_SAFETY_LIMITS.maxVisibleStations,
+      ),
+      maxTraversalStates: positiveLimit(
+        requestedLimits.maxTraversalStates,
+        DEFAULT_EVOLUTION_SAFETY_LIMITS.maxTraversalStates,
+      ),
+    },
     includeYearOnly: filters.includeYearOnly,
     includeAmbiguous: filters.includeAmbiguous,
   };
@@ -561,6 +779,16 @@ function combineDirectionalReach(
       for (const seedTagId of reach.seedTagIds) seedTagIds.add(seedTagId);
     }
     for (const reason of reach.reasons) {
+      if (
+        (reason.kind === "shared-work" ||
+          reason.kind === "temporal-neighbor" ||
+          reason.kind === "visible-interchange") &&
+        reason.context
+      ) {
+        reasonMap.set(reasonKey(reason), reason);
+        seedTagIds.add(reason.seedTagId);
+        continue;
+      }
       const reasonDirection =
         reason.kind === "temporal-neighbor" ||
         reason.kind === "shared-work" ||
@@ -681,10 +909,22 @@ function buildAggregateProjection(
         .filter((membership): membership is VisibleMembership => membership !== undefined)
         .map((membership) => membership);
       const reach = sources.length ? combineDirectionalReach(sources) : station.reach;
+      const weightedSources: WeightedTagMembership[] = sources.map((membership) => ({
+        tagId: membership.tagId,
+        workId: membership.workId,
+        stationId: station.id,
+        strength: membership.strength,
+        rawStrength: membership.rawStrength,
+        historicalRole: membership.historicalRole,
+        confidence: membership.confidence,
+      }));
+      const strengthSummary = aggregateTagStrength(weightedSources);
       aggregateMemberships.push({
         key: `${tagId}\u0000${station.id}`,
         tagId,
         stationId: station.id,
+        strength: strengthSummary.displayStrength,
+        strengthSummary,
         ...reach,
         reach,
       });
@@ -706,9 +946,16 @@ function buildAggregateProjection(
   }
 
   for (const tag of tags) {
-    tag.stationIds = (membershipsByTagId.get(tag.tag.id) ?? []).map(
-      (membership) => membership.stationId,
-    );
+    tag.stationIds = (membershipsByTagId.get(tag.tag.id) ?? [])
+      .map((membership) => membership.stationId)
+      .sort((leftId, rightId) => {
+        const left = stationById.get(leftId)!;
+        const right = stationById.get(rightId)!;
+        return (
+          compareEvolutionDates(left.temporal, right.temporal) ||
+          leftId.localeCompare(rightId)
+        );
+      });
     tag.origin.targetStationIds = [
       ...new Set(
         tag.origin.targetWorkIds
@@ -755,7 +1002,7 @@ function buildAggregateProjection(
   };
 }
 
-type ReachDirection = "seed" | "earlier" | "later";
+type ReachDirection = "seed" | "neutral" | "earlier" | "later";
 
 interface MutableDirectionalReach {
   seedDepth: 0 | null;
@@ -764,6 +1011,8 @@ interface MutableDirectionalReach {
   seedReasons: Map<string, ReachReason>;
   earlierReasons: Map<string, ReachReason>;
   laterReasons: Map<string, ReachReason>;
+  /** Pareto-valid connected paths are retained independently of depth minima. */
+  contextReasons: Map<string, ReachReason>;
   seedSeedTagIds: Set<EntityId>;
   earlierSeedTagIds: Set<EntityId>;
   laterSeedTagIds: Set<EntityId>;
@@ -778,6 +1027,7 @@ interface TraversalStop {
 
 interface TraversalStopGroup {
   id: string;
+  temporalBucketId: string;
   intervalStart: number;
   intervalEnd: number;
   stopIds: string[];
@@ -798,7 +1048,14 @@ interface TraversalGraph {
 
 interface PendingTraversalState extends DirectionalTraversalState {
   depth: number;
-  seedTagIds: Set<EntityId>;
+  sourceStopIdsBySeedTagId: Map<EntityId, Set<string>>;
+}
+
+interface PendingContextTraversalState extends ContextTraversalState {
+  originStopId: string;
+  entryStopId: string;
+  provenanceKey: string;
+  stateKey: string;
 }
 
 function newDirectionalReach(): MutableDirectionalReach {
@@ -809,6 +1066,7 @@ function newDirectionalReach(): MutableDirectionalReach {
     seedReasons: new Map(),
     earlierReasons: new Map(),
     laterReasons: new Map(),
+    contextReasons: new Map(),
     seedSeedTagIds: new Set(),
     earlierSeedTagIds: new Set(),
     laterSeedTagIds: new Set(),
@@ -835,7 +1093,19 @@ function recordDirectionalReach(
     reach.seedReasons.set(reasonId, reason);
     return;
   }
+  if (direction === "neutral") {
+    reach.contextReasons.set(reasonId, reason);
+    return;
+  }
   const depthField = direction === "earlier" ? "earlierDepth" : "laterDepth";
+  if (
+    (reason.kind === "shared-work" ||
+      reason.kind === "temporal-neighbor" ||
+      reason.kind === "visible-interchange") &&
+    reason.context
+  ) {
+    reach.contextReasons.set(reasonId, reason);
+  }
   const reasons = direction === "earlier" ? reach.earlierReasons : reach.laterReasons;
   const roots =
     direction === "earlier" ? reach.earlierSeedTagIds : reach.laterSeedTagIds;
@@ -861,6 +1131,16 @@ function freezeDirectionalReach(reach: MutableDirectionalReach): DirectionalReac
   if (reach.seedDepth === 0) collect(reach.seedSeedTagIds, reach.seedReasons);
   if (reach.earlierDepth !== null) collect(reach.earlierSeedTagIds, reach.earlierReasons);
   if (reach.laterDepth !== null) collect(reach.laterSeedTagIds, reach.laterReasons);
+  for (const [key, reason] of reach.contextReasons) {
+    reasons.set(key, reason);
+    if (
+      reason.kind === "shared-work" ||
+      reason.kind === "temporal-neighbor" ||
+      reason.kind === "visible-interchange"
+    ) {
+      seedTagIds.add(reason.seedTagId);
+    }
+  }
   const depths = [reach.seedDepth, reach.earlierDepth, reach.laterDepth].filter(
     (depth): depth is number => depth !== null,
   );
@@ -926,25 +1206,35 @@ function buildTraversalGraph(
   }
   const timelineByTagId = new Map<EntityId, TraversalTimeline>();
   for (const [tagId, tagStops] of stopsByTagId) {
-    const groups: TraversalStopGroup[] = [];
+    // Temporal tag groups intentionally use accepted date buckets rather than
+    // interval overlap. In particular, a year-only station must not collapse
+    // every exact date in that year into one simultaneous traversal junction.
+    const groupByBucketId = new Map<string, TraversalStopGroup>();
     for (const stop of tagStops) {
-      const previous = groups.at(-1);
-      if (previous && stop.temporal.intervalStart <= previous.intervalEnd) {
-        previous.intervalEnd = Math.max(previous.intervalEnd, stop.temporal.intervalEnd);
-        previous.stopIds.push(stop.id);
-      } else {
-        groups.push({
-          id: "",
+      let group = groupByBucketId.get(stop.temporal.bucketId);
+      if (!group) {
+        group = {
+          id: `temporal-group:${encodeURIComponent(stop.temporal.bucketId)}`,
+          temporalBucketId: stop.temporal.bucketId,
           intervalStart: stop.temporal.intervalStart,
           intervalEnd: stop.temporal.intervalEnd,
-          stopIds: [stop.id],
-        });
+          stopIds: [],
+        };
+        groupByBucketId.set(stop.temporal.bucketId, group);
       }
+      group.intervalStart = Math.min(group.intervalStart, stop.temporal.intervalStart);
+      group.intervalEnd = Math.max(group.intervalEnd, stop.temporal.intervalEnd);
+      group.stopIds.push(stop.id);
     }
+    const groups = [...groupByBucketId.values()].sort(
+      (left, right) =>
+        left.intervalStart - right.intervalStart ||
+        left.intervalEnd - right.intervalEnd ||
+        left.id.localeCompare(right.id),
+    );
     const groupIndexByStopId = new Map<string, number>();
     groups.forEach((group, groupIndex) => {
       group.stopIds.sort();
-      group.id = `traversal-group:${encodeURIComponent(tagId)}:${group.stopIds.map(encodeURIComponent).join("+")}`;
       for (const stopId of group.stopIds) groupIndexByStopId.set(stopId, groupIndex);
     });
     timelineByTagId.set(tagId, { groups, groupIndexByStopId });
@@ -959,15 +1249,38 @@ function remapReachReasons(
 ): void {
   const finalStationId = (traversalStopId: string | undefined) => {
     if (!traversalStopId) return undefined;
-    const workId = graph.stopById.get(traversalStopId)?.workIds[0];
-    return workId ? stationIdByWorkId.get(workId) : undefined;
+    for (const workId of graph.stopById.get(traversalStopId)?.workIds ?? []) {
+      const stationId = stationIdByWorkId.get(workId);
+      if (stationId) return stationId;
+    }
+    return undefined;
   };
+  const remapContext = (
+    context: ContextPathProvenance | undefined,
+  ): ContextPathProvenance | undefined =>
+    context
+      ? {
+          ...context,
+          originStationId:
+            finalStationId(context.originStationId) ?? context.originStationId,
+          entryStationId:
+            finalStationId(context.entryStationId) ?? context.entryStationId,
+          path: context.path.map((step) => ({
+            ...step,
+            sourceStationId:
+              finalStationId(step.sourceStationId) ?? step.sourceStationId,
+            targetStationId:
+              finalStationId(step.targetStationId) ?? step.targetStationId,
+          })),
+        }
+      : undefined;
   reach.reasons = reach.reasons
     .map((reason): ReachReason => {
       if (reason.kind === "shared-work") {
         return {
           ...reason,
           sourceStationId: finalStationId(reason.sourceStationId) ?? reason.sourceStationId,
+          context: remapContext(reason.context),
         };
       }
       if (reason.kind === "temporal-neighbor") {
@@ -975,12 +1288,14 @@ function remapReachReasons(
           ...reason,
           sourceStationId: finalStationId(reason.sourceStationId) ?? reason.sourceStationId,
           targetStationId: finalStationId(reason.targetStationId) ?? reason.targetStationId,
+          context: remapContext(reason.context),
         };
       }
       if (reason.kind === "visible-interchange") {
         return {
           ...reason,
           sourceStationId: finalStationId(reason.sourceStationId) ?? reason.sourceStationId,
+          context: remapContext(reason.context),
         };
       }
       return reason;
@@ -1014,6 +1329,25 @@ export function buildVisibleEvolution(
   const workReach = new Map<string, MutableDirectionalReach>();
   const membershipReach = new Map<string, MutableDirectionalReach>();
   const emptySeedTagIds: EntityId[] = [];
+  const safetyReached = new Set<EvolutionSafetyLimitKind>();
+
+  const recordTag = (
+    tagId: EntityId,
+    direction: ReachDirection,
+    depth: number,
+    reason: ReachReason,
+    roots: Iterable<EntityId>,
+  ): boolean => {
+    if (
+      !tagReach.has(tagId) &&
+      tagReach.size >= filters.safetyLimits.maxVisibleTags
+    ) {
+      safetyReached.add("tags");
+      return false;
+    }
+    recordDirectionalReach(tagReach, tagId, direction, depth, reason, roots);
+    return true;
+  };
 
   const recordStop = (
     stop: TraversalStop,
@@ -1022,7 +1356,7 @@ export function buildVisibleEvolution(
     depth: number,
     reasonFor: (seedTagId: EntityId, workId: EntityId) => ReachReason,
     roots: ReadonlySet<EntityId>,
-  ) => {
+  ): boolean => {
     const sortedRoots = [...roots].sort();
     for (const seedTagId of sortedRoots) {
       const stopReason = reasonFor(seedTagId, stop.workIds[0]!);
@@ -1040,6 +1374,7 @@ export function buildVisibleEvolution(
         );
       }
     }
+    return true;
   };
 
   for (const seedTagId of seeds) {
@@ -1049,14 +1384,13 @@ export function buildVisibleEvolution(
       continue;
     }
     const roots = new Set([seedTagId]);
-    recordDirectionalReach(
-      tagReach,
+    if (!recordTag(
       seedTagId,
       "seed",
       0,
       { kind: "seed-tag", seedTagId },
       roots,
-    );
+    )) continue;
     for (const stop of stops) {
       recordStop(
         stop,
@@ -1070,109 +1404,527 @@ export function buildVisibleEvolution(
   }
 
   const processedStates: DirectionalTraversalState[] = [];
+  const retainedContextStates: PendingContextTraversalState[] = [];
+  let traversalStateCount = 0;
+
   const runDirection = (direction: "earlier" | "later", budget: number) => {
     if (budget <= 0) return;
-    const waves = Array.from({ length: budget }, () => new Map<string, PendingTraversalState>());
+    const waves = Array.from(
+      { length: budget },
+      () => new Map<string, PendingTraversalState>(),
+    );
     const enqueue = (
       tagId: EntityId,
       stopId: string,
       depth: number,
-      roots: Iterable<EntityId>,
+      seedTagId: EntityId,
+      sourceStopId: string,
     ) => {
       if (depth >= budget || seedSet.has(tagId) || excluded.has(tagId)) return;
       const stop = graph.stopById.get(stopId);
-      if (!stop?.tagIds.includes(tagId)) return;
-      const key = `${tagId}\u0000${stopId}\u0000${direction}`;
+      const timeline = graph.timelineByTagId.get(tagId);
+      const groupIndex = timeline?.groupIndexByStopId.get(stopId);
+      if (!stop?.tagIds.includes(tagId) || timeline === undefined || groupIndex === undefined) {
+        return;
+      }
+      const temporalGroupId = timeline.groups[groupIndex]!.id;
+      const key = `${tagId}\u0000${temporalGroupId}\u0000${direction}`;
       let pending = waves[depth]!.get(key);
       if (!pending) {
-        pending = { tagId, stopId, direction, depth, seedTagIds: new Set() };
+        pending = {
+          tagId,
+          stopId,
+          temporalGroupId,
+          direction,
+          depth,
+          sourceStopIdsBySeedTagId: new Map(),
+        };
         waves[depth]!.set(key, pending);
       }
-      for (const seedTagId of roots) pending.seedTagIds.add(seedTagId);
+      const sources = pending.sourceStopIdsBySeedTagId.get(seedTagId);
+      if (sources) sources.add(sourceStopId);
+      else pending.sourceStopIdsBySeedTagId.set(seedTagId, new Set([sourceStopId]));
     };
 
-    for (const [stopId, reach] of stopReach) {
+    for (const [stopId, reach] of [...stopReach.entries()].sort(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
       if (reach.seedDepth !== 0) continue;
       const stop = graph.stopById.get(stopId)!;
       for (const tagId of stop.tagIds) {
-        if (!seedSet.has(tagId)) enqueue(tagId, stopId, 0, reach.seedSeedTagIds);
+        if (seedSet.has(tagId)) continue;
+        for (const seedTagId of [...reach.seedSeedTagIds].sort()) {
+          enqueue(tagId, stopId, 0, seedTagId, stopId);
+        }
       }
     }
 
     const processed = new Set<string>();
     for (let depth = 0; depth < budget; depth += 1) {
-      for (const [key, state] of [...waves[depth]!.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+      for (const [key, state] of [...waves[depth]!.entries()].sort(([left], [right]) =>
+        left.localeCompare(right),
+      )) {
         if (processed.has(key)) continue;
+        if (traversalStateCount >= filters.safetyLimits.maxTraversalStates) {
+          safetyReached.add("states");
+          return;
+        }
         processed.add(key);
-        processedStates.push({ tagId: state.tagId, stopId: state.stopId, direction });
-        const current = graph.stopById.get(state.stopId)!;
+        traversalStateCount += 1;
         const timeline = graph.timelineByTagId.get(state.tagId)!;
         const groupIndex = timeline.groupIndexByStopId.get(state.stopId)!;
         const currentGroup = timeline.groups[groupIndex]!;
+        const sourceStopIds = [
+          ...new Set(
+            [...state.sourceStopIdsBySeedTagId.values()].flatMap((ids) => [...ids]),
+          ),
+        ].sort();
+        const representativeStopId = sourceStopIds[0] ?? currentGroup.stopIds[0]!;
+        processedStates.push({
+          tagId: state.tagId,
+          stopId: representativeStopId,
+          temporalGroupId: currentGroup.id,
+          direction,
+        });
         const neighborIndex = direction === "earlier" ? groupIndex - 1 : groupIndex + 1;
         const neighborGroup = timeline.groups[neighborIndex] ?? null;
         const resultingDepth = depth + 1;
-        for (const seedTagId of [...state.seedTagIds].sort()) {
-          recordDirectionalReach(
-            tagReach,
-            state.tagId,
-            direction,
-            resultingDepth,
-            {
-              kind: "shared-work",
-              seedTagId,
-              fromWorkId: current.workIds[0]!,
-              viaTagId: state.tagId,
-              direction,
-              sourceStationId: current.id,
-            },
-            [seedTagId],
-          );
-        }
-
-        const targetStopIds = [
-          ...currentGroup.stopIds,
-          ...(neighborGroup?.stopIds ?? []),
-        ];
-        const targetStops = [...new Set(targetStopIds)]
-          .map((stopId) => graph.stopById.get(stopId)!)
-          .sort((left, right) => left.id.localeCompare(right.id));
-        for (const target of targetStops) {
-          recordStop(
-            target,
-            state.tagId,
-            direction,
-            resultingDepth,
-            (seedTagId, workId) => ({
-              kind: "temporal-neighbor",
-              seedTagId,
-              fromWorkId: current.workIds[0]!,
-              viaTagId: state.tagId,
-              direction,
-              groupId: target.id === current.id ? currentGroup.id : (neighborGroup?.id ?? currentGroup.id),
-              sourceStationId: current.id,
-              targetStationId: target.id,
-              resultingDepth,
-            }),
-            state.seedTagIds,
-          );
-          for (const tagId of target.tagIds) {
-            if (tagId !== state.tagId) {
-              enqueue(tagId, target.id, resultingDepth, state.seedTagIds);
-            }
+        let tagAccepted = false;
+        for (const [seedTagId, sources] of [
+          ...state.sourceStopIdsBySeedTagId.entries(),
+        ].sort(([left], [right]) => left.localeCompare(right))) {
+          for (const sourceStopId of [...sources].sort()) {
+            const source = graph.stopById.get(sourceStopId)!;
+            tagAccepted =
+              recordTag(
+                state.tagId,
+                direction,
+                resultingDepth,
+                {
+                  kind: "shared-work",
+                  seedTagId,
+                  fromWorkId: source.workIds[0]!,
+                  viaTagId: state.tagId,
+                  direction,
+                  sourceStationId: source.id,
+                },
+                [seedTagId],
+              ) || tagAccepted;
           }
         }
-        if (neighborGroup) {
-          for (const stopId of neighborGroup.stopIds) {
-            enqueue(state.tagId, stopId, resultingDepth, state.seedTagIds);
+        if (!tagAccepted) continue;
+
+        const targetGroups = [currentGroup, ...(neighborGroup ? [neighborGroup] : [])];
+        for (const targetGroup of targetGroups) {
+          const sameTemporalGroup = targetGroup === currentGroup;
+          for (const targetStopId of targetGroup.stopIds) {
+            const target = graph.stopById.get(targetStopId)!;
+            for (const [seedTagId, sources] of [
+              ...state.sourceStopIdsBySeedTagId.entries(),
+            ].sort(([left], [right]) => left.localeCompare(right))) {
+              for (const sourceStopId of [...sources].sort()) {
+                const source = graph.stopById.get(sourceStopId)!;
+                const reached = recordStop(
+                  target,
+                  state.tagId,
+                  sameTemporalGroup ? "neutral" : direction,
+                  resultingDepth,
+                  (root, workId) => sameTemporalGroup
+                    ? ({
+                        kind: "visible-interchange",
+                        seedTagId: root,
+                        workId,
+                        tagId: state.tagId,
+                        sourceStationId: source.id,
+                        resultingDepth,
+                      })
+                    : ({
+                        kind: "temporal-neighbor",
+                        seedTagId: root,
+                        fromWorkId: source.workIds[0]!,
+                        viaTagId: state.tagId,
+                        direction,
+                        groupId: targetGroup.id,
+                        sourceStationId: source.id,
+                        targetStationId: target.id,
+                        resultingDepth,
+                      }),
+                  new Set([seedTagId]),
+                );
+                if (!reached) continue;
+                for (const tagId of target.tagIds) {
+                  if (tagId !== state.tagId) {
+                    enqueue(tagId, target.id, resultingDepth, seedTagId, target.id);
+                  }
+                }
+                if (neighborGroup === targetGroup) {
+                  enqueue(
+                    state.tagId,
+                    target.id,
+                    resultingDepth,
+                    seedTagId,
+                    target.id,
+                  );
+                }
+              }
+            }
           }
         }
       }
     }
   };
 
-  runDirection("earlier", filters.earlierDepth);
-  runDirection("later", filters.laterDepth);
+  const runConnectedContext = () => {
+    if (filters.earlierDepth <= 0 && filters.laterDepth <= 0) return;
+    const frontierByKey = new Map<string, PendingContextTraversalState[]>();
+    const active = new Set<string>();
+    const waves = Array.from(
+      { length: filters.earlierDepth + filters.laterDepth + 1 },
+      () => new Map<string, PendingContextTraversalState[]>(),
+    );
+    const waveQueues = Array.from(
+      { length: filters.earlierDepth + filters.laterDepth + 1 },
+      (): PendingContextTraversalState[] => [],
+    );
+
+    const provenanceKey = (
+      seedTagId: EntityId,
+      originStopId: string,
+      entryStopId: string,
+      path: readonly ContextTraversalPathStep[],
+    ) =>
+      JSON.stringify([
+        seedTagId,
+        originStopId,
+        entryStopId,
+        path.map((step) => [
+          step.tagId,
+          step.direction,
+          step.sourceTemporalGroupId,
+          step.targetTemporalGroupId,
+          step.sourceStationId ?? "",
+          step.targetStationId ?? "",
+        ]),
+      ]);
+
+    const enqueue = (
+      tagId: EntityId,
+      stopId: string,
+      earlierUsed: number,
+      laterUsed: number,
+      seedTagId: EntityId,
+      originStopId: string,
+      path: ContextTraversalPathStep[],
+    ): boolean => {
+      if (
+        earlierUsed > filters.earlierDepth ||
+        laterUsed > filters.laterDepth ||
+        seedSet.has(tagId) ||
+        excluded.has(tagId)
+      ) {
+        return false;
+      }
+      const stop = graph.stopById.get(stopId);
+      const timeline = graph.timelineByTagId.get(tagId);
+      const groupIndex = timeline?.groupIndexByStopId.get(stopId);
+      if (!stop?.tagIds.includes(tagId) || timeline === undefined || groupIndex === undefined) {
+        return false;
+      }
+      const temporalGroupId = timeline.groups[groupIndex]!.id;
+      const stateProvenanceKey = provenanceKey(
+        seedTagId,
+        originStopId,
+        stopId,
+        path,
+      );
+      const stateKey = JSON.stringify([
+        tagId,
+        temporalGroupId,
+        earlierUsed,
+        laterUsed,
+        stateProvenanceKey,
+      ]);
+      const state: PendingContextTraversalState = {
+        tagId,
+        temporalGroupId,
+        earlierUsed,
+        laterUsed,
+        seedTagId,
+        originStationId: originStopId,
+        entryStationId: stopId,
+        path,
+        originStopId,
+        entryStopId: stopId,
+        provenanceKey: stateProvenanceKey,
+        stateKey,
+      };
+      const key = `${tagId}\u0000${temporalGroupId}`;
+      const existing = frontierByKey.get(key) ?? [];
+      for (const retained of existing) {
+        if (contextTraversalStateDominates(retained, state)) return false;
+      }
+      if (traversalStateCount >= filters.safetyLimits.maxTraversalStates) {
+        safetyReached.add("states");
+        return false;
+      }
+      const retained = existing.filter((candidate) => {
+        if (contextTraversalStateDominates(state, candidate)) {
+          active.delete(candidate.stateKey);
+          return false;
+        }
+        return true;
+      });
+      retained.push(state);
+      retained.sort((left, right) => left.provenanceKey.localeCompare(right.provenanceKey));
+      frontierByKey.set(key, retained);
+      active.add(stateKey);
+      const progressionKey = JSON.stringify([
+        tagId,
+        temporalGroupId,
+        earlierUsed,
+        laterUsed,
+      ]);
+      const wave = waves[earlierUsed + laterUsed]!;
+      const pending = wave.get(progressionKey);
+      if (pending) pending.push(state);
+      else wave.set(progressionKey, [state]);
+      waveQueues[earlierUsed + laterUsed]!.push(state);
+      traversalStateCount += 1;
+      return true;
+    };
+
+    for (const [stopId, reach] of [...stopReach.entries()].sort(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
+      if (reach.seedDepth !== 0) continue;
+      const stop = graph.stopById.get(stopId)!;
+      for (const tagId of stop.tagIds) {
+        if (seedSet.has(tagId)) continue;
+        for (const seedTagId of [...reach.seedSeedTagIds].sort()) {
+          enqueue(tagId, stopId, 0, 0, seedTagId, stopId, []);
+        }
+      }
+    }
+
+    for (let totalUsed = 0; totalUsed < waves.length; totalUsed += 1) {
+      // First close over every aggregate station and every additional tag in
+      // the current temporal stop without changing either directional budget.
+      // The queue grows as same-stop interchanges discover new tag states.
+      const sameStopQueue = waveQueues[totalUsed]!;
+      for (let queueIndex = 0; queueIndex < sameStopQueue.length; queueIndex += 1) {
+        const state = sameStopQueue[queueIndex]!;
+        if (!active.has(state.stateKey)) continue;
+        const timeline = graph.timelineByTagId.get(state.tagId)!;
+        const groupIndex = timeline.groupIndexByStopId.get(state.entryStopId)!;
+        const currentGroup = timeline.groups[groupIndex]!;
+        const sourceStopId = currentGroup.stopIds.includes(state.entryStopId)
+          ? state.entryStopId
+          : currentGroup.stopIds[0]!;
+        const source = graph.stopById.get(sourceStopId)!;
+        const lastDirection = state.path.at(-1)?.direction;
+        const reachDirection: ReachDirection = lastDirection ?? "neutral";
+        for (const targetStopId of currentGroup.stopIds) {
+          const target = graph.stopById.get(targetStopId)!;
+          const context: ContextPathProvenance = {
+            earlierUsed: state.earlierUsed,
+            laterUsed: state.laterUsed,
+            originStationId: state.originStopId,
+            entryStationId: target.id,
+            path: state.path,
+          };
+          if (
+            !recordTag(
+              state.tagId,
+              reachDirection,
+              totalUsed,
+              {
+                kind: "shared-work",
+                seedTagId: state.seedTagId,
+                fromWorkId: source.workIds[0]!,
+                viaTagId: state.tagId,
+                direction: lastDirection,
+                sourceStationId: source.id,
+                context,
+              },
+              [state.seedTagId],
+            )
+          ) {
+            continue;
+          }
+          const reached = recordStop(
+            target,
+            state.tagId,
+            reachDirection,
+            totalUsed,
+            (root, workId) => ({
+              kind: "visible-interchange",
+              seedTagId: root,
+              workId,
+              tagId: state.tagId,
+              direction: lastDirection,
+              sourceStationId: source.id,
+              resultingDepth: totalUsed,
+              context,
+            }),
+            new Set([state.seedTagId]),
+          );
+          if (!reached) continue;
+          for (const tagId of target.tagIds) {
+            if (tagId === state.tagId) continue;
+            enqueue(
+              tagId,
+              target.id,
+              state.earlierUsed,
+              state.laterUsed,
+              state.seedTagId,
+              state.originStopId,
+              state.path,
+            );
+          }
+        }
+      }
+
+      const orderedProgressions = [...waves[totalUsed]!.entries()].sort(
+        ([left], [right]) => left.localeCompare(right),
+      );
+      for (const [, pendingStates] of orderedProgressions) {
+        const states = pendingStates
+          .filter((state) => active.has(state.stateKey))
+          .sort((left, right) => left.provenanceKey.localeCompare(right.provenanceKey));
+        if (!states.length) continue;
+        const representative = states[0]!;
+        const timeline = graph.timelineByTagId.get(representative.tagId)!;
+        const groupIndex = timeline.groupIndexByStopId.get(
+          representative.entryStopId,
+        )!;
+        const currentGroup = timeline.groups[groupIndex]!;
+
+        // After same-stop closure, resolve each actual temporal neighbor once
+        // for this tag/group/budget progression. Only this phase consumes a
+        // directional budget and appends a directional path step.
+        for (const direction of ["earlier", "later"] as const) {
+          const earlierUsed =
+            representative.earlierUsed + Number(direction === "earlier");
+          const laterUsed =
+            representative.laterUsed + Number(direction === "later");
+          if (
+            earlierUsed > filters.earlierDepth ||
+            laterUsed > filters.laterDepth
+          ) {
+            continue;
+          }
+          const neighborIndex =
+            direction === "earlier" ? groupIndex - 1 : groupIndex + 1;
+          const neighborGroup = timeline.groups[neighborIndex] ?? null;
+          // A missing neighbor is not a historical step and consumes nothing.
+          if (!neighborGroup) continue;
+          const resultingDepth = earlierUsed + laterUsed;
+          for (const state of states) {
+            const sourceStopId = currentGroup.stopIds.includes(state.entryStopId)
+              ? state.entryStopId
+              : currentGroup.stopIds[0]!;
+            const source = graph.stopById.get(sourceStopId)!;
+            for (const targetStopId of neighborGroup.stopIds) {
+                const target = graph.stopById.get(targetStopId)!;
+                const path: ContextTraversalPathStep[] = [
+                  ...state.path,
+                  {
+                    tagId: state.tagId,
+                    direction,
+                    sourceTemporalGroupId: currentGroup.id,
+                    targetTemporalGroupId: neighborGroup.id,
+                    sourceStationId: source.id,
+                    targetStationId: target.id,
+                  },
+                ];
+                const context: ContextPathProvenance = {
+                  earlierUsed,
+                  laterUsed,
+                  originStationId: state.originStopId,
+                  entryStationId: target.id,
+                  path,
+                };
+                if (
+                  !recordTag(
+                    state.tagId,
+                    direction,
+                    resultingDepth,
+                    {
+                      kind: "shared-work",
+                      seedTagId: state.seedTagId,
+                      fromWorkId: source.workIds[0]!,
+                      viaTagId: state.tagId,
+                      direction,
+                      sourceStationId: source.id,
+                      context,
+                    },
+                    [state.seedTagId],
+                  )
+                ) {
+                  continue;
+                }
+                const reached = recordStop(
+                  target,
+                  state.tagId,
+                  direction,
+                  resultingDepth,
+                  (root, workId) => ({
+                    kind: "temporal-neighbor",
+                    seedTagId: root,
+                    fromWorkId: source.workIds[0]!,
+                    viaTagId: state.tagId,
+                    direction,
+                    groupId: neighborGroup.id,
+                    sourceStationId: source.id,
+                    targetStationId: target.id,
+                    resultingDepth,
+                    context,
+                  }),
+                  new Set([state.seedTagId]),
+                );
+                if (!reached) continue;
+                for (const tagId of target.tagIds) {
+                  if (tagId !== state.tagId) {
+                    enqueue(
+                      tagId,
+                      target.id,
+                      earlierUsed,
+                      laterUsed,
+                      state.seedTagId,
+                      state.originStopId,
+                      path,
+                    );
+                  }
+                }
+                enqueue(
+                  state.tagId,
+                  target.id,
+                  earlierUsed,
+                  laterUsed,
+                  state.seedTagId,
+                  state.originStopId,
+                  path,
+                );
+            }
+          }
+        }
+      }
+    }
+
+    for (const states of frontierByKey.values()) {
+      for (const state of states) {
+        if (tagReach.has(state.tagId)) {
+          retainedContextStates.push(state);
+        }
+      }
+    }
+  };
+
+  if (filters.expansionMode === "connected") runConnectedContext();
+  else {
+    runDirection("earlier", filters.earlierDepth);
+    runDirection("later", filters.laterDepth);
+  }
 
   // Every membership between an already-visible work and tag is a genuine
   // interchange, but does not itself consume directional traversal budget.
@@ -1252,18 +2004,78 @@ export function buildVisibleEvolution(
     }
   }
 
-  const memberships: VisibleMembership[] = [];
+  let memberships: VisibleMembership[] = [];
   for (const [key, reach] of membershipReach) {
     const separator = key.indexOf("\u0000");
     const tagId = key.slice(0, separator);
     const workId = key.slice(separator + 1);
     if (tagReach.get(tagId) === undefined || workReach.get(workId) === undefined) continue;
-    memberships.push({ key, tagId, workId, ...freezeDirectionalReach(reach) });
+    const assignment = index.weightedAssignmentByMembershipKey.get(key);
+    memberships.push({
+      key,
+      tagId,
+      workId,
+      strength: assignment?.strength ?? null,
+      rawStrength: assignment?.rawStrength ?? null,
+      historicalRole: assignment?.historicalRole ?? null,
+      confidence: assignment?.confidence ?? null,
+      ...freezeDirectionalReach(reach),
+    });
   }
   memberships.sort(
     (left, right) =>
       left.tagId.localeCompare(right.tagId) || left.workId.localeCompare(right.workId),
   );
+
+  // The traversal graph uses full non-excluded tag signatures so progression
+  // stays stable before the final visible tag set is known. Safety semantics,
+  // however, are defined in terms of the final aggregate stations. Project
+  // those signatures now, retain the first deterministic station groups, and
+  // let every downstream map derive from the retained memberships.
+  const candidateMembershipsByWorkId = new Map<EntityId, VisibleMembership[]>();
+  for (const membership of memberships) {
+    const current = candidateMembershipsByWorkId.get(membership.workId);
+    if (current) current.push(membership);
+    else candidateMembershipsByWorkId.set(membership.workId, [membership]);
+  }
+  const candidateStationGroups = new Map<
+    string,
+    { id: string; temporals: EvolutionDate[]; workIds: EntityId[] }
+  >();
+  for (const [workId, workMemberships] of candidateMembershipsByWorkId) {
+    const temporal = index.temporalByWorkId.get(workId);
+    if (!temporal) continue;
+    const visibleTagIds = [...new Set(workMemberships.map((membership) => membership.tagId))]
+      .sort();
+    if (!visibleTagIds.length) continue;
+    const id = aggregateStationId(temporal.bucketId, visibleTagIds);
+    let group = candidateStationGroups.get(id);
+    if (!group) {
+      group = { id, temporals: [], workIds: [] };
+      candidateStationGroups.set(id, group);
+    }
+    group.temporals.push(temporal);
+    group.workIds.push(workId);
+  }
+  const orderedCandidateStations = [...candidateStationGroups.values()].sort(
+    (left, right) =>
+      compareEvolutionDates(
+        aggregateTemporal(left.temporals),
+        aggregateTemporal(right.temporals),
+      ) || left.id.localeCompare(right.id),
+  );
+  if (orderedCandidateStations.length > filters.safetyLimits.maxVisibleStations) {
+    safetyReached.add("stations");
+    const retainedWorkIds = new Set(
+      orderedCandidateStations
+        .slice(0, filters.safetyLimits.maxVisibleStations)
+        .flatMap((group) => group.workIds),
+    );
+    memberships = memberships.filter((membership) =>
+      retainedWorkIds.has(membership.workId),
+    );
+  }
+
   const membershipsByTagId = new Map<EntityId, VisibleMembership[]>();
   const membershipsByWorkId = new Map<EntityId, VisibleMembership[]>();
   for (const membership of memberships) {
@@ -1386,21 +2198,119 @@ export function buildVisibleEvolution(
         index.temporalByWorkId.get(relation.targetId)!.intervalEnd,
     }));
   const aggregate = buildAggregateProjection(tags, works, visibleMemberships, explicitRelations);
+  const finalStationIdForStop = (stopId: string): string | undefined => {
+    const stop = graph.stopById.get(stopId);
+    if (!stop) return undefined;
+    for (const workId of stop.workIds) {
+      const stationId = aggregate.stationIdByWorkId.get(workId);
+      if (stationId) return stationId;
+    }
+    return undefined;
+  };
   const traversalStates = [
     ...new Map(
-      processedStates.map((state) => {
-        const workId = graph.stopById.get(state.stopId)?.workIds[0];
-        const stopId = workId ? aggregate.stationIdByWorkId.get(workId) ?? state.stopId : state.stopId;
+      processedStates.flatMap((state) => {
+        const stopId = finalStationIdForStop(state.stopId);
+        if (!stopId || !tagById.has(state.tagId)) return [];
         const remapped = { ...state, stopId };
-        return [`${remapped.tagId}\u0000${remapped.stopId}\u0000${remapped.direction}`, remapped];
+        return [[
+          `${remapped.tagId}\u0000${remapped.temporalGroupId}\u0000${remapped.direction}`,
+          remapped,
+        ] as const];
       }),
     ).values(),
   ].sort(
     (left, right) =>
       left.direction.localeCompare(right.direction) ||
       left.tagId.localeCompare(right.tagId) ||
+      left.temporalGroupId.localeCompare(right.temporalGroupId) ||
       left.stopId.localeCompare(right.stopId),
   );
+  const contextTraversalStates = retainedContextStates
+    .flatMap((state): ContextTraversalState[] => {
+      const originStationId = finalStationIdForStop(state.originStopId);
+      const entryStationId = finalStationIdForStop(state.entryStopId);
+      if (!originStationId || !entryStationId || !tagById.has(state.tagId)) return [];
+      return [{
+        tagId: state.tagId,
+        temporalGroupId: state.temporalGroupId,
+        earlierUsed: state.earlierUsed,
+        laterUsed: state.laterUsed,
+        seedTagId: state.seedTagId,
+        originStationId,
+        entryStationId,
+        path: state.path.map((step) => ({
+          ...step,
+          sourceStationId:
+            finalStationIdForStop(step.sourceStationId ?? "") ??
+            step.sourceStationId,
+          targetStationId:
+            finalStationIdForStop(step.targetStationId ?? "") ??
+            step.targetStationId,
+        })),
+      }];
+    })
+    .sort(
+      (left, right) =>
+        left.earlierUsed + left.laterUsed -
+          (right.earlierUsed + right.laterUsed) ||
+        left.earlierUsed - right.earlierUsed ||
+        left.laterUsed - right.laterUsed ||
+        left.tagId.localeCompare(right.tagId) ||
+        left.temporalGroupId.localeCompare(right.temporalGroupId) ||
+        left.seedTagId.localeCompare(right.seedTagId) ||
+        left.originStationId.localeCompare(right.originStationId) ||
+        left.entryStationId.localeCompare(right.entryStationId) ||
+        JSON.stringify(left.path).localeCompare(JSON.stringify(right.path)),
+    );
+  const temporalTagStops: TemporalTagStop[] = [];
+  for (const tag of tags) {
+    const tagId = tag.tag.id;
+    const visibleStationIds = new Set(
+      (aggregate.membershipsByTagId.get(tagId) ?? []).map(
+        (membership) => membership.stationId,
+      ),
+    );
+    for (const group of graph.timelineByTagId.get(tagId)?.groups ?? []) {
+      const stationIds = [
+        ...new Set(
+          group.stopIds.flatMap((stopId) => {
+            const stop = graph.stopById.get(stopId)!;
+            return stop.workIds
+              .map((workId) => aggregate.stationIdByWorkId.get(workId))
+              .filter(
+                (stationId): stationId is string =>
+                  stationId !== undefined && visibleStationIds.has(stationId),
+              );
+          }),
+        ),
+      ].sort();
+      if (!stationIds.length) continue;
+      temporalTagStops.push({
+        id: `temporal-tag-stop:${encodeURIComponent(tagId)}:${encodeURIComponent(group.id)}`,
+        tagId,
+        temporalGroupId: group.id,
+        stationIds,
+        intervalStart: group.intervalStart,
+        intervalEnd: group.intervalEnd,
+      });
+    }
+  }
+  temporalTagStops.sort(
+    (left, right) =>
+      left.tagId.localeCompare(right.tagId) ||
+      left.intervalStart - right.intervalStart ||
+      left.intervalEnd - right.intervalEnd ||
+      left.id.localeCompare(right.id),
+  );
+  const reached = [...safetyReached].sort() as EvolutionSafetyLimitKind[];
+  const safetyStatus: EvolutionSafetyStatus = {
+    limits: filters.safetyLimits,
+    reached,
+    warning: reached.length
+      ? `Evolution context limit reached (${reached.join(", ")}); the visible scene was truncated.`
+      : null,
+  };
 
   return {
     filters,
@@ -1420,6 +2330,9 @@ export function buildVisibleEvolution(
     aggregateMembershipsByStationId: aggregate.membershipsByStationId,
     aggregateRelations: aggregate.relations,
     traversalStates,
+    contextTraversalStates,
+    temporalTagStops,
+    safetyStatus,
     emptySeedTagIds,
   };
 }

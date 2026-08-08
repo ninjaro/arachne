@@ -774,11 +774,24 @@
 }
 
 .metro-copy-legend i.station {
+  position: relative;
   display: inline-block;
   width: 0.7rem;
   height: 0.7rem;
+  background: #14191b;
   border: 2px solid #dce5e4;
   border-radius: 50%;
+}
+
+.metro-copy-legend i.station::after {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 0.16rem;
+  height: 0.16rem;
+  background: #eef4f3;
+  border-radius: 50%;
+  content: "";
+  transform: translate(-50%, -50%);
 }
 
 .metro-copy-legend i.station.year {
@@ -792,9 +805,22 @@
 }
 
 .metro-copy-legend i.station.aggregate {
-  position: relative;
   border-width: 1px;
   box-shadow: inset 0 0 0 2px #14191b, inset 0 0 0 3px #a8c7c2;
+}
+
+.metro-copy-legend i.station.interchange {
+  box-shadow: 0 0 0 2px #14191b, 0 0 0 4px #f3dd9b;
+}
+
+.metro-copy-legend i.station.uncertain {
+  border-color: #d8c7a5;
+  border-style: dashed;
+}
+
+.metro-copy-legend i.station.selected {
+  border-color: #fff2bd;
+  box-shadow: 0 0 0 2px rgba(255, 242, 189, 0.36);
 }
 
 .metro-copy-legend i.station.ambiguous {
@@ -809,11 +835,27 @@
   border-top: 2px dashed #e0b765;
 }
 
+.metro-copy-legend i.trajectory {
+  display: inline-block;
+  width: 1.05rem;
+  border-top: 2px solid #79bdb3;
+}
+
+.metro-copy-legend i.trajectory.strength {
+  border-top-width: 5px;
+}
+
+.metro-copy-legend i.trajectory.bundle {
+  border-top-color: #b8c2c4;
+  border-top-style: double;
+  border-top-width: 4px;
+}
+
 .metro-controls {
   position: relative;
   z-index: 20;
   display: grid;
-  grid-template-columns: minmax(18rem, 1.2fr) minmax(18rem, 1.2fr) repeat(2, minmax(8rem, 0.45fr)) minmax(13rem, 0.7fr) auto;
+  grid-template-columns: minmax(17rem, 1.2fr) minmax(17rem, 1.2fr) repeat(2, minmax(8rem, 0.45fr)) minmax(10rem, 0.55fr) minmax(12rem, 0.65fr) auto;
   align-items: stretch;
   gap: 0.55rem;
   margin-bottom: 0.55rem;
@@ -821,6 +863,7 @@
 
 .metro-tag-picker,
 .metro-depth-control,
+.metro-expansion-mode,
 .metro-date-controls,
 .metro-control-actions {
   min-width: 0;
@@ -836,6 +879,7 @@
 
 .metro-tag-picker > label,
 .metro-depth-control > label,
+.metro-expansion-mode legend,
 .metro-date-controls legend {
   display: block;
   margin-bottom: 0.38rem;
@@ -843,6 +887,20 @@
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.025em;
+}
+
+.metro-expansion-mode label,
+.metro-date-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #9da9ab;
+  font-size: 0.69rem;
+}
+
+.metro-expansion-mode label + label,
+.metro-date-controls label + label {
+  margin-top: 0.28rem;
 }
 
 .metro-tag-picker.exclude > label {
@@ -1199,7 +1257,7 @@
 }
 
 .metro-trajectory {
-  --line-width: 2.4px;
+  --segment-width: 2.5px;
   color: var(--tag-color);
   cursor: pointer;
   outline: none;
@@ -1221,18 +1279,22 @@
 }
 
 .metro-trajectory.seed {
-  --line-width: 4px;
+  opacity: 1;
 }
 
-.metro-trajectory.depth-1 { --line-width: 2.8px; opacity: 0.78; }
-.metro-trajectory.depth-2 { --line-width: 2.3px; opacity: 0.62; }
+.metro-trajectory.seed .metro-line-visible {
+  filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--tag-color), transparent 52%));
+}
+
+.metro-trajectory.depth-1 { opacity: 0.78; }
+.metro-trajectory.depth-2 { opacity: 0.62; }
 .metro-trajectory.depth-3,
-.metro-trajectory.depth-4 { --line-width: 1.9px; opacity: 0.48; }
+.metro-trajectory.depth-4 { opacity: 0.48; }
 
 .metro-line-visible {
   fill: none;
   stroke: var(--tag-color);
-  stroke-width: var(--line-width);
+  stroke-width: var(--segment-width);
   stroke-linecap: round;
   stroke-linejoin: round;
   pointer-events: none;
@@ -1241,8 +1303,48 @@
 .metro-line-hit {
   fill: none;
   stroke: transparent;
-  stroke-width: 24px;
+  stroke-width: 16px;
   pointer-events: stroke;
+}
+
+.metro-trajectory.trajectory-bundle {
+  --tag-color: #aeb9bb;
+}
+
+.metro-trajectory.trajectory-bundle .metro-line-visible {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.metro-trajectory.trajectory-bundle.selected .metro-line-visible,
+.metro-trajectory.trajectory-bundle:focus-visible .metro-line-visible {
+  stroke: #eef4f3;
+}
+
+.metro-bundle-count circle {
+  fill: #151c1e;
+  stroke: #b8c3c5;
+  stroke-width: 1.2;
+}
+
+.metro-bundle-count text {
+  fill: #eef4f3;
+  font-size: 6.5px;
+  font-weight: 800;
+  pointer-events: none;
+  text-anchor: middle;
+}
+
+.metro-strength-segment,
+.metro-station-port-route {
+  transition: stroke-width 100ms ease, opacity 100ms ease;
+}
+
+/* Unknown assignment strength is neither weak nor medium. Retain its neutral
+   fallback width but distinguish it with a stable broken stroke. */
+.metro-strength-segment[data-strength="unknown"],
+.metro-station-port-route[data-strength="unknown"] {
+  stroke-dasharray: 5 2.5;
 }
 
 .metro-trajectory.muted-by-selection {
@@ -1257,13 +1359,13 @@
 
 .metro-trajectory.selected .metro-line-visible,
 .metro-trajectory:focus-visible .metro-line-visible {
-  stroke-width: calc(var(--line-width) + 1.8px);
+  stroke-width: calc(var(--segment-width) + 1.8px);
   filter: drop-shadow(0 0 2px color-mix(in srgb, var(--tag-color), transparent 45%));
 }
 
 .metro-trajectory.previewed .metro-line-visible,
 .metro-trajectory.preview-related .metro-line-visible {
-  stroke-width: calc(var(--line-width) + 0.7px);
+  stroke-width: calc(var(--segment-width) + 0.7px);
   opacity: 1;
 }
 
@@ -1351,9 +1453,15 @@
 }
 
 .metro-station {
+  --station-context-opacity: 1;
   cursor: pointer;
   outline: none;
-  transition: opacity 100ms ease, filter 100ms ease;
+  transition: filter 100ms ease;
+}
+
+.metro-station-visible {
+  opacity: var(--station-context-opacity);
+  transition: opacity 100ms ease;
 }
 
 .metro-station-hit {
@@ -1361,14 +1469,28 @@
   pointer-events: all;
 }
 
+.metro-station-knockout {
+  fill: #0e1315;
+  stroke: rgba(14, 19, 21, 0.92);
+  stroke-width: 2;
+  pointer-events: none;
+}
+
 .metro-station-core {
+  fill: #111719;
+  stroke: #eef4f3;
+  stroke-width: 1.9;
+}
+
+.metro-station-center {
   fill: #eef4f3;
   stroke: #0e1315;
-  stroke-width: 1.2;
+  stroke-width: 0.7;
+  pointer-events: none;
 }
 
 .metro-station-halo {
-  fill: #0e1315;
+  fill: none;
   stroke: #d8c7a5;
   stroke-width: 1.4;
   stroke-dasharray: 2.5 2.5;
@@ -1387,7 +1509,7 @@
 }
 
 .metro-interchange-ring {
-  fill: #0e1315;
+  fill: none;
   stroke: #f3dd9b;
   stroke-width: 2.2;
 }
@@ -1406,16 +1528,16 @@
   text-anchor: middle;
 }
 
-.metro-station.depth-1 { opacity: 0.84; }
-.metro-station.depth-2 { opacity: 0.7; }
+.metro-station.depth-1 { --station-context-opacity: 0.84; }
+.metro-station.depth-2 { --station-context-opacity: 0.7; }
 .metro-station.depth-3,
-.metro-station.depth-4 { opacity: 0.58; }
-.metro-station.muted-by-selection { opacity: 0.12; }
+.metro-station.depth-4 { --station-context-opacity: 0.58; }
+.metro-station.muted-by-selection { --station-context-opacity: 0.12; }
 
 .metro-station.selection-related,
 .metro-station.selected,
 .metro-station:focus-visible {
-  opacity: 1;
+  --station-context-opacity: 1;
 }
 
 .metro-station.selected {
@@ -1424,14 +1546,20 @@
 
 .metro-station.selected .metro-station-core,
 .metro-station:focus-visible .metro-station-core {
-  fill: #fff2bd;
+  fill: #312e21;
   stroke: #fff;
-  stroke-width: 1.7;
+  stroke-width: 2.5;
 }
 
 .metro-station.previewed .metro-station-core {
-  fill: #f5e8b9;
-  stroke-width: 1.4;
+  fill: #29271f;
+  stroke: #f5e8b9;
+  stroke-width: 2.2;
+}
+
+.metro-station.selected .metro-station-center,
+.metro-station:focus-visible .metro-station-center {
+  fill: #fff2bd;
 }
 
 .metro-station.selected .metro-aggregate-ring,
@@ -1446,8 +1574,19 @@
   stroke-width: 1.8;
 }
 
-.metro-station.preview-related {
-  opacity: 0.92;
+.metro-station.selected .metro-interchange-ring,
+.metro-station:focus-visible .metro-interchange-ring {
+  stroke: #fff2bd;
+  stroke-width: 2.8;
+}
+
+.metro-station.previewed .metro-interchange-ring {
+  stroke: #eadcae;
+  stroke-width: 2.4;
+}
+
+.metro-station.preview-related:not(.selection-related):not(.selected) {
+  --station-context-opacity: 0.92;
 }
 
 .metro-hover-tooltip {
@@ -1601,12 +1740,26 @@
   font-size: 0.68rem;
 }
 
-.metro-membership-list {
+.metro-flexible-date-note {
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.5rem;
+  color: #aabfbb;
+  background: rgba(74, 116, 109, 0.14);
+  border: 1px dashed rgba(122, 187, 178, 0.34);
+  border-radius: 0.35rem;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.metro-membership-list,
+.metro-unique-tag-list {
   display: grid;
   gap: 0.25rem;
 }
 
-.metro-membership-list button {
+.metro-membership-list button,
+.metro-unique-tag-list button,
+.metro-unique-tag-list summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1615,8 +1768,61 @@
   text-align: left;
 }
 
-.metro-membership-list small {
+.metro-membership-list small,
+.metro-unique-tag-list small {
   color: #788487;
+}
+
+.metro-unique-tag-list details {
+  background: #111719;
+  border: 1px solid #2d3739;
+  border-radius: 0.38rem;
+}
+
+.metro-unique-tag-list summary {
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+
+.metro-unique-tag-list details > div {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0 0.3rem 0.3rem;
+}
+
+.metro-assignment-list li {
+  padding: 0.3rem 0.38rem;
+  background: #111719;
+  border: 1px solid #293235;
+  border-radius: 0.32rem;
+}
+
+.metro-assignment-list li.refined {
+  border-color: #987f4c;
+}
+
+.metro-assignment-list small {
+  display: block;
+  color: #778487;
+}
+
+.metro-strength-profile {
+  list-style: none;
+  padding: 0 !important;
+}
+
+.metro-strength-profile button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.42rem;
+  text-align: left;
+}
+
+.metro-strength-profile small {
+  color: #7d898b;
 }
 
 .metro-contained-works,

@@ -5,7 +5,13 @@ import {
 } from "./evolution";
 import type { EvolutionFilters } from "./evolution";
 import { buildEvolutionTooltip } from "./evolution-interaction";
-import { buildTimeNetScene } from "./timenets";
+import { buildEvolutionTrajectoryProjection } from "./evolution-trajectory-projection";
+import { trajectorySegmentWidth } from "./evolution-strength";
+import {
+  buildTimeNetScene,
+  metroStationVisualRadius,
+} from "./timenets";
+import type { TagTrajectoryGroup } from "./trajectory-bundles";
 import { fixtureDomain, fixtureWork } from "./test-fixtures";
 
 const FILTERS: EvolutionFilters = {
@@ -13,6 +19,7 @@ const FILTERS: EvolutionFilters = {
   excludedTagIds: [],
   earlierDepth: 0,
   laterDepth: 0,
+  expansionMode: "directional",
   includeYearOnly: true,
   includeAmbiguous: false,
 };
@@ -178,6 +185,35 @@ describe("adaptive temporal metro layout", () => {
     expect(longGap).toBeLessThanOrEqual(108);
   });
 
+  it("reserves measured label room between adjacent sparse years", () => {
+    const { scene } = sceneFor([
+      fixtureWork({
+        id: "long-first",
+        label: "A deliberately extensive first endpoint label for geometry",
+        year: 1900,
+        tags: ["S"],
+        precision: "exact",
+        startText: "1900-01-01",
+      }),
+      fixtureWork({
+        id: "long-second",
+        label: "A deliberately extensive second endpoint label for geometry",
+        year: 1901,
+        tags: ["S"],
+        precision: "exact",
+        startText: "1901-01-01",
+      }),
+    ]);
+    const labels = scene.workLabels.slice().sort((left, right) => left.x - right.x);
+
+    expect(labels).toHaveLength(2);
+    expect(labels.every((label) => label.width === 190)).toBe(true);
+    expect(labels[0]!.x + labels[0]!.width).toBeLessThanOrEqual(labels[1]!.x);
+    expect(labels[0]!.x + labels[0]!.width).toBeLessThanOrEqual(
+      scene.years[1]!.xStart,
+    );
+  });
+
   it("collapses simultaneous works with the same visible tag set into one stop", () => {
     const works = [
       fixtureWork({
@@ -263,19 +299,19 @@ describe("adaptive temporal metro layout", () => {
     for (const station of tiedStations) {
       expect(
         coordinateOccurrences(trajectory.path, station.x, station.y),
-      ).toBeGreaterThanOrEqual(2);
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        station.ports.some((port) => port.tagIds.includes("S")),
+      ).toBe(true);
     }
-    expect(
-      coordinateOccurrences(trajectory.path, tiedBucket.xStart, trajectory.laneY),
-    ).toBeGreaterThanOrEqual(3);
-    expect(
-      coordinateOccurrences(trajectory.path, tiedBucket.xEnd, trajectory.laneY),
-    ).toBeGreaterThanOrEqual(3);
-    expect(
-      trajectory.path.indexOf(`${laterBucket.xStart} ${trajectory.laneY}`),
-    ).toBeGreaterThan(
-      trajectory.path.lastIndexOf(`${tiedBucket.xEnd} ${trajectory.laneY}`),
+    const continuing = trajectory.segments.filter(
+      (segment) => segment.targetStationId === scene.stationByWorkId.get("later")!.id,
     );
+    expect(continuing.map((segment) => segment.sourceStationId).sort()).toEqual(
+      tiedStations.map((station) => station.id).sort(),
+    );
+    expect(continuing.every((segment) => segment.path.includes(" C "))).toBe(true);
+    expect(laterBucket.x).toBeGreaterThan(tiedBucket.x);
   });
 
   it("uses one aggregate stop for equivalent year-only works", () => {
@@ -320,6 +356,53 @@ describe("adaptive temporal metro layout", () => {
     ).toBe(true);
   });
 
+  it("separates dense same-date aggregate and interchange marker envelopes", () => {
+    const signatures = [
+      ["A", "F"],
+      ["B", "E"],
+      ["C", "D"],
+      ["A", "C", "D", "F"],
+    ];
+    const works = signatures.flatMap((tags, signatureIndex) =>
+      Array.from({ length: 2 }, (_, workIndex) =>
+        fixtureWork({
+          id: `dense-marker-${signatureIndex}-${workIndex}`,
+          year: 1950,
+          tags,
+          precision: "exact",
+          startText: "1950-05-01",
+          qualifier: "circa",
+        }),
+      ),
+    );
+    const { scene } = sceneFor(works, {
+      ...FILTERS,
+      seedTagIds: ["A", "B", "C", "D", "E", "F"],
+      includeAmbiguous: true,
+    });
+
+    expect(scene.stations).toHaveLength(signatures.length);
+    expect(new Set(scene.stations.map((station) => station.bucket.id))).toEqual(
+      new Set(["day:1950-05-01"]),
+    );
+    expect(new Set(scene.stations.map((station) => station.x)).size).toBe(1);
+    for (let leftIndex = 0; leftIndex < scene.stations.length; leftIndex += 1) {
+      for (
+        let rightIndex = leftIndex + 1;
+        rightIndex < scene.stations.length;
+        rightIndex += 1
+      ) {
+        const left = scene.stations[leftIndex]!;
+        const right = scene.stations[rightIndex]!;
+        expect(Math.hypot(left.x - right.x, left.y - right.y)).toBeGreaterThanOrEqual(
+          metroStationVisualRadius(left.entry) +
+            metroStationVisualRadius(right.entry) +
+            1.99,
+        );
+      }
+    }
+  });
+
   it("places a ranged work at its earliest date without duration geometry", () => {
     const work = fixtureWork({
       id: "range",
@@ -339,6 +422,604 @@ describe("adaptive temporal metro layout", () => {
     expect(scene.stationByWorkId.get("range")?.entry.temporal.bucketId).toBe(
       "day:1900-02-01",
     );
+  });
+});
+
+describe("station-centered routing", () => {
+  it("uses compact sparse years and exposes flexible month/year positions", () => {
+    const sparse = sceneFor([
+      fixtureWork({
+        id: "sparse",
+        year: 1880,
+        tags: ["S"],
+        precision: "exact",
+        startText: "1880-03-04",
+      }),
+    ]).scene;
+    expect(sparse.years[0]!.xEnd - sparse.years[0]!.xStart).toBeLessThanOrEqual(72);
+
+    const { scene } = sceneFor([
+      fixtureWork({
+        id: "january",
+        year: 1976,
+        tags: ["S"],
+        precision: "exact",
+        startText: "1976-01-01",
+      }),
+      fixtureWork({
+        id: "may-month",
+        year: 1976,
+        tags: ["S"],
+        precision: "exact",
+        startText: "1976-05",
+      }),
+      fixtureWork({
+        id: "may-day",
+        year: 1976,
+        tags: ["S"],
+        precision: "exact",
+        startText: "1976-05-15",
+      }),
+      fixtureWork({ id: "year-only", year: 1976, tags: ["S"] }),
+      fixtureWork({
+        id: "december",
+        year: 1976,
+        tags: ["S"],
+        precision: "exact",
+        startText: "1976-12-01",
+      }),
+    ]);
+    const exactStations = ["january", "may-day", "december"].map(
+      (workId) => scene.stationByWorkId.get(workId)!,
+    );
+    expect(exactStations.map((station) => station.x)).toEqual(
+      exactStations.map((station) => station.x).slice().sort((a, b) => a - b),
+    );
+    for (const station of exactStations) {
+      expect(station.temporalPosition.minimumX).toBe(station.x);
+      expect(station.temporalPosition.maximumX).toBe(station.x);
+    }
+    const month = scene.stationByWorkId.get("may-month")!;
+    const year = scene.stationByWorkId.get("year-only")!;
+    for (const station of [month, year]) {
+      expect(station.temporalPosition.minimumX).toBeLessThan(
+        station.temporalPosition.maximumX,
+      );
+      expect(station.x).toBeGreaterThan(station.temporalPosition.minimumX);
+      expect(station.x).toBeLessThan(station.temporalPosition.maximumX);
+    }
+    expect(new Set([month.x, year.x, exactStations[1]!.x]).size).toBe(3);
+    expect(
+      scene.trajectoryById
+        .get("S")!
+        .segments.filter((segment) => segment.sourceStationId !== null)
+        .every((segment) => segment.target.x > segment.source.x),
+    ).toBe(true);
+  });
+
+  it("chooses deterministic positions for distinct stations in one uncertain bucket", () => {
+    const works = [
+      fixtureWork({ id: "year-a", year: 1976, tags: ["S", "A"] }),
+      fixtureWork({ id: "year-b", year: 1976, tags: ["S", "B"] }),
+    ];
+    const filters: EvolutionFilters = {
+      ...FILTERS,
+      seedTagIds: ["S", "A", "B"],
+    };
+    const original = sceneFor(works, filters).scene;
+    const reordered = sceneFor(
+      works
+        .slice()
+        .reverse()
+        .map((work) => ({ ...work, concepts: work.concepts.slice().reverse() })),
+      filters,
+    ).scene;
+    const originalA = original.stationByWorkId.get("year-a")!;
+    const originalB = original.stationByWorkId.get("year-b")!;
+    const bucket = original.bucketById.get("year:1976")!;
+
+    expect(originalA).not.toBe(originalB);
+    expect(originalA.bucket).toBe(originalB.bucket);
+    expect(bucket.x).toBe((bucket.xStart + bucket.xEnd) / 2);
+    for (const station of [originalA, originalB]) {
+      expect(station.x).toBeGreaterThan(station.temporalPosition.minimumX);
+      expect(station.x).toBeLessThan(station.temporalPosition.maximumX);
+    }
+    expect(originalA.x).not.toBe(originalB.x);
+
+    const chosenPositions = (scene: typeof original) =>
+      Object.fromEntries(
+        scene.stations.map((station) => [station.id, station.x]).sort(),
+      );
+    expect(chosenPositions(reordered)).toEqual(chosenPositions(original));
+  });
+
+  it("chooses a bounded flexible candidate using route and rendered-envelope costs", () => {
+    const works = [
+      fixtureWork({
+        id: "a-january",
+        year: 1976,
+        tags: ["A"],
+        precision: "exact",
+        startText: "1976-01-01",
+      }),
+      fixtureWork({
+        id: "d-february",
+        year: 1976,
+        tags: ["D"],
+        precision: "exact",
+        startText: "1976-02-01",
+      }),
+      fixtureWork({
+        id: "label-obstacle",
+        label: "A long obstacle label occupying the middle of the year",
+        year: 1976,
+        tags: ["B", "C"],
+        precision: "exact",
+        startText: "1976-03-01",
+      }),
+      fixtureWork({
+        id: "flexible",
+        label: "A long flexible interchange label requiring clear placement",
+        year: 1976,
+        tags: ["A", "D"],
+      }),
+      fixtureWork({
+        id: "d-november",
+        year: 1976,
+        tags: ["D"],
+        precision: "exact",
+        startText: "1976-11-01",
+      }),
+      fixtureWork({
+        id: "a-december",
+        year: 1976,
+        tags: ["A"],
+        precision: "exact",
+        startText: "1976-12-01",
+      }),
+    ];
+    const filters: EvolutionFilters = {
+      ...FILTERS,
+      seedTagIds: ["A", "B", "C", "D"],
+    };
+    const build = (input: typeof works) => sceneFor(input, filters).scene;
+    const first = build(works);
+    const reordered = build(
+      works
+        .slice()
+        .reverse()
+        .map((work) => ({ ...work, concepts: work.concepts.slice().reverse() })),
+    );
+    const station = first.stationByWorkId.get("flexible")!;
+    const scores = station.temporalPosition.candidateScores;
+    const selectedScore = scores.find(
+      (score) => Math.abs(score.x - station.x) < 1e-7,
+    )!;
+    const rounded = (value: number) => Math.round(value * 1_000) / 1_000;
+
+    expect(scores.length).toBeGreaterThan(4);
+    expect(scores.length).toBeLessThanOrEqual(12);
+    expect(selectedScore.total).toBe(Math.min(...scores.map((score) => score.total)));
+    expect(
+      new Set(scores.map((score) => rounded(score.bendCost + score.crossings))).size,
+    ).toBeGreaterThan(1);
+    expect(
+      new Set(
+        scores.map((score) => rounded(score.markerOverlap + score.labelOverlap)),
+      ).size,
+    ).toBeGreaterThan(1);
+    expect(
+      Math.max(
+        ...scores.map((score) => score.markerOverlap + score.labelOverlap),
+      ),
+    ).toBeGreaterThan(0);
+    expect(reordered.stationByWorkId.get("flexible")!.temporalPosition).toEqual(
+      station.temporalPosition,
+    );
+  });
+
+  it("balances directional station roles and routes directly between ports", () => {
+    const { scene } = sceneFor(
+      [
+        fixtureWork({ id: "earlier", year: 1900, tags: ["A"] }),
+        fixtureWork({ id: "pivot", year: 1910, tags: ["S", "A"] }),
+        fixtureWork({ id: "later", year: 1920, tags: ["A"] }),
+      ],
+      { ...FILTERS, earlierDepth: 1, laterDepth: 1 },
+    );
+    const earlier = scene.stationByWorkId.get("earlier")!;
+    const pivot = scene.stationByWorkId.get("pivot")!;
+    const later = scene.stationByWorkId.get("later")!;
+
+    expect(earlier.reachRole).toBe("earlier-only");
+    expect(pivot.reachRole).toBe("seed");
+    expect(later.reachRole).toBe("later-only");
+    expect(earlier.y).toBeLessThan(pivot.y);
+    expect(later.y).toBeGreaterThan(pivot.y);
+
+    const trajectory = scene.trajectoryById.get("A")!;
+    const directSegments = trajectory.segments.filter(
+      (segment) => segment.sourceStationId !== null,
+    );
+    expect(directSegments).toHaveLength(2);
+    for (const segment of directSegments) {
+      const source = scene.stationById.get(segment.sourceStationId!)!;
+      const target = scene.stationById.get(segment.targetStationId)!;
+      expect(segment.source).toEqual(
+        source.ports.find((port) => port.tagIds.includes("A"))!.right,
+      );
+      expect(segment.target).toEqual(
+        target.ports.find((port) => port.tagIds.includes("A"))!.left,
+      );
+      expect(segment.path).toMatch(/^M .* C /);
+    }
+  });
+
+  it("keeps one mixed-direction station inside the central seed region", () => {
+    const { visible, scene } = sceneFor(
+      [
+        fixtureWork({ id: "early-seed", year: 1900, tags: ["EARLY", "A"] }),
+        fixtureWork({ id: "both", year: 1910, tags: ["A"] }),
+        fixtureWork({ id: "late-seed", year: 1920, tags: ["LATE", "A"] }),
+      ],
+      {
+        ...FILTERS,
+        seedTagIds: ["EARLY", "LATE"],
+        earlierDepth: 1,
+        laterDepth: 1,
+      },
+    );
+    const mixed = scene.stationByWorkId.get("both")!;
+    const seedYs = ["early-seed", "late-seed"].map(
+      (workId) => scene.stationByWorkId.get(workId)!.y,
+    );
+
+    expect(mixed.reachRole).toBe("both");
+    expect(scene.stations.filter((station) => station.id === mixed.id)).toHaveLength(1);
+    expect(new Set(scene.stations.map((station) => station.id)).size).toBe(
+      scene.stations.length,
+    );
+    expect(mixed.y).toBeGreaterThanOrEqual(Math.min(...seedYs));
+    expect(mixed.y).toBeLessThanOrEqual(Math.max(...seedYs));
+    expect(visible.stationById.get(mixed.id)).toMatchObject({
+      earlierDepth: 1,
+      laterDepth: 1,
+    });
+  });
+
+  it("keeps left and right port order stable when works and assignments reorder", () => {
+    const works = [
+      fixtureWork({ id: "a-early", year: 1900, tags: ["A"] }),
+      fixtureWork({ id: "b-early", year: 1900, tags: ["B"] }),
+      fixtureWork({ id: "interchange", year: 1910, tags: ["S", "A", "B"] }),
+      fixtureWork({ id: "a-late", year: 1920, tags: ["A"] }),
+      fixtureWork({ id: "b-late", year: 1920, tags: ["B"] }),
+    ];
+    const filters: EvolutionFilters = {
+      ...FILTERS,
+      seedTagIds: ["S", "A", "B"],
+    };
+    const first = sceneFor(works, filters).scene;
+    const second = sceneFor(
+      works
+        .slice()
+        .reverse()
+        .map((work) => ({ ...work, concepts: work.concepts.slice().reverse() })),
+      filters,
+    ).scene;
+    const portSnapshot = (scene: typeof first) =>
+      scene.stationByWorkId
+        .get("interchange")!
+        .ports.map((port) => ({
+          id: port.id,
+          tagIds: port.tagIds,
+          left: port.left,
+          right: port.right,
+          leftOrder: port.leftOrder,
+          rightOrder: port.rightOrder,
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id));
+
+    expect(portSnapshot(second)).toEqual(portSnapshot(first));
+    expect(new Set(portSnapshot(first).map((port) => port.leftOrder)).size).toBe(3);
+    expect(new Set(portSnapshot(first).map((port) => port.rightOrder)).size).toBe(3);
+  });
+
+  it("shares deterministic ports and one render route for a supplied bundle", () => {
+    const works = [
+      fixtureWork({ id: "joint-a", year: 1900, tags: ["S", "T"] }),
+      fixtureWork({ id: "joint-b", year: 1910, tags: ["S", "T"] }),
+    ];
+    const buildBundled = (orderedWorks: typeof works) => {
+      const visible = buildVisibleEvolution(
+        buildEvolutionIndex(fixtureDomain(orderedWorks)),
+        { ...FILTERS, seedTagIds: ["S", "T"] },
+      );
+      const group: TagTrajectoryGroup = {
+        id: "bundle:S+T",
+        kind: "bundle",
+        tagIds: ["S", "T"],
+        stationIds: visible.tagById.get("S")!.stationIds,
+        segments: [],
+        entries: [],
+        reason: "equivalent-visible-structure",
+      };
+      return buildTimeNetScene(visible, [group]);
+    };
+    const first = buildBundled(works);
+    const second = buildBundled(works.slice().reverse());
+
+    expect(first.trajectoryGroups).toHaveLength(1);
+    expect(first.trajectoryGroupById.get("bundle:S+T")).toBe(
+      first.trajectoryGroups[0],
+    );
+    expect(first.trajectoryGroups[0]).toMatchObject({
+      id: "bundle:S+T",
+      kind: "bundle",
+      tagIds: ["S", "T"],
+    });
+    expect(first.stations.every((station) => station.ports.length === 1)).toBe(true);
+    expect(first.stations[0]!.ports[0]!.tagIds).toEqual(["S", "T"]);
+    expect(first.trajectoryGroups[0]!.path).toBe(
+      first.trajectoryById.get("S")!.path,
+    );
+    expect(first.trajectoryGroups[0]!.segments.every((segment) => segment.width >= 1.5)).toBe(true);
+    expect(second.trajectoryGroups).toEqual(first.trajectoryGroups);
+    expect(second.stations.map((station) => station.ports)).toEqual(
+      first.stations.map((station) => station.ports),
+    );
+  });
+
+  it("renders a tolerant bundle with the maximum member strength at every endpoint", () => {
+    const works = [
+      fixtureWork({ id: "origin-stop", year: 1900, tags: ["ROOT", "A", "B"] }),
+      fixtureWork({ id: "later-stop", year: 1910, tags: ["A", "B"] }),
+    ];
+    for (const work of works) {
+      work.concepts.find((concept) => concept.id === "A")!.centrality = 74;
+      work.concepts.find((concept) => concept.id === "B")!.centrality = 76;
+    }
+    const visible = buildVisibleEvolution(
+      buildEvolutionIndex(fixtureDomain(works)),
+      {
+        ...FILTERS,
+        seedTagIds: ["ROOT"],
+        laterDepth: 1,
+      },
+    );
+    const projection = buildEvolutionTrajectoryProjection(visible);
+    const bundle = projection.bundles.find(
+      (candidate) => candidate.tagIds.join(",") === "A,B",
+    )!;
+    const scene = buildTimeNetScene(visible, projection.groups);
+    const rendered = scene.trajectoryGroupById.get(bundle.id)!;
+    const expectedWidth = trajectorySegmentWidth(0.76);
+
+    expect(bundle.entries.map((entry) => entry.strengthProfile)).toEqual([
+      [0.74, 0.74],
+      [0.76, 0.76],
+    ]);
+    expect(rendered.kind).toBe("bundle");
+    expect(rendered.path).toBe(scene.trajectoryById.get("A")!.path);
+    expect(rendered.stationPorts).toBe(scene.trajectoryById.get("A")!.stationPorts);
+    expect(rendered.segments).toHaveLength(2);
+    expect(rendered.segments[0]).toMatchObject({
+      sourceStationId: null,
+      targetStrength: 0.76,
+      displayStrength: 0.76,
+      width: expectedWidth,
+    });
+    expect(rendered.segments[1]).toMatchObject({
+      sourceStrength: 0.76,
+      targetStrength: 0.76,
+      displayStrength: 0.76,
+      width: expectedWidth,
+    });
+  });
+
+  it("allocates one shared lane for a large equivalent-tag bundle", () => {
+    const build = (tagCount: number) => {
+      const tagIds = Array.from(
+        { length: tagCount },
+        (_, index) => `context-${String(index).padStart(3, "0")}`,
+      );
+      const works = [
+        fixtureWork({
+          id: "bundle-origin",
+          year: 1900,
+          tags: ["ROOT", ...tagIds],
+        }),
+        fixtureWork({ id: "bundle-later", year: 1910, tags: tagIds }),
+      ];
+      const visible = buildVisibleEvolution(
+        buildEvolutionIndex(fixtureDomain(works)),
+        {
+          ...FILTERS,
+          seedTagIds: ["ROOT"],
+          laterDepth: 1,
+        },
+      );
+      const projection = buildEvolutionTrajectoryProjection(visible);
+      return {
+        tagIds,
+        projection,
+        scene: buildTimeNetScene(visible, projection.groups),
+      };
+    };
+    const singleton = build(1);
+    const bundled = build(100);
+    const contextBundle = bundled.projection.bundles.find(
+      (group) => group.tagIds.length === 100,
+    )!;
+
+    expect(contextBundle.tagIds).toEqual(bundled.tagIds);
+    // The only permitted growth is the 3.75px interchange envelope on the
+    // 100-tag stop; lane count itself remains identical.
+    expect(bundled.scene.height).toBeLessThanOrEqual(singleton.scene.height + 4);
+    expect(
+      new Set(
+        bundled.tagIds.map(
+          (tagId) => bundled.scene.trajectoryById.get(tagId)!.laneY,
+        ),
+      ).size,
+    ).toBe(1);
+    expect(
+      bundled.scene.stationByWorkId.get("bundle-origin")!.ports,
+    ).toHaveLength(2);
+    expect(bundled.scene.trajectoryGroups).toHaveLength(2);
+  });
+
+  it("aggregates bundle reach independently of lexical representative identity", () => {
+    const build = (
+      earlierTagId: string,
+      laterTagId: string,
+      seedEarlier = false,
+    ) => {
+      const works = [
+        fixtureWork({ id: "reach-first", year: 1900, tags: [earlierTagId, laterTagId] }),
+        fixtureWork({ id: "reach-second", year: 1910, tags: [earlierTagId, laterTagId] }),
+      ];
+      const visible = buildVisibleEvolution(
+        buildEvolutionIndex(fixtureDomain(works)),
+        { ...FILTERS, seedTagIds: [earlierTagId, laterTagId] },
+      );
+      Object.assign(visible.tagById.get(earlierTagId)!, {
+        seed: seedEarlier,
+        depth: seedEarlier ? 0 : 3,
+        seedDepth: seedEarlier ? 0 : null,
+        earlierDepth: 2,
+        laterDepth: null,
+      });
+      Object.assign(visible.tagById.get(laterTagId)!, {
+        seed: false,
+        depth: 1,
+        seedDepth: null,
+        earlierDepth: null,
+        laterDepth: 1,
+      });
+      const group = {
+        id: "bundle:reach",
+        kind: "bundle",
+        tagIds: [laterTagId, earlierTagId],
+        stationIds: visible.tagById.get(earlierTagId)!.stationIds,
+        segments: [],
+        entries: [],
+        reason: "equivalent-visible-structure",
+      } satisfies TagTrajectoryGroup;
+      return {
+        visible,
+        reach: buildTimeNetScene(visible, [group]).trajectoryGroupById.get(
+          group.id,
+        )!.reach,
+      };
+    };
+    const first = build("z-earlier", "a-later");
+    const renamed = build("a-earlier", "z-later");
+    const summary = (reach: typeof first.reach) => ({
+      seed: reach.seed,
+      depth: reach.depth,
+      seedDepth: reach.seedDepth,
+      earlierDepth: reach.earlierDepth,
+      laterDepth: reach.laterDepth,
+      role: reach.role,
+    });
+
+    expect(summary(first.reach)).toEqual({
+      seed: false,
+      depth: 1,
+      seedDepth: null,
+      earlierDepth: 2,
+      laterDepth: 1,
+      role: "both",
+    });
+    expect(summary(renamed.reach)).toEqual(summary(first.reach));
+    expect(first.reach.members.map((member) => member.tag.id)).toEqual([
+      "a-later",
+      "z-earlier",
+    ]);
+    expect(first.reach.members[0]).toBe(first.visible.tagById.get("a-later"));
+    expect(summary(build("z-earlier", "a-later", true).reach)).toEqual({
+      seed: true,
+      depth: 0,
+      seedDepth: 0,
+      earlierDepth: 2,
+      laterDepth: 1,
+      role: "seed",
+    });
+  });
+
+  it("uses strength for port spacing and segment width", () => {
+    const works = [
+      fixtureWork({ id: "first", year: 1900, tags: ["strong", "weak"] }),
+      fixtureWork({ id: "second", year: 1910, tags: ["strong", "weak"] }),
+    ];
+    for (const work of works) {
+      work.concepts.find((concept) => concept.id === "strong")!.centrality = 100;
+      work.concepts.find((concept) => concept.id === "weak")!.centrality = 0;
+    }
+    const { scene } = sceneFor(works, {
+      ...FILTERS,
+      seedTagIds: ["strong", "weak"],
+    });
+    const ports = scene.stations[0]!.ports;
+    const strongPort = ports.find((port) => port.tagIds.includes("strong"))!;
+    const weakPort = ports.find((port) => port.tagIds.includes("weak"))!;
+
+    expect(strongPort.spacing).toBeGreaterThan(weakPort.spacing);
+    expect(scene.trajectoryById.get("strong")!.segments.at(-1)!.width).toBe(5.5);
+    expect(scene.trajectoryById.get("weak")!.segments.at(-1)!.width).toBe(1.5);
+  });
+
+  it("falls back to singleton ports for an incompatible supplied bundle", () => {
+    const { visible } = sceneFor(
+      [
+        fixtureWork({ id: "s-only", year: 1900, tags: ["S"] }),
+        fixtureWork({ id: "joint", year: 1910, tags: ["S", "T"] }),
+      ],
+      { ...FILTERS, seedTagIds: ["S", "T"] },
+    );
+    const incompatible = {
+      id: "bundle:invalid",
+      kind: "bundle",
+      tagIds: ["S", "T"],
+      stationIds: visible.tagById.get("S")!.stationIds,
+      segments: [],
+      entries: [],
+      reason: "equivalent-visible-structure",
+    } satisfies TagTrajectoryGroup;
+    const scene = buildTimeNetScene(visible, [incompatible]);
+
+    expect(scene.trajectoryGroupById.has("bundle:invalid")).toBe(false);
+    expect(scene.trajectoryGroups.every((group) => group.kind === "singleton")).toBe(true);
+    expect(scene.stationByWorkId.get("joint")!.ports).toHaveLength(2);
+  });
+
+  it("rejects a shared route whose station set is right but ordered sequence is not", () => {
+    const { visible } = sceneFor(
+      [
+        fixtureWork({ id: "first", year: 1900, tags: ["S", "T"] }),
+        fixtureWork({ id: "second", year: 1910, tags: ["S", "T"] }),
+        fixtureWork({ id: "third", year: 1920, tags: ["S", "T"] }),
+      ],
+      { ...FILTERS, seedTagIds: ["S", "T"] },
+    );
+    const ordered = visible.tagById.get("S")!.stationIds;
+    const reversed = {
+      id: "bundle:reversed",
+      kind: "bundle",
+      tagIds: ["S", "T"],
+      stationIds: ordered.slice().reverse(),
+      segments: [],
+      entries: [],
+      reason: "equivalent-visible-structure",
+    } satisfies TagTrajectoryGroup;
+    const scene = buildTimeNetScene(visible, [reversed]);
+
+    expect(scene.trajectoryGroupById.has("bundle:reversed")).toBe(false);
+    expect(scene.trajectoryGroups).toHaveLength(2);
+    expect(scene.trajectoryGroups.every((group) => group.kind === "singleton")).toBe(true);
+    expect(scene.stations.every((station) => station.ports.length === 2)).toBe(true);
   });
 });
 
@@ -413,24 +1094,16 @@ describe("trajectory isolation and determinism", () => {
     expect(unfilteredS.entry.origin.targetStationIds).toEqual([
       withAmbiguity.stationByWorkId.get("s-early-ambiguous")!.id,
     ]);
-    expect(unfilteredS.start.x).toBe(
-      withAmbiguity.bucketById.get("year:1890")!.xStart,
-    );
-    expect(unfilteredS.end.x).toBe(
-      withAmbiguity.bucketById.get("year:1940")!.xEnd,
-    );
+    expect(unfilteredS.start).toEqual(unfilteredS.stationPorts[0]!.left);
+    expect(unfilteredS.end).toEqual(unfilteredS.stationPorts.at(-1)!.right);
     expect(filteredS.entry.origin.targetStationIds).toEqual([
       filtered.stationByWorkId.get("joint")!.id,
     ]);
     expect(filteredT.entry.origin.targetStationIds).toEqual([
       filtered.stationByWorkId.get("joint")!.id,
     ]);
-    expect(filteredS.start.x).toBe(
-      filtered.bucketById.get("day:1910-01-01")!.xStart,
-    );
-    expect(filteredS.end.x).toBe(
-      filtered.bucketById.get("day:1920-01-01")!.xEnd,
-    );
+    expect(filteredS.start).toEqual(filteredS.stationPorts[0]!.left);
+    expect(filteredS.end).toEqual(filteredS.stationPorts.at(-1)!.right);
     expect(filteredS.origin.x).toBeLessThan(filteredS.start.x);
     expect(filteredS.origin.y).toBe(filteredS.laneY);
   });

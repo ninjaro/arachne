@@ -15,9 +15,11 @@ import {
 import type {
   AggregateStation,
   DirectionalReachInfo,
+  ExpansionMode,
   EvolutionIndex,
   ReachReason,
   VisibleEvolution,
+  VisibleEvolutionTag,
 } from "../lib/evolution";
 import {
   buildEvolutionTooltip,
@@ -26,29 +28,54 @@ import {
   evolutionInteractionAvailable,
   sameEvolutionInteraction,
 } from "../lib/evolution-interaction";
+import { createDelayedPreviewController } from "../lib/evolution-hover";
+import type { DelayedPreviewController } from "../lib/evolution-hover";
+import {
+  MAX_TRAJECTORY_SEGMENT_WIDTH,
+  segmentDisplayStrength,
+  tagStrengthBand,
+  trajectorySegmentWidth,
+} from "../lib/evolution-strength";
+import { buildEvolutionTrajectoryProjection } from "../lib/evolution-trajectory-projection";
+import type { TagTrajectoryGroup } from "../lib/trajectory-bundles";
+import {
+  BUNDLE_EQUIVALENCE_REASON,
+  groupUniqueTagLabels,
+  strongestTagSummaries,
+} from "../lib/trajectory-bundles";
 import type {
   EvolutionInteractionLayer,
   EvolutionInteractionTarget,
   EvolutionTooltip,
 } from "../lib/evolution-interaction";
-import { buildTimeNetScene } from "../lib/timenets";
+import {
+  aggregateMetroTrajectoryGroupReach,
+  buildTimeNetScene,
+} from "../lib/timenets";
 import type {
   MetroBucket,
   MetroExplicitRelation,
+  MetroRenderableTrajectoryGroup,
+  MetroScene,
   MetroStation,
-  MetroTrajectory,
 } from "../lib/timenets";
 import type { Domain, EntityId } from "../lib/types";
 import { humanize } from "../lib/format";
 
 const DEFAULT_EARLIER_DEPTH = 0;
 const DEFAULT_LATER_DEPTH = 0;
+const DEFAULT_EXPANSION_MODE: ExpansionMode = "directional";
 const DEFAULT_INCLUDE_YEAR_ONLY = true;
 const DEFAULT_INCLUDE_AMBIGUOUS = false;
 
 interface TooltipPosition {
   left: number;
   top: number;
+}
+
+interface TraversalProjectionCache {
+  index: EvolutionIndex | null;
+  byMode: Map<ExpansionMode, { key: string; visible: VisibleEvolution }>;
 }
 
 interface ProvenanceGroup {
@@ -104,12 +131,86 @@ function workLabel(index: EvolutionIndex, id: EntityId): string {
 function dateQualityLabel(station: MetroStation): string {
   const temporal = station.entry.temporal;
   if (temporal.quality === "ambiguous") return "Ambiguous date";
-  if (temporal.quality === "year-only") return "Year-only interval";
+  if (temporal.quality === "year-only") return "Year-only date";
   return temporal.precision === "month" ? "Month-level date" : "Exact date";
 }
 
 function truncatedLabel(value: string, limit = 30): string {
   return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+function strengthValueLabel(strength: number | null): string {
+  return strength === null ? "unknown strength" : `${Math.round(strength * 100)}% normalized`;
+}
+
+function strengthChangeLabel(change: number | null, first: boolean): string {
+  if (first) return "route start";
+  if (change === null) return "change unknown";
+  const points = Math.round(change * 100);
+  if (points === 0) return "no change";
+  return `${points > 0 ? "+" : ""}${points} percentage points`;
+}
+
+function rawStrengthValuesLabel(values: readonly number[]): string {
+  return values.length
+    ? `raw source ${values.join(", ")}`
+    : "raw source unknown";
+}
+
+function rawMembershipStrengths(
+  visible: VisibleEvolution,
+  tagId: EntityId,
+  stationId: string,
+): number[] {
+  const membership = visible.aggregateMembershipsByTagId
+    .get(tagId)
+    ?.find((candidate) => candidate.stationId === stationId);
+  return [...new Set(
+    (membership?.strengthSummary.memberships ?? [])
+      .map((source) => source.rawStrength)
+      .filter((value): value is number => value !== null),
+  )].sort((left, right) => left - right);
+}
+
+export function strengthChangesByTemporalGroup<
+  T extends { temporalGroupId: string; strength: number | null },
+>(profile: readonly T[]): Array<T & { change: number | null; first: boolean }> {
+  const temporalGroupIds = [...new Set(
+    profile.map((entry) => entry.temporalGroupId),
+  )];
+  const maximumStrengthByTemporalGroupId = new Map(
+    temporalGroupIds.map((temporalGroupId) => {
+      const known = profile
+        .filter((entry) => entry.temporalGroupId === temporalGroupId)
+        .map((entry) => entry.strength)
+        .filter((strength): strength is number => strength !== null);
+      return [temporalGroupId, known.length ? Math.max(...known) : null];
+    }),
+  );
+  return profile.map((entry) => {
+    const groupIndex = temporalGroupIds.indexOf(entry.temporalGroupId);
+    const previousStrength = groupIndex > 0
+      ? maximumStrengthByTemporalGroupId.get(temporalGroupIds[groupIndex - 1]!) ?? null
+      : null;
+    return {
+      ...entry,
+      change:
+        previousStrength !== null && entry.strength !== null
+          ? entry.strength - previousStrength
+          : null,
+      first: groupIndex === 0,
+    };
+  });
+}
+
+export function normalizedStrengthRangeLabel(
+  minimum: number | null,
+  maximum: number | null,
+  median: number | null,
+): string {
+  if (minimum === null || maximum === null) return "normalized range unknown";
+  const range = `normalized range ${Math.round(minimum * 100)}–${Math.round(maximum * 100)}%`;
+  return median === null ? range : `${range} · median ${Math.round(median * 100)}%`;
 }
 
 function reasonKey(reason: ReachReason): string {
@@ -130,6 +231,7 @@ function provenanceGroupKey(reason: ReachReason): string {
       null,
     record.viaTagId ?? record.tagId ?? null,
     record.resultingDepth ?? record.depth ?? null,
+    record.context ?? null,
   ]);
 }
 
@@ -149,23 +251,56 @@ function reachReasonLabel(reason: ReachReason, index: EvolutionIndex): string {
     reasonField(reason, "sourceStationId") ??
     reasonField(reason, "stopId");
   const sourceWork = reasonField(reason, "fromWorkId");
+  const context = "context" in reason ? reason.context : undefined;
+  const connectedSuffix = context
+    ? ` Connected path used ${context.earlierUsed} earlier and ${context.laterUsed} later steps${context.path.length ? ` (${context.path.map((step) => step.direction).join(" → ")})` : ""}.`
+    : "";
   switch (reason.kind) {
     case "seed-tag":
       return `${seed} is a selected seed trajectory.`;
     case "seed-membership":
       return `Seed ${seed} directly includes this ${tagId ? `membership on ${tagLabel(index, tagId)}` : "stop"}.`;
     case "shared-work":
-      return `Seed ${seed} reached ${tagId ? tagLabel(index, tagId) : "this tag"} through ${sourceWork ? workLabel(index, sourceWork) : "a shared stop"}.`;
+      return `Seed ${seed} reached ${tagId ? tagLabel(index, tagId) : "this tag"} through ${sourceWork ? workLabel(index, sourceWork) : "a shared stop"}.${connectedSuffix}`;
     case "temporal-neighbor":
-      return `From seed ${seed}: nearest ${direction ?? "directional"} stop on ${tagId ? tagLabel(index, tagId) : "the traversed tag"}${sourceWork ? ` from ${workLabel(index, sourceWork)}` : sourceStation ? ` from stop ${sourceStation}` : ""}.`;
+      return `From seed ${seed}: nearest ${direction ?? "directional"} stop on ${tagId ? tagLabel(index, tagId) : "the traversed tag"}${sourceWork ? ` from ${workLabel(index, sourceWork)}` : sourceStation ? ` from stop ${sourceStation}` : ""}.${connectedSuffix}`;
     case "visible-interchange":
-      return `Seed ${seed} reaches ${tagId ? tagLabel(index, tagId) : "another visible tag"} at this interchange.`;
+      return `Seed ${seed} reaches ${tagId ? tagLabel(index, tagId) : "another visible tag"} at this interchange.${connectedSuffix}`;
     default:
       return `${humanize(String((reason as { kind: string }).kind))} from ${seed}.`;
   }
 }
 
-function effectiveDepth(reach: DirectionalReachInfo): number {
+function reachReasonPathLabels(
+  reason: ReachReason,
+  index: EvolutionIndex,
+  scene: ReturnType<typeof buildTimeNetScene>,
+): string[] {
+  if (!("context" in reason) || !reason.context?.path.length) return [];
+  let earlierUsed = 0;
+  let laterUsed = 0;
+  const stationLabel = (stationId: string | undefined, temporalGroupId: string) => {
+    if (!stationId) return temporalGroupId;
+    const station = scene.stationById.get(stationId);
+    if (!station) return `${stationId} (${temporalGroupId})`;
+    const contents = station.entry.workCount === 1
+      ? workLabel(index, station.entry.workIds[0]!)
+      : `${station.entry.workCount} works`;
+    return `${station.entry.temporal.displayLabel} · ${contents} [${stationId}]`;
+  };
+  return reason.context.path.map((step, position) => {
+    if (step.direction === "earlier") earlierUsed += 1;
+    else laterUsed += 1;
+    return `${position + 1}. ${tagLabel(index, step.tagId)} [${step.tagId}] · ${step.direction}: ${stationLabel(step.sourceStationId, step.sourceTemporalGroupId)} → ${stationLabel(step.targetStationId, step.targetTemporalGroupId)} · budgets Earlier ${earlierUsed}, Later ${laterUsed}`;
+  });
+}
+
+type ReachDisplay = Pick<
+  DirectionalReachInfo,
+  "depth" | "seedDepth" | "earlierDepth" | "laterDepth"
+>;
+
+function effectiveDepth(reach: ReachDisplay): number {
   if (reach.seedDepth === 0) return 0;
   return Math.min(
     reach.earlierDepth ?? Number.POSITIVE_INFINITY,
@@ -174,12 +309,12 @@ function effectiveDepth(reach: DirectionalReachInfo): number {
   );
 }
 
-function depthClass(reach: DirectionalReachInfo): string {
+function depthClass(reach: ReachDisplay): string {
   const depth = effectiveDepth(reach);
   return `depth-${Math.min(4, Math.max(0, Number.isFinite(depth) ? depth : 4))}`;
 }
 
-function directionClass(reach: DirectionalReachInfo): string {
+function directionClass(reach: ReachDisplay): string {
   if (reach.seedDepth === 0) return "direction-seed";
   if (reach.earlierDepth !== null && reach.laterDepth !== null) {
     return "direction-both";
@@ -189,12 +324,153 @@ function directionClass(reach: DirectionalReachInfo): string {
   return "direction-context";
 }
 
-function reachSummary(reach: DirectionalReachInfo): string {
+function reachSummary(reach: ReachDisplay): string {
   if (reach.seedDepth === 0) return "Seed trajectory · depth 0";
   const parts: string[] = [];
   if (reach.earlierDepth !== null) parts.push(`earlier ${reach.earlierDepth}`);
   if (reach.laterDepth !== null) parts.push(`later ${reach.laterDepth}`);
   return parts.length ? parts.join(" · ") : "Visible context";
+}
+
+/** Count group-deduplicated traversal states that actually contain a station. */
+export function connectedContextStateCountForStation(
+  visible: Pick<VisibleEvolution, "contextTraversalStates" | "temporalTagStops">,
+  stationId: string,
+): number {
+  const memberships = new Set(
+    visible.temporalTagStops
+      .filter((stop) => stop.stationIds.includes(stationId))
+      .map((stop) => `${stop.tagId}\u0000${stop.temporalGroupId}`),
+  );
+  return visible.contextTraversalStates.filter((state) =>
+    memberships.has(`${state.tagId}\u0000${state.temporalGroupId}`),
+  ).length;
+}
+
+export const MAX_UNSELECTED_TRAJECTORY_WIDTH =
+  MAX_TRAJECTORY_SEGMENT_WIDTH;
+
+export interface EvolutionStationMarkerGeometry {
+  coreRadius: number;
+  structuralRadius: number;
+  knockoutRadius: number;
+  dateHaloRadius: number;
+  hitRadius: number;
+}
+
+/** Shared sun-marker geometry for single-work, aggregate, and interchange stops. */
+export function evolutionStationMarkerGeometry({
+  aggregate,
+  interchange,
+  workCount,
+}: {
+  aggregate: boolean;
+  interchange: boolean;
+  workCount: number;
+}): EvolutionStationMarkerGeometry {
+  const aggregateGrowth = Math.min(
+    5,
+    Math.log2(Math.max(2, workCount)) * 1.25,
+  );
+  const coreRadius = aggregate
+    ? Math.max(
+        8.5 + aggregateGrowth,
+        7 + String(Math.max(1, workCount)).length * 1.5,
+      )
+    : 6;
+  const structuralRadius = coreRadius + (interchange ? (aggregate ? 4 : 3.75) : 0);
+  return {
+    coreRadius,
+    structuralRadius,
+    knockoutRadius: structuralRadius + 2.6,
+    dateHaloRadius: structuralRadius + 4.4,
+    hitRadius: Math.max(13, structuralRadius + 5.5),
+  };
+}
+
+/** Reuse base geometry while recomputing metadata for an overlay-split group. */
+export function evolutionRenderGroupFallback(
+  group: TagTrajectoryGroup,
+  scene: MetroScene,
+  visible: VisibleEvolution,
+): MetroRenderableTrajectoryGroup | null {
+  const representative = scene.trajectoryById.get(group.tagIds[0]!);
+  if (!representative) return null;
+  const reachMembers = group.tagIds
+    .map((tagId) => visible.tagById.get(tagId))
+    .filter((member): member is VisibleEvolutionTag => Boolean(member));
+  if (!reachMembers.length) return null;
+  const maximumGroupStrength = (stationId: string | null): number | null => {
+    if (!stationId) return null;
+    const known = group.tagIds
+      .map((tagId) => visible.aggregateMembershipsByTagId
+        .get(tagId)
+        ?.find((membership) => membership.stationId === stationId)
+        ?.strength ?? null)
+      .filter((strength): strength is number => strength !== null);
+    return known.length ? Math.max(...known) : null;
+  };
+  return {
+    id: group.id,
+    kind: group.kind,
+    tagIds: [...group.tagIds],
+    stationIds: representative.stationIds,
+    path: representative.path,
+    color: representative.color,
+    stationPorts: representative.stationPorts,
+    segments: representative.segments.map((segment) => {
+      const sourceStrength = maximumGroupStrength(segment.sourceStationId);
+      const targetStrength = maximumGroupStrength(segment.targetStationId);
+      const displayStrength = segmentDisplayStrength(
+        sourceStrength,
+        targetStrength,
+      );
+      return {
+        ...segment,
+        sourceStrength,
+        targetStrength,
+        displayStrength,
+        width: trajectorySegmentWidth(displayStrength),
+      };
+    }),
+    reach: aggregateMetroTrajectoryGroupReach(reachMembers),
+  };
+}
+
+/** Station/relation selection highlights existing bundles without exploding them. */
+export function provenanceOverlayTagIds(
+  selection: EvolutionInteractionTarget | null,
+  presentation: Pick<EvolutionInteractionLayer, "provenanceTagIds"> | null,
+): EntityId[] {
+  return selection?.kind === "tag"
+    ? [...(presentation?.provenanceTagIds ?? [])]
+    : [];
+}
+
+export function nextIsolatedTagId(
+  current: EntityId | null,
+  target: EvolutionInteractionTarget,
+  baseBundleIds: ReadonlySet<string>,
+): EntityId | null {
+  if (target.kind === "tag") return target.id;
+  if (target.kind === "bundle" && !baseBundleIds.has(target.id)) return current;
+  return null;
+}
+
+export function selectedFocusLabelPosition(
+  station: Pick<MetroStation, "x" | "y">,
+  scene: Pick<MetroScene, "width" | "height">,
+): { x: number; y: number } {
+  const cardWidth = 220;
+  const cardHeight = 38;
+  const margin = 8;
+  const preferredX = station.x + 10 + cardWidth <= scene.width - margin
+    ? station.x + 10
+    : station.x - cardWidth - 10;
+  return {
+    x: Math.max(margin, Math.min(scene.width - cardWidth - margin, preferredX)),
+    y: Math.max(margin, Math.min(scene.height - cardHeight - margin, station.y - 28)),
+  };
 }
 
 export function evolutionItemInteractionClasses({
@@ -204,6 +480,8 @@ export function evolutionItemInteractionClasses({
   hover,
   selectionLayer,
   hoverLayer,
+  selectionLookup,
+  hoverLookup,
 }: {
   kind: EvolutionInteractionTarget["kind"];
   id: string;
@@ -211,9 +489,17 @@ export function evolutionItemInteractionClasses({
   hover: EvolutionInteractionTarget | null;
   selectionLayer: EvolutionInteractionLayer | null;
   hoverLayer: EvolutionInteractionLayer | null;
+  selectionLookup?: EvolutionInteractionLookup | null;
+  hoverLookup?: EvolutionInteractionLookup | null;
 }): string[] {
   const key =
-    kind === "tag" ? "tagIds" : kind === "station" ? "stationIds" : "relationKeys";
+    kind === "tag"
+      ? "tagIds"
+      : kind === "bundle"
+        ? "bundleIds"
+        : kind === "station"
+          ? "stationIds"
+          : "relationKeys";
   const exactSelection = sameEvolutionInteraction(
     selection,
     { kind, id } as EvolutionInteractionTarget,
@@ -222,8 +508,12 @@ export function evolutionItemInteractionClasses({
     hover,
     { kind, id } as EvolutionInteractionTarget,
   );
-  const selectionRelated = new Set(selectionLayer?.[key] ?? []).has(id);
-  const previewRelated = new Set(hoverLayer?.[key] ?? []).has(id);
+  const selectionRelated = selectionLookup
+    ? selectionLookup[key].has(id)
+    : new Set(selectionLayer?.[key] ?? []).has(id);
+  const previewRelated = hoverLookup
+    ? hoverLookup[key].has(id)
+    : new Set(hoverLayer?.[key] ?? []).has(id);
   const muted = Boolean(
     selectionLayer?.muteUnrelated && !selectionRelated && !previewRelated,
   );
@@ -234,6 +524,24 @@ export function evolutionItemInteractionClasses({
     previewRelated && !exactHover ? "preview-related" : "",
     muted ? "muted-by-selection" : "",
   ].filter(Boolean);
+}
+
+export interface EvolutionInteractionLookup {
+  tagIds: ReadonlySet<string>;
+  bundleIds: ReadonlySet<string>;
+  stationIds: ReadonlySet<string>;
+  relationKeys: ReadonlySet<string>;
+}
+
+export function evolutionInteractionLookup(
+  layer: EvolutionInteractionLayer | null,
+): EvolutionInteractionLookup {
+  return {
+    tagIds: new Set(layer?.tagIds ?? []),
+    bundleIds: new Set(layer?.bundleIds ?? []),
+    stationIds: new Set(layer?.stationIds ?? []),
+    relationKeys: new Set(layer?.relationKeys ?? []),
+  };
 }
 
 export function shouldRenderTemporalRegion(
@@ -328,15 +636,82 @@ function Tooltip({
         <>
           <strong>{tooltip.label}</strong>
           <small>{tooltip.stationCount} aggregate stops · {tooltip.workCount} works</small>
+          <ul>
+            {tooltip.strengthProfile.map((entry) => (
+              <li key={entry.stationId}>
+                {entry.acceptedTemporalValue} · {entry.strengthBand} · {strengthValueLabel(entry.strength)} · {rawStrengthValuesLabel(entry.rawStrengths)}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : tooltip.kind === "bundle" ? (
+        <>
+          <strong>{tooltip.tagCount} bundled tags</strong>
+          <span>{tooltip.stationCount} shared aggregate stops</span>
+          <small>{tooltip.reason}</small>
+          <ul>
+            {tooltip.tags.map((tag) => (
+              <li key={tag.id}>
+                {tag.label} · {tag.strengthBand} · {strengthValueLabel(tag.strongestStrength)} · {rawStrengthValuesLabel(tag.rawStrengths)}
+              </li>
+            ))}
+          </ul>
+          {tooltip.hiddenTagCount ? (
+            <small>
+              {tooltip.hiddenTagCount} more {tooltip.hiddenTagCount === 1 ? "tag" : "tags"}. Select the bundle for the complete unique list.
+            </small>
+          ) : null}
         </>
       ) : tooltip.kind === "station" ? (
         <>
           <strong>{tooltip.aggregate ? `${tooltip.workCount} works` : tooltip.works[0]?.label}</strong>
           <span>{tooltip.acceptedTemporalValue} · {tooltip.dateQuality}</span>
-          <small>{tooltip.visibleTags.map((tag) => tag.label).join(" · ")}</small>
+          {tooltip.flexiblePlacementNote ? <small>{tooltip.flexiblePlacementNote}</small> : null}
+          <small>
+            {tooltip.visibleTagGroups.map((group) =>
+              `${group.label}${group.conceptRecordCount > 1 ? ` (${group.conceptRecordCount} concept records)` : ""}`,
+            ).join(" · ")}
+          </small>
           {tooltip.ambiguityReasons.length ? (
             <small>{tooltip.ambiguityReasons.join("; ")}</small>
           ) : null}
+          <ul className="metro-tooltip-strengths">
+            {tooltip.visibleTagGroups.map((group) => {
+              const records = tooltip.visibleTags.filter((tag) => group.tagIds.includes(tag.id));
+              const rawValues = [...new Set(records.flatMap((tag) => tag.rawStrengths))]
+                .sort((left, right) => left - right);
+              const minimums = records
+                .map((tag) => tag.minimumStrength)
+                .filter((value): value is number => value !== null);
+              const maximums = records
+                .map((tag) => tag.maximumStrength)
+                .filter((value): value is number => value !== null);
+              const medians = records
+                .map((tag) => tag.medianStrength)
+                .filter((value): value is number => value !== null);
+              const minimum = minimums.length ? Math.min(...minimums) : null;
+              const maximum = maximums.length ? Math.max(...maximums) : null;
+              const median = medians.length === 1 ? medians[0]! : null;
+              const maximumWorkIds = [...new Set(
+                records
+                  .filter((tag) => maximum !== null && tag.maximumStrength === maximum)
+                  .flatMap((tag) => tag.maxWorkIds),
+              )];
+              const maximumWorkLabels = maximumWorkIds
+                .map((workId) => tooltip.works.find((work) => work.id === workId)?.label ?? workId)
+                .sort((left, right) => left.localeCompare(right));
+              return (
+                <li key={group.normalizedLabel}>
+                  {group.label} · {strengthValueLabel(group.strongestStrength)}
+                  <small>
+                    {normalizedStrengthRangeLabel(minimum, maximum, median)}
+                    {maximumWorkLabels.length ? ` · maximum from ${maximumWorkLabels.join(", ")}` : " · maximum source unknown"}
+                    {rawValues.length ? ` · raw ${rawValues.join(", ")}` : " · raw unavailable"}
+                  </small>
+                </li>
+              );
+            })}
+          </ul>
           <ul>
             {tooltip.works.map((work) => <li key={work.id}>{work.label}</li>)}
           </ul>
@@ -348,6 +723,12 @@ function Tooltip({
           {tooltip.chronologyConflictCount ? (
             <small>{tooltip.chronologyConflictCount} chronology {tooltip.chronologyConflictCount === 1 ? "conflict" : "conflicts"}</small>
           ) : null}
+          <small>
+            {tooltip.sharedTags.length} shared unique {tooltip.sharedTags.length === 1 ? "tag" : "tags"}
+            {tooltip.sharedTags.length
+              ? ` · strongest ${tooltip.sharedTags.slice(0, 3).map((tag) => `${tag.label} (${strengthValueLabel(tag.strength)})`).join(", ")}`
+              : ""}
+          </small>
           <ul>
             {tooltip.endpoints.map((endpoint) => (
               <li key={endpoint.key}>
@@ -388,6 +769,7 @@ export function EvolutionView({
   const [excludedTagIds, setExcludedTagIds] = useState<EntityId[]>([]);
   const [earlierDepth, setEarlierDepth] = useState(DEFAULT_EARLIER_DEPTH);
   const [laterDepth, setLaterDepth] = useState(DEFAULT_LATER_DEPTH);
+  const [expansionMode, setExpansionMode] = useState<ExpansionMode>(DEFAULT_EXPANSION_MODE);
   const [includeYearOnly, setIncludeYearOnly] = useState(DEFAULT_INCLUDE_YEAR_ONLY);
   const [includeAmbiguous, setIncludeAmbiguous] = useState(DEFAULT_INCLUDE_AMBIGUOUS);
   const [zoom, setZoom] = useState(1);
@@ -396,7 +778,28 @@ export function EvolutionView({
   const [focusTarget, setFocusTarget] = useState<EvolutionInteractionTarget | null>(null);
   const [tooltipPosition, setTooltipPosition] = useState<TooltipPosition>({ left: 8, top: 8 });
   const [refinedWorkId, setRefinedWorkId] = useState<EntityId | null>(null);
-  const hoverClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [explicitExpandedTagIds, setExplicitExpandedTagIds] = useState<EntityId[]>([]);
+  const [isolatedTagId, setIsolatedTagId] = useState<EntityId | null>(null);
+  const traversalCache = useRef<TraversalProjectionCache>({
+    index: null,
+    byMode: new Map(),
+  });
+  const hoverController = useRef<DelayedPreviewController<EvolutionInteractionTarget> | null>(null);
+  const detailsPanelRef = useRef<HTMLElement | null>(null);
+  const focusDetailsAfterUpdate = useRef(false);
+  if (!hoverController.current) {
+    hoverController.current = createDelayedPreviewController({
+      isSameTarget: (left, right) => sameEvolutionInteraction(left, right),
+      onOpen: (target) => setHover(target),
+      onClose: (target) => {
+        setHover((current) =>
+          target === null || sameEvolutionInteraction(current, target)
+            ? null
+            : current,
+        );
+      },
+    });
+  }
 
   const filters = useMemo(
     () => ({
@@ -404,9 +807,29 @@ export function EvolutionView({
       excludedTagIds,
       earlierDepth,
       laterDepth,
+      expansionMode,
       includeYearOnly,
       includeAmbiguous,
     }),
+    [
+      earlierDepth,
+      expansionMode,
+      excludedTagIds,
+      includeAmbiguous,
+      includeYearOnly,
+      laterDepth,
+      seedTagIds,
+    ],
+  );
+  const traversalCacheKey = useMemo(
+    () => JSON.stringify([
+      seedTagIds,
+      excludedTagIds.slice().sort(),
+      earlierDepth,
+      laterDepth,
+      includeYearOnly,
+      includeAmbiguous,
+    ]),
     [
       earlierDepth,
       excludedTagIds,
@@ -416,18 +839,92 @@ export function EvolutionView({
       seedTagIds,
     ],
   );
-  const visible = useMemo(
-    () => buildVisibleEvolution(index, filters),
-    [index, filters],
+  if (traversalCache.current.index !== index) {
+    traversalCache.current = { index, byMode: new Map() };
+  }
+  let cachedTraversal = traversalCache.current.byMode.get(expansionMode);
+  if (!cachedTraversal || cachedTraversal.key !== traversalCacheKey) {
+    cachedTraversal = {
+      key: traversalCacheKey,
+      visible: buildVisibleEvolution(index, filters),
+    };
+    traversalCache.current.byMode.set(expansionMode, cachedTraversal);
+  }
+  // Directional and connected projections occupy independent cache slots so
+  // toggling modes can reuse the last result for unchanged budgets and seeds.
+  const visible = cachedTraversal.visible;
+  const baseTrajectoryProjection = useMemo(
+    () => buildEvolutionTrajectoryProjection(visible, {
+      expandedTagIds: explicitExpandedTagIds,
+    }),
+    [explicitExpandedTagIds, visible],
   );
-  const scene = useMemo(() => buildTimeNetScene(visible), [visible]);
-  const hoverPresentation = useMemo(
-    () => buildHoverPresentation(scene, hover),
-    [hover, scene],
+  const scene = useMemo(
+    () => buildTimeNetScene(visible, baseTrajectoryProjection.groups),
+    [baseTrajectoryProjection.groups, visible],
   );
-  const selectionPresentation = useMemo(
+  const selectedProjectionTagId = selection?.kind === "tag"
+    ? selection.id
+    : isolatedTagId;
+  const baseSelectionProjection = useMemo(
     () => buildSelectionPresentation(scene, selection),
     [scene, selection],
+  );
+  const provenanceRequiredTagIds = provenanceOverlayTagIds(
+    selection,
+    baseSelectionProjection,
+  );
+  const provenanceProjectionKey = provenanceRequiredTagIds.join("\u0000");
+  const renderTrajectoryProjection = useMemo(
+    () => {
+      if (!selectedProjectionTagId && !provenanceRequiredTagIds.length) {
+        return baseTrajectoryProjection;
+      }
+      return buildEvolutionTrajectoryProjection(visible, {
+        expandedTagIds: explicitExpandedTagIds,
+        selectedTagId: selectedProjectionTagId,
+        provenanceRequiredTagIds,
+      });
+    },
+    [
+      baseTrajectoryProjection,
+      explicitExpandedTagIds,
+      provenanceProjectionKey,
+      selectedProjectionTagId,
+      visible,
+    ],
+  );
+  const renderTrajectoryGroups = useMemo(
+    () => renderTrajectoryProjection.groups
+      .map((group): (MetroRenderableTrajectoryGroup & { model: TagTrajectoryGroup }) | null => {
+        const laidOut = scene.trajectoryGroupById.get(group.id);
+        if (laidOut) return { ...laidOut, model: group };
+        const fallback = evolutionRenderGroupFallback(group, scene, visible);
+        return fallback ? { ...fallback, model: group } : null;
+      })
+      .filter(
+        (group): group is MetroRenderableTrajectoryGroup & { model: TagTrajectoryGroup } =>
+          group !== null,
+      ),
+    [renderTrajectoryProjection.groups, scene, visible],
+  );
+  const interactionScene = useMemo(
+    () => ({
+      ...scene,
+      trajectoryGroups: renderTrajectoryGroups,
+      trajectoryGroupById: new Map(
+        renderTrajectoryGroups.map((group) => [group.id, group]),
+      ),
+    }),
+    [renderTrajectoryGroups, scene],
+  );
+  const hoverPresentation = useMemo(
+    () => buildHoverPresentation(interactionScene, hover),
+    [hover, interactionScene],
+  );
+  const selectionPresentation = useMemo(
+    () => buildSelectionPresentation(interactionScene, selection),
+    [interactionScene, selection],
   );
   const presentation = useMemo(
     () => ({
@@ -438,33 +935,50 @@ export function EvolutionView({
     }),
     [hoverPresentation, selectionPresentation],
   );
+  const selectionInteractionLookup = useMemo(
+    () => evolutionInteractionLookup(presentation.selection),
+    [presentation.selection],
+  );
+  const hoverInteractionLookup = useMemo(
+    () => evolutionInteractionLookup(presentation.hover),
+    [presentation.hover],
+  );
   const tooltip = useMemo(
-    () => buildEvolutionTooltip(scene, visible, presentation.tooltipTarget),
-    [presentation.tooltipTarget, scene, visible],
+    () => buildEvolutionTooltip(interactionScene, visible, presentation.tooltipTarget),
+    [interactionScene, presentation.tooltipTarget, visible],
   );
 
-  const fallbackFocusTarget: EvolutionInteractionTarget | null = scene.trajectories[0]
-    ? { kind: "tag", id: scene.trajectories[0].id }
+  const fallbackTrajectoryGroup = renderTrajectoryGroups[0] ?? null;
+  const fallbackFocusTarget: EvolutionInteractionTarget | null = fallbackTrajectoryGroup
+    ? fallbackTrajectoryGroup.kind === "bundle"
+      ? { kind: "bundle", id: fallbackTrajectoryGroup.id }
+      : { kind: "tag", id: fallbackTrajectoryGroup.tagIds[0]! }
     : scene.stations[0]
       ? { kind: "station", id: scene.stations[0].id }
       : scene.explicitRelations[0]
         ? { kind: "relation", id: scene.explicitRelations[0].key }
         : null;
-  const rovingFocusTarget = evolutionInteractionAvailable(scene, focusTarget)
+  const rovingFocusTarget = evolutionInteractionAvailable(interactionScene, focusTarget)
     ? focusTarget
     : fallbackFocusTarget;
 
   useEffect(() => {
-    if (selection && !evolutionInteractionAvailable(scene, selection)) setSelection(null);
-    if (hover && !evolutionInteractionAvailable(scene, hover)) setHover(null);
-    if (focusTarget && !evolutionInteractionAvailable(scene, focusTarget)) {
+    if (selection && !evolutionInteractionAvailable(interactionScene, selection)) {
+      setSelection(null);
+      setIsolatedTagId(null);
+    }
+    if (hover && !evolutionInteractionAvailable(interactionScene, hover)) setHover(null);
+    if (focusTarget && !evolutionInteractionAvailable(interactionScene, focusTarget)) {
       setFocusTarget(null);
     }
-  }, [focusTarget, hover, scene, selection]);
+    if (isolatedTagId && !visible.tagById.has(isolatedTagId)) {
+      setIsolatedTagId(null);
+    }
+  }, [focusTarget, hover, interactionScene, isolatedTagId, selection, visible]);
 
   useEffect(
     () => () => {
-      if (hoverClearTimer.current) clearTimeout(hoverClearTimer.current);
+      hoverController.current?.dispose();
     },
     [],
   );
@@ -474,6 +988,29 @@ export function EvolutionView({
     selectedTarget?.kind === "tag"
       ? visible.tagById.get(selectedTarget.id) ?? null
       : null;
+  const selectedBundle =
+    selectedTarget?.kind === "bundle"
+      ? renderTrajectoryProjection.bundles.find((bundle) => bundle.id === selectedTarget.id) ?? null
+      : null;
+  const selectedBundleRouteStationIds = selectedBundle
+    ? interactionScene.trajectoryGroupById.get(selectedBundle.id)?.stationIds ??
+      selectedBundle.stationIds
+    : [];
+  const selectedBundleTagGroups = useMemo(
+    () => selectedBundle
+      ? groupUniqueTagLabels(selectedBundle.entries.map((entry) => ({
+          tagId: entry.tagId,
+          label: entry.label,
+          strength: entry.strengthProfile
+            .filter((strength): strength is number => strength !== null)
+            .reduce<number | null>(
+              (maximum, strength) => maximum === null ? strength : Math.max(maximum, strength),
+              null,
+            ),
+        })))
+      : [],
+    [selectedBundle],
+  );
   const selectedStation =
     selectedTarget?.kind === "station"
       ? scene.stationById.get(selectedTarget.id) ?? null
@@ -485,6 +1022,67 @@ export function EvolutionView({
   const selectedAggregateMemberships = selectedStation
     ? visible.aggregateMembershipsByStationId.get(selectedStation.id) ?? []
     : [];
+  const selectedStationBundles = selectedStation
+    ? (baseTrajectoryProjection.groupsByStationId.get(selectedStation.id) ?? [])
+        .filter((group) => group.kind === "bundle")
+    : [];
+  const selectedVisibleTagGroups = useMemo(
+    () => groupUniqueTagLabels(
+      selectedAggregateMemberships.map((membership) => ({
+        tagId: membership.tagId,
+        label: tagLabel(index, membership.tagId),
+        strength: membership.strength,
+      })),
+    ),
+    [index, selectedAggregateMemberships],
+  );
+  const selectedUnderlyingAssignments = useMemo(
+    () => selectedAggregateMemberships
+      .flatMap((membership) => membership.strengthSummary.memberships.map((source) => ({
+        ...source,
+        label: tagLabel(index, membership.tagId),
+      })))
+      .sort(
+        (left, right) =>
+          left.label.localeCompare(right.label) ||
+          left.tagId.localeCompare(right.tagId) ||
+          left.workId.localeCompare(right.workId),
+      ),
+    [index, selectedAggregateMemberships],
+  );
+  const selectedTagStrengthProfile = useMemo(
+    () => {
+      if (!selectedTag) return [];
+      const renderedStationIds = scene.trajectoryById.get(selectedTag.tag.id)?.stationIds ??
+        selectedTag.stationIds;
+      const temporalGroupIdByStationId = new Map<string, string>();
+      for (const stop of visible.temporalTagStops) {
+        if (stop.tagId !== selectedTag.tag.id) continue;
+        for (const stationId of stop.stationIds) {
+          temporalGroupIdByStationId.set(stationId, stop.temporalGroupId);
+        }
+      }
+      const profile = renderedStationIds.map((stationId) => {
+          const membership = visible.aggregateMembershipsByTagId
+            .get(selectedTag.tag.id)
+            ?.find((candidate) => candidate.stationId === stationId);
+          return {
+            stationId,
+            temporalGroupId: temporalGroupIdByStationId.get(stationId) ??
+              `station:${stationId}`,
+            label: scene.stationById.get(stationId)?.entry.temporal.displayLabel ?? stationId,
+            strength: membership?.strength ?? null,
+            rawStrengths: rawMembershipStrengths(
+              visible,
+              selectedTag.tag.id,
+              stationId,
+            ),
+          };
+        });
+      return strengthChangesByTemporalGroup(profile);
+    },
+    [scene, selectedTag, visible],
+  );
   const selectedAtomicRelations = selectedStation
     ? visible.explicitRelations.filter(
         (relation) =>
@@ -492,14 +1090,65 @@ export function EvolutionView({
           selectedStation.entry.workIds.includes(relation.targetId),
       )
     : [];
+  const selectedRelationSharedTags = useMemo(() => {
+    if (!selectedRelation) return [];
+    const targetIds = new Set(selectedRelation.target.visibleTagIds);
+    const sourceStrengths = new Map(
+      (visible.aggregateMembershipsByStationId.get(selectedRelation.source.id) ?? [])
+        .map((membership) => [membership.tagId, membership.strength]),
+    );
+    const targetStrengths = new Map(
+      (visible.aggregateMembershipsByStationId.get(selectedRelation.target.id) ?? [])
+        .map((membership) => [membership.tagId, membership.strength]),
+    );
+    return strongestTagSummaries(
+      selectedRelation.source.visibleTagIds
+        .filter((tagId) => targetIds.has(tagId))
+        .map((tagId) => {
+          const source = sourceStrengths.get(tagId);
+          const target = targetStrengths.get(tagId);
+          return {
+            tagId,
+            label: tagLabel(index, tagId),
+            strength:
+              source === null || source === undefined
+                ? target ?? null
+                : target === null || target === undefined
+                  ? source
+                  : Math.max(source, target),
+          };
+        }),
+      Number.MAX_SAFE_INTEGER,
+    );
+  }, [index, selectedRelation, visible]);
+  const selectedRelationSharedTagGroups = useMemo(
+    () => groupUniqueTagLabels(selectedRelationSharedTags),
+    [selectedRelationSharedTags],
+  );
+  const selectedRelationBundles = selectedRelation
+    ? (baseTrajectoryProjection.groupsByRelationKey.get(selectedRelation.relation.key) ?? [])
+        .filter((group) => group.kind === "bundle")
+    : [];
   const provenanceGroups = useMemo(
     () => selectedStation ? groupStationProvenance(selectedStation.entry, visible) : [],
+    [selectedStation, visible],
+  );
+  const selectedStationContextStateCount = useMemo(
+    () => selectedStation
+      ? connectedContextStateCountForStation(visible, selectedStation.id)
+      : 0,
     [selectedStation, visible],
   );
 
   useEffect(() => {
     setRefinedWorkId(null);
   }, [selectedStation?.id]);
+
+  useEffect(() => {
+    if (!focusDetailsAfterUpdate.current) return;
+    focusDetailsAfterUpdate.current = false;
+    detailsPanelRef.current?.focus();
+  }, [explicitExpandedTagIds, selection]);
 
   function addSeed(id: EntityId) {
     setExcludedTagIds((current) => current.filter((candidate) => candidate !== id));
@@ -509,7 +1158,10 @@ export function EvolutionView({
   function addExclusion(id: EntityId) {
     setSeedTagIds((current) => current.filter((candidate) => candidate !== id));
     setExcludedTagIds((current) => current.includes(id) ? current : [...current, id]);
-    if (selection?.kind === "tag" && selection.id === id) setSelection(null);
+    if (selection?.kind === "tag" && selection.id === id) {
+      setSelection(null);
+      setIsolatedTagId(null);
+    }
   }
 
   function resetView() {
@@ -517,12 +1169,15 @@ export function EvolutionView({
     setExcludedTagIds([]);
     setEarlierDepth(DEFAULT_EARLIER_DEPTH);
     setLaterDepth(DEFAULT_LATER_DEPTH);
+    setExpansionMode(DEFAULT_EXPANSION_MODE);
     setIncludeYearOnly(DEFAULT_INCLUDE_YEAR_ONLY);
     setIncludeAmbiguous(DEFAULT_INCLUDE_AMBIGUOUS);
     setSelection(null);
-    setHover(null);
+    hoverController.current?.closeNow();
     setFocusTarget(null);
     setRefinedWorkId(null);
+    setExplicitExpandedTagIds([]);
+    setIsolatedTagId(null);
     setZoom(1);
   }
 
@@ -530,38 +1185,53 @@ export function EvolutionView({
     setSeedTagIds([]);
     setExcludedTagIds([]);
     setSelection(null);
-    setHover(null);
+    hoverController.current?.closeNow();
     setFocusTarget(null);
+    setExplicitExpandedTagIds([]);
+    setIsolatedTagId(null);
   }
 
   function selectTarget(target: EvolutionInteractionTarget) {
+    setIsolatedTagId((current) => nextIsolatedTagId(
+      current,
+      target,
+      new Set(baseTrajectoryProjection.bundles.map((bundle) => bundle.id)),
+    ));
     setSelection(target);
     setFocusTarget(target);
   }
 
-  function previewTarget(target: EvolutionInteractionTarget, node: SVGGElement) {
-    if (hoverClearTimer.current) clearTimeout(hoverClearTimer.current);
+  function selectDetailsTarget(target: EvolutionInteractionTarget) {
+    focusDetailsAfterUpdate.current = true;
+    selectTarget(target);
+  }
+
+  function clearDetailsTarget() {
+    focusDetailsAfterUpdate.current = true;
+    setIsolatedTagId(null);
+    setSelection(null);
+  }
+
+  function previewTarget(
+    target: EvolutionInteractionTarget,
+    node: SVGGElement,
+    immediate = false,
+  ) {
     setTooltipPosition(tooltipPositionFor(node));
-    setHover(target);
+    if (immediate) hoverController.current?.openNow(target);
+    else hoverController.current?.pointerEnter(target);
   }
 
   function stopPreview(target: EvolutionInteractionTarget) {
-    if (hoverClearTimer.current) clearTimeout(hoverClearTimer.current);
-    hoverClearTimer.current = setTimeout(() => {
-      setHover((current) => sameEvolutionInteraction(current, target) ? null : current);
-      hoverClearTimer.current = null;
-    }, 120);
+    hoverController.current?.pointerLeave(target);
   }
 
   function keepPreviewOpen() {
-    if (hoverClearTimer.current) clearTimeout(hoverClearTimer.current);
-    hoverClearTimer.current = null;
+    hoverController.current?.keepOpen();
   }
 
   function closePreview() {
-    if (hoverClearTimer.current) clearTimeout(hoverClearTimer.current);
-    hoverClearTimer.current = null;
-    setHover(null);
+    hoverController.current?.closeNow();
   }
 
   function interactionClasses(
@@ -575,6 +1245,8 @@ export function EvolutionView({
       hover,
       selectionLayer: presentation.selection,
       hoverLayer: presentation.hover,
+      selectionLookup: selectionInteractionLookup,
+      hoverLookup: hoverInteractionLookup,
     });
     const refined =
       kind === "relation" &&
@@ -596,17 +1268,19 @@ export function EvolutionView({
     if (presentation.hover?.temporalBucket?.id === bucketId) return "preview";
     return null;
   };
-  const sceneSummary = `${visible.tags.length.toLocaleString()} tag trajectories · ${scene.stations.length.toLocaleString()} aggregate stops · ${visible.works.length.toLocaleString()} works · ${scene.explicitRelations.length.toLocaleString()} explicit relation paths`;
-  const selectedLabelOffsetX =
-    selectedStation && selectedStation.x > scene.width - 240 ? -230 : 10;
+  const sceneSummary = `${visible.tags.length.toLocaleString()} visible tags · ${baseTrajectoryProjection.groups.length.toLocaleString()} rendered routes (${baseTrajectoryProjection.bundles.length.toLocaleString()} bundles) · ${scene.stations.length.toLocaleString()} aggregate stops · ${visible.works.length.toLocaleString()} works · ${scene.explicitRelations.length.toLocaleString()} explicit relation paths`;
+  const selectedLabelPosition = selectedStation
+    ? selectedFocusLabelPosition(selectedStation, scene)
+    : null;
 
   return (
     <section
       className="metro-view"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
+          setIsolatedTagId(null);
           setSelection(null);
-          setHover(null);
+          hoverController.current?.closeNow();
         }
       }}
     >
@@ -615,25 +1289,27 @@ export function EvolutionView({
           <span className="metro-eyebrow">Evolution · historical continuity</span>
           <h2>Tags form trajectories. Works become temporal stops.</h2>
           <p>
-            Seed tags show their complete accepted histories. Works sharing an
-            accepted time and the same visible tag set are grouped into one aggregate
-            station. Earlier and Later depth independently reveal continuity through
-            interchanges; excluded tags are ignored by traversal without automatically
-            removing a work reached through an allowed tag. Gold dashed arrows retain
-            explicit work relations as a separate layer.
+            Single-work and aggregate stations share one sun-marker family. Line color
+            identifies a tag, line width represents assignment strength, and opacity
+            represents context depth. Structurally equivalent non-seed tags collapse
+            into bundles. Earlier and Later depth are independent budgets; Connected
+            context may change temporal direction while consuming both.
           </p>
           <small>
-            Hover is a local preview; click or keyboard activation creates persistent
-            focus and opens details. Ordering inside uncertain intervals is layout-only.
-            Horizontal distance preserves order and density, not duration.
+            Ancestor and descendant roles depend on the path. Year-only and month-level
+            stops are positioned within their known range for clarity, not inferred
+            precision. Hover is a local preview; click or keyboard activation creates persistent
+            focus. Horizontal distance preserves order and layout clarity, not duration.
           </small>
         </div>
         <div className="metro-copy-legend" aria-label="Evolution symbol legend">
           <span><i className="station exact" /> Single-work stop</span>
           <span><i className="station aggregate" /> Aggregate stop + count</span>
-          <span><i className="station month" /> Month interval</span>
-          <span><i className="station year" /> Year interval</span>
-          <span><i className="station ambiguous" /> Ambiguous date</span>
+          <span><i className="station interchange" /> Interchange station</span>
+          <span><i className="station uncertain" /> Year-only / uncertain</span>
+          <span><i className="station selected" /> Selected station</span>
+          <span><i className="trajectory strength" /> Width = tag strength</span>
+          <span><i className="trajectory bundle" /> Equivalent-tag bundle</span>
           <span><i className="relation" /> Explicit relation</span>
         </div>
       </header>
@@ -685,6 +1361,29 @@ export function EvolutionView({
           />
           <small>Later development</small>
         </div>
+        <fieldset className="metro-expansion-mode">
+          <legend>Expansion mode</legend>
+          <label>
+            <input
+              type="radio"
+              name="metro-expansion-mode"
+              value="directional"
+              checked={expansionMode === "directional"}
+              onChange={() => setExpansionMode("directional")}
+            />
+            Directional
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="metro-expansion-mode"
+              value="connected"
+              checked={expansionMode === "connected"}
+              onChange={() => setExpansionMode("connected")}
+            />
+            Connected context
+          </label>
+        </fieldset>
         <fieldset className="metro-date-controls">
           <legend>Date quality</legend>
           <label>
@@ -693,7 +1392,7 @@ export function EvolutionView({
               checked={includeYearOnly}
               onChange={(event) => setIncludeYearOnly(event.target.checked)}
             />
-            Year-only intervals
+            Year-only dates
           </label>
           <label>
             <input
@@ -723,11 +1422,17 @@ export function EvolutionView({
 
       <div className="metro-summary">
         <span>{sceneSummary}</span>
-        <span>Directional context: ← earlier {earlierDepth} · later {laterDepth} →</span>
+        <span>{expansionMode === "directional" ? "Directional" : "Connected"} context: ← earlier {earlierDepth} · later {laterDepth} →</span>
+        {expansionMode === "connected" ? (
+          <span>{visible.contextTraversalStates.length.toLocaleString()} non-dominated context states · {visible.temporalTagStops.length.toLocaleString()} temporal tag stops</span>
+        ) : null}
         {visible.emptySeedTagIds.length ? (
           <span className="warning">
             {visible.emptySeedTagIds.length} seed {visible.emptySeedTagIds.length === 1 ? "has" : "have"} no accepted dates.
           </span>
+        ) : null}
+        {visible.safetyStatus.warning ? (
+          <span className="warning" role="status">{visible.safetyStatus.warning}</span>
         ) : null}
       </div>
       <span className="sr-status" aria-live="polite">{sceneSummary}</span>
@@ -753,14 +1458,18 @@ export function EvolutionView({
                 viewBox={`0 0 ${scene.width} ${scene.height}`}
                 role="group"
                 aria-labelledby={`${titleId} ${descriptionId}`}
-                onClick={() => setSelection(null)}
+                onClick={() => {
+                  setSelection(null);
+                  setIsolatedTagId(null);
+                }}
               >
                 <title id={titleId}>Tag-centered historical Evolution map</title>
                 <desc id={descriptionId}>
-                  Colored tag trajectories pass through dated single-work and aggregate
-                  stations. Independent earlier and later depths add directional context.
-                  Explicit work relations form a separate arrow layer. Arrow keys move
-                  among items; Enter or Space creates persistent focus.
+                  Variable-width tag trajectories and equivalent-tag bundles pass through
+                  dated single-work and aggregate sun stations. Independent earlier and later
+                  budgets add directional or connected context; uncertain dates may move only
+                  within their accepted ranges. Explicit work relations remain a separate arrow
+                  layer. Arrow keys move among items; Enter or Space creates persistent focus.
                 </desc>
                 <defs>
                   <marker
@@ -860,33 +1569,46 @@ export function EvolutionView({
                 </g>
 
                 <g className="metro-trajectory-layer">
-                  {scene.trajectories.map((trajectory: MetroTrajectory) => {
-                    const interaction = interactionClasses("tag", trajectory.id);
-                    const style = { "--tag-color": trajectory.color } as CSSProperties;
-                    const target = { kind: "tag" as const, id: trajectory.id };
+                  {renderTrajectoryGroups.map((group) => {
+                    const representative = scene.trajectoryById.get(group.tagIds[0]!)!;
+                    const entry = representative.entry;
+                    const target: EvolutionInteractionTarget = group.kind === "bundle"
+                      ? { kind: "bundle", id: group.id }
+                      : { kind: "tag", id: group.tagIds[0]! };
+                    const interaction = interactionClasses(target.kind, target.id);
+                    const style = {
+                      "--tag-color": group.kind === "bundle" ? "#aeb9bb" : group.color,
+                    } as CSSProperties;
+                    const label = group.kind === "bundle"
+                      ? `${group.tagIds.length} tags`
+                      : entry.tag.label;
                     return (
                       <g
-                        key={trajectory.id}
+                        key={group.id}
                         className={[
                           "metro-trajectory",
-                          trajectory.entry.seed ? "seed" : "context-line",
-                          depthClass(trajectory.entry),
-                          directionClass(trajectory.entry),
+                          group.kind === "bundle" ? "trajectory-bundle" : "trajectory-singleton",
+                          group.reach.seed ? "seed" : "context-line",
+                          depthClass(group.reach),
+                          directionClass(group.reach),
                           ...interaction,
                         ].filter(Boolean).join(" ")}
                         style={style}
                         role="button"
                         tabIndex={sameEvolutionInteraction(rovingFocusTarget, target) ? 0 : -1}
                         data-metro-interactive="true"
+                        data-trajectory-kind={group.kind}
                         aria-pressed={sameEvolutionInteraction(selection, target)}
                         aria-controls={detailsId}
                         aria-describedby={sameEvolutionInteraction(hover, target) ? tooltipId : undefined}
-                        aria-label={`${trajectory.entry.tag.label}, ${reachSummary(trajectory.entry)}, ${trajectory.stationIds.length} aggregate stops`}
+                        aria-label={group.kind === "bundle"
+                          ? `${group.tagIds.length} bundled tags, ${reachSummary(group.reach)}, ${group.stationIds.length} shared aggregate stops`
+                          : `${entry.tag.label}, ${reachSummary(entry)}, ${group.stationIds.length} aggregate stops`}
                         onPointerEnter={(event: PointerEvent<SVGGElement>) => previewTarget(target, event.currentTarget)}
                         onPointerLeave={() => stopPreview(target)}
                         onFocus={(event) => {
                           setFocusTarget(target);
-                          previewTarget(target, event.currentTarget);
+                          previewTarget(target, event.currentTarget, true);
                         }}
                         onBlur={() => stopPreview(target)}
                         onClick={(event: MouseEvent<SVGGElement>) => {
@@ -895,16 +1617,56 @@ export function EvolutionView({
                         }}
                         onKeyDown={(event) => activateOnKeyboard(event, () => selectTarget(target))}
                       >
-                        <path d={trajectory.path} className="metro-line-visible" vectorEffect="non-scaling-stroke" />
-                        <path d={trajectory.path} className="metro-line-hit" vectorEffect="non-scaling-stroke" />
-                        <text x={trajectory.origin.x} y={trajectory.laneY - 10} className="metro-tag-label">
-                          {truncatedLabel(trajectory.entry.tag.label)}
+                        {group.segments.map((segment) => (
+                          <path
+                            key={segment.key}
+                            d={segment.path}
+                            className="metro-line-visible metro-strength-segment"
+                            data-strength={segment.displayStrength ?? "unknown"}
+                            style={{ "--segment-width": `${segment.width}px` } as CSSProperties}
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        ))}
+                        {group.stationPorts.map((port) => {
+                          const station = scene.stationById.get(port.stationId)!;
+                          const strengths = group.tagIds
+                            .map((tagId) => visible.aggregateMembershipsByTagId
+                              .get(tagId)
+                              ?.find((membership) => membership.stationId === station.id)
+                              ?.strength ?? null)
+                            .filter((strength): strength is number => strength !== null);
+                          const strength = strengths.length ? Math.max(...strengths) : null;
+                          const path = [
+                            `M ${port.left.x} ${port.left.y}`,
+                            `C ${station.x - 3} ${port.left.y}, ${station.x - 3} ${station.y}, ${station.x} ${station.y}`,
+                            `C ${station.x + 3} ${station.y}, ${station.x + 3} ${port.right.y}, ${port.right.x} ${port.right.y}`,
+                          ].join(" ");
+                          return (
+                            <path
+                              key={`port-route:${group.id}:${station.id}`}
+                              d={path}
+                              className="metro-line-visible metro-station-port-route"
+                              data-strength={strength ?? "unknown"}
+                              style={{ "--segment-width": `${trajectorySegmentWidth(strength)}px` } as CSSProperties}
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          );
+                        })}
+                        <path d={group.path} className="metro-line-hit" vectorEffect="non-scaling-stroke" />
+                        <text x={representative.origin.x} y={representative.laneY - 10} className="metro-tag-label">
+                          {truncatedLabel(label)}
                         </text>
-                        {!trajectory.entry.seed && trajectory.entry.earlierDepth !== null && trajectory.entry.laterDepth === null ? (
-                          <text x={trajectory.origin.x - 2} y={trajectory.laneY + 4} className="metro-direction-marker">←</text>
+                        {group.kind === "bundle" ? (
+                          <g className="metro-bundle-count" transform={`translate(${representative.origin.x + 7} ${representative.laneY + 4})`}>
+                            <circle r={6.5} />
+                            <text y={2.3}>{group.tagIds.length}</text>
+                          </g>
                         ) : null}
-                        {!trajectory.entry.seed && trajectory.entry.laterDepth !== null && trajectory.entry.earlierDepth === null ? (
-                          <text x={trajectory.end.x + 5} y={trajectory.end.y + 4} className="metro-direction-marker">→</text>
+                        {!group.reach.seed && group.reach.earlierDepth !== null && group.reach.laterDepth === null ? (
+                          <text x={representative.origin.x - 2} y={representative.laneY + 4} className="metro-direction-marker">←</text>
+                        ) : null}
+                        {!group.reach.seed && group.reach.laterDepth !== null && group.reach.earlierDepth === null ? (
+                          <text x={representative.end.x + 5} y={representative.end.y + 4} className="metro-direction-marker">→</text>
                         ) : null}
                       </g>
                     );
@@ -935,7 +1697,7 @@ export function EvolutionView({
                         onPointerLeave={() => stopPreview(target)}
                         onFocus={(event) => {
                           setFocusTarget(target);
-                          previewTarget(target, event.currentTarget);
+                          previewTarget(target, event.currentTarget, true);
                         }}
                         onBlur={() => stopPreview(target)}
                         onClick={(event: MouseEvent<SVGGElement>) => {
@@ -960,9 +1722,12 @@ export function EvolutionView({
                 <g className="metro-station-layer">
                   {scene.stations.map((station) => {
                     const target = { kind: "station" as const, id: station.id };
-                    const markerRadius = station.aggregate
-                      ? Math.max(9, 7 + String(station.entry.workCount).length * 1.5)
-                      : 3.6;
+                    const marker = evolutionStationMarkerGeometry({
+                      aggregate: station.aggregate,
+                      interchange: station.interchange,
+                      workCount: station.entry.workCount,
+                    });
+                    const ambiguousHalfSize = marker.dateHaloRadius / Math.SQRT2;
                     return (
                       <g
                         key={station.id}
@@ -988,7 +1753,7 @@ export function EvolutionView({
                         onPointerLeave={() => stopPreview(target)}
                         onFocus={(event) => {
                           setFocusTarget(target);
-                          previewTarget(target, event.currentTarget);
+                          previewTarget(target, event.currentTarget, true);
                         }}
                         onBlur={() => stopPreview(target)}
                         onClick={(event: MouseEvent<SVGGElement>) => {
@@ -1001,19 +1766,26 @@ export function EvolutionView({
                         }}
                         onKeyDown={(event) => activateOnKeyboard(event, () => selectTarget(target))}
                       >
-                        <circle r={Math.max(20, markerRadius + 10)} className="metro-station-hit" />
-                        {station.entry.temporal.quality === "year-only" ? <circle r={markerRadius + 5} className="metro-station-halo year" /> : null}
-                        {station.entry.temporal.precision === "month" && station.entry.temporal.quality !== "ambiguous" ? <circle r={markerRadius + 4} className="metro-station-halo month" /> : null}
-                        {station.entry.temporal.quality === "ambiguous" ? (
-                          <rect x={-(markerRadius + 3)} y={-(markerRadius + 3)} width={(markerRadius + 3) * 2} height={(markerRadius + 3) * 2} className="metro-station-halo ambiguous" transform="rotate(45)" />
-                        ) : null}
-                        {station.aggregate ? <circle r={markerRadius} className="metro-aggregate-ring" /> : null}
-                        {station.interchange ? <circle r={markerRadius + (station.aggregate ? 4 : 3.4)} className="metro-interchange-ring" /> : null}
-                        {station.aggregate ? (
-                          <text y={2.5} className="metro-aggregate-count">{station.entry.workCount}</text>
-                        ) : (
-                          <circle r={3.6} className="metro-station-core" />
-                        )}
+                        <circle r={marker.hitRadius} className="metro-station-hit" />
+                        <circle
+                          r={marker.knockoutRadius}
+                          className="metro-station-knockout"
+                          data-station-knockout="true"
+                        />
+                        <g className="metro-station-visible">
+                          {station.entry.temporal.quality === "year-only" ? <circle r={marker.dateHaloRadius} className="metro-station-halo year" /> : null}
+                          {station.entry.temporal.precision === "month" && station.entry.temporal.quality !== "ambiguous" ? <circle r={marker.dateHaloRadius} className="metro-station-halo month" /> : null}
+                          {station.entry.temporal.quality === "ambiguous" ? (
+                            <rect x={-ambiguousHalfSize} y={-ambiguousHalfSize} width={ambiguousHalfSize * 2} height={ambiguousHalfSize * 2} className="metro-station-halo ambiguous" transform="rotate(45)" />
+                          ) : null}
+                          {station.aggregate ? <circle r={marker.coreRadius} className="metro-aggregate-ring" /> : <circle r={marker.coreRadius} className="metro-station-core" />}
+                          {station.interchange ? <circle r={marker.structuralRadius} className="metro-interchange-ring" /> : null}
+                          {station.aggregate ? (
+                            <text y={2.5} className="metro-aggregate-count">{station.entry.workCount}</text>
+                          ) : (
+                            <circle r={1.45} className="metro-station-center" />
+                          )}
+                        </g>
                       </g>
                     );
                   })}
@@ -1025,8 +1797,8 @@ export function EvolutionView({
                       {truncatedLabel(label.text, 32)}
                     </text>
                   ))}
-                  {selectedStation ? (
-                    <g transform={`translate(${selectedStation.x + selectedLabelOffsetX} ${selectedStation.y - 28})`} className="metro-focus-label">
+                  {selectedStation && selectedLabelPosition ? (
+                    <g transform={`translate(${selectedLabelPosition.x} ${selectedLabelPosition.y})`} className="metro-focus-label">
                       <rect width={220} height={38} rx={5} />
                       <text x={9} y={15} className="title">
                         {selectedStation.entry.workCount > 1
@@ -1043,10 +1815,12 @@ export function EvolutionView({
         </div>
 
         <aside
+          ref={detailsPanelRef}
           id={detailsId}
           className="metro-details"
           data-details-kind={selectedTarget?.kind ?? "none"}
           aria-live="polite"
+          tabIndex={-1}
         >
           {selectedTag ? (
             <>
@@ -1059,16 +1833,106 @@ export function EvolutionView({
                 <div><dt>First / last</dt><dd>{selectedTag.firstTemporal.displayLabel} → {selectedTag.lastTemporal.displayLabel}</dd></div>
                 <div><dt>Origin targets</dt><dd>{selectedTag.origin.targetStationIds.length}</dd></div>
               </dl>
-              <h4>Directional provenance</h4>
+              <h4>Strength by visible stop</h4>
+              <ul className="metro-strength-profile">
+                {selectedTagStrengthProfile.map((entry) => (
+                  <li key={entry.stationId}>
+                    <button type="button" onClick={() => selectDetailsTarget({ kind: "station", id: entry.stationId })}>
+                      <span>{entry.label}</span>
+                      <small>
+                        {tagStrengthBand(entry.strength)} · {strengthValueLabel(entry.strength)} · {rawStrengthValuesLabel(entry.rawStrengths)} · {strengthChangeLabel(entry.change, entry.first)}
+                      </small>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <h4>{expansionMode === "connected" ? "Connected-context provenance" : "Directional provenance"}</h4>
               <ul>
                 {selectedTag.reasons.map((reason) => (
-                  <li key={reasonKey(reason)}>{reachReasonLabel(reason, index)}</li>
+                  <li key={reasonKey(reason)}>
+                    <span>{reachReasonLabel(reason, index)}</span>
+                    {reachReasonPathLabels(reason, index, scene).length ? (
+                      <ol className="metro-provenance-path">
+                        {reachReasonPathLabels(reason, index, scene).map((step) => (
+                          <li key={step}>{step}</li>
+                        ))}
+                      </ol>
+                    ) : null}
+                  </li>
                 ))}
               </ul>
               <div className="metro-details-actions">
                 {!selectedTag.seed ? <button type="button" onClick={() => addSeed(selectedTag.tag.id)}>Add as seed</button> : null}
-                <button type="button" onClick={() => addExclusion(selectedTag.tag.id)}>Exclude tag</button>
-                <button type="button" onClick={() => setSelection(null)}>Clear focus</button>
+                <button type="button" onClick={() => {
+                  focusDetailsAfterUpdate.current = true;
+                  addExclusion(selectedTag.tag.id);
+                }}>Exclude tag</button>
+                <button type="button" onClick={clearDetailsTarget}>Clear focus</button>
+              </div>
+            </>
+          ) : selectedBundle ? (
+            <>
+              <span className="metro-details-kicker">Trajectory bundle</span>
+              <h3>{selectedBundle.tagIds.length} equivalent tags</h3>
+              <p>{BUNDLE_EQUIVALENCE_REASON}.</p>
+              <dl>
+                <div><dt>Unique tags</dt><dd>{selectedBundle.tagIds.length}</dd></div>
+                <div><dt>Shared stops</dt><dd>{selectedBundle.stationIds.length}</dd></div>
+                <div><dt>Segments</dt><dd>{selectedBundle.segments.length}</dd></div>
+                <div><dt>Bundle state</dt><dd>Collapsed</dd></div>
+              </dl>
+              <h4>Unique bundled tags</h4>
+              <div className="metro-unique-tag-list">
+                {selectedBundleTagGroups.map((group) => (
+                  <details key={group.normalizedLabel} open={group.conceptRecordCount === 1}>
+                    <summary>
+                      <span>{group.label}</span>
+                      <small>
+                        {group.conceptRecordCount > 1 ? `${group.conceptRecordCount} concept records · ` : ""}
+                        strongest {strengthValueLabel(group.strongestStrength)}
+                      </small>
+                    </summary>
+                    <div>
+                      {group.tagIds.map((tagId) => {
+                        const entry = selectedBundle.entries.find((candidate) => candidate.tagId === tagId)!;
+                        return (
+                          <button type="button" key={tagId} onClick={() => selectDetailsTarget({ kind: "tag", id: tagId })}>
+                            <span>Isolate {tagLabel(index, tagId)}</span>
+                            <small>
+                              {tagId} · normalized {entry.strengthProfile.map(strengthValueLabel).join(" → ")} · {entry.stationIds.map((stationId) => rawStrengthValuesLabel(rawMembershipStrengths(visible, tagId, stationId))).join(" → ")} · {BUNDLE_EQUIVALENCE_REASON}
+                            </small>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </details>
+                ))}
+              </div>
+              <h4>Shared route</h4>
+              <ol className="metro-bundle-route">
+                {selectedBundleRouteStationIds.map((stationId) => (
+                  <li key={stationId}>
+                    <button type="button" onClick={() => selectDetailsTarget({ kind: "station", id: stationId })}>
+                      {scene.stationById.get(stationId)?.entry.temporal.displayLabel ?? stationId}
+                    </button>
+                  </li>
+                ))}
+              </ol>
+              <div className="metro-details-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExplicitExpandedTagIds((current) => [
+                      ...new Set([...current, ...selectedBundle.tagIds]),
+                    ].sort());
+                    focusDetailsAfterUpdate.current = true;
+                    setIsolatedTagId(null);
+                    setSelection(null);
+                  }}
+                >
+                  Expand bundled tags
+                </button>
+                <button type="button" onClick={clearDetailsTarget}>Clear focus</button>
               </div>
             </>
           ) : selectedStation ? (
@@ -1076,6 +1940,14 @@ export function EvolutionView({
               <span className="metro-details-kicker">{selectedStation.aggregate ? "Aggregate station" : "Work station"}</span>
               <h3>{selectedStation.aggregate ? `${selectedStation.entry.workCount} works` : workLabel(index, selectedStation.entry.workIds[0]!)}</h3>
               <p>{selectedStation.entry.temporal.displayLabel} · {dateQualityLabel(selectedStation)} · {reachSummary(selectedStation.entry)}</p>
+              {selectedStation.entry.temporal.precision !== "day" ? (
+                <div className="metro-flexible-date-note">
+                  Known only to {selectedStation.entry.temporal.precision === "year"
+                    ? selectedStation.entry.temporal.year
+                    : selectedStation.entry.temporal.displayLabel.replace(/^≈\s*/, "")}.
+                  {" "}Position optimized within the {selectedStation.entry.temporal.precision} for readability.
+                </div>
+              ) : null}
               {selectedStation.entry.temporal.ambiguityReasons.length ? (
                 <div className="metro-date-warning">{selectedStation.entry.temporal.ambiguityReasons.join("; ")}</div>
               ) : null}
@@ -1083,6 +1955,9 @@ export function EvolutionView({
                 <div><dt>Earlier reach</dt><dd>{selectedStation.entry.earlierDepth ?? "—"}</dd></div>
                 <div><dt>Later reach</dt><dd>{selectedStation.entry.laterDepth ?? "—"}</dd></div>
                 <div><dt>Visible tags</dt><dd>{selectedStation.visibleTagIds.length}</dd></div>
+                <div><dt>Placement role</dt><dd>{humanize(selectedStation.reachRole)}</dd></div>
+                <div><dt>Context states</dt><dd>{expansionMode === "connected" ? selectedStationContextStateCount : "Directional mode"}</dd></div>
+                <div><dt>Trajectory bundles</dt><dd>{selectedStationBundles.length}</dd></div>
                 <div><dt>Explicit relations</dt><dd>{selectedAtomicRelations.length}</dd></div>
               </dl>
               <h4>Contained works</h4>
@@ -1105,16 +1980,86 @@ export function EvolutionView({
                   );
                 })}
               </div>
-              <h4>Visible tag memberships</h4>
-              <div className="metro-membership-list">
-                {selectedAggregateMemberships.map((membership) => (
-                  <button type="button" key={membership.key} onClick={() => selectTarget({ kind: "tag", id: membership.tagId })}>
-                    <span>{tagLabel(index, membership.tagId)}</span>
-                    <small>{reachSummary(membership)}</small>
-                  </button>
-                ))}
+              <h4>Unique visible tags</h4>
+              <div className="metro-unique-tag-list">
+                {selectedVisibleTagGroups.map((group) => {
+                  const records = selectedAggregateMemberships.filter((membership) =>
+                    group.tagIds.includes(membership.tagId),
+                  );
+                  if (group.conceptRecordCount === 1) {
+                    const membership = records[0]!;
+                    const maximumProviders = membership.strengthSummary.maxWorkIds
+                      .map((workId) => workLabel(index, workId))
+                      .join(", ");
+                    return (
+                      <button type="button" key={group.normalizedLabel} onClick={() => selectDetailsTarget({ kind: "tag", id: membership.tagId })}>
+                        <span>{group.label}</span>
+                        <small>
+                          {tagStrengthBand(membership.strength)} · {strengthValueLabel(membership.strength)} · {normalizedStrengthRangeLabel(
+                            membership.strengthSummary.minStrength,
+                            membership.strengthSummary.maxStrength,
+                            membership.strengthSummary.medianStrength,
+                          )} · {maximumProviders ? `maximum from ${maximumProviders}` : "maximum source unknown"} · {reachSummary(membership)}
+                        </small>
+                      </button>
+                    );
+                  }
+                  return (
+                    <details key={group.normalizedLabel}>
+                      <summary>
+                        <span>{group.label}</span>
+                        <small>{group.conceptRecordCount} concept records · strongest {strengthValueLabel(group.strongestStrength)}</small>
+                      </summary>
+                      <div>
+                        {records.map((membership) => (
+                          <button type="button" key={membership.key} onClick={() => selectDetailsTarget({ kind: "tag", id: membership.tagId })}>
+                            <span>{membership.tagId}</span>
+                            <small>
+                              {tagStrengthBand(membership.strength)} · {strengthValueLabel(membership.strength)} · {normalizedStrengthRangeLabel(
+                                membership.strengthSummary.minStrength,
+                                membership.strengthSummary.maxStrength,
+                                membership.strengthSummary.medianStrength,
+                              )} · {membership.strengthSummary.maxWorkIds.length
+                                ? `maximum from ${membership.strengthSummary.maxWorkIds.map((workId) => workLabel(index, workId)).join(", ")}`
+                                : "maximum source unknown"}
+                            </small>
+                          </button>
+                        ))}
+                      </div>
+                    </details>
+                  );
+                })}
               </div>
-              <h4>Grouped directional provenance</h4>
+              <h4>Underlying assignments</h4>
+              <ul className="metro-assignment-list">
+                {selectedUnderlyingAssignments.map((assignment) => (
+                  <li
+                    key={`${assignment.tagId}:${assignment.workId}`}
+                    className={refinedWorkId === assignment.workId ? "refined" : ""}
+                  >
+                    <strong>{assignment.label}</strong> on {workLabel(index, assignment.workId)}
+                    <small>
+                      Raw {assignment.rawStrength ?? "unknown"} · {tagStrengthBand(assignment.strength)} · {strengthValueLabel(assignment.strength)}
+                      {assignment.historicalRole ? ` · ${humanize(assignment.historicalRole)}` : ""}
+                      {assignment.confidence !== null ? ` · confidence ${Math.round(assignment.confidence * 100)}%` : " · confidence unknown"}
+                    </small>
+                  </li>
+                ))}
+              </ul>
+              {selectedStationBundles.length ? (
+                <>
+                  <h4>Trajectory bundles</h4>
+                  <div className="metro-unique-tag-list">
+                    {selectedStationBundles.map((bundle) => (
+                      <button type="button" key={bundle.id} onClick={() => selectDetailsTarget({ kind: "bundle", id: bundle.id })}>
+                        <span>{bundle.tagIds.length} equivalent tags</span>
+                        <small>{bundle.tagIds.map((tagId) => tagLabel(index, tagId)).join(" · ")}</small>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+              <h4>Grouped {expansionMode === "connected" ? "connected-context" : "directional"} provenance</h4>
               <p className="metro-provenance-note">
                 Equivalent seed, direction, source-stop, traversed-tag, and depth explanations are grouped across contained works.
               </p>
@@ -1122,12 +2067,26 @@ export function EvolutionView({
                 {provenanceGroups.map((group) => (
                   <details key={group.key} open={group.workIds.length <= 1}>
                     <summary>{reachReasonLabel(group.reason, index)}{group.occurrences > 1 ? ` · ${group.occurrences} records` : ""}</summary>
+                    {reachReasonPathLabels(group.reason, index, scene).length ? (
+                      <ol className="metro-provenance-path">
+                        {reachReasonPathLabels(group.reason, index, scene).map((step) => (
+                          <li key={step}>{step}</li>
+                        ))}
+                      </ol>
+                    ) : null}
                     {group.entries.length ? (
                       <ul>
                         {group.entries.map((entry) => (
                           <li key={`${entry.workId}:${reasonKey(entry.reason)}`}>
                             <strong>{workLabel(index, entry.workId)}</strong>
                             <span>{reachReasonLabel(entry.reason, index)}</span>
+                            {reachReasonPathLabels(entry.reason, index, scene).length ? (
+                              <ol className="metro-provenance-path">
+                                {reachReasonPathLabels(entry.reason, index, scene).map((step) => (
+                                  <li key={step}>{step}</li>
+                                ))}
+                              </ol>
+                            ) : null}
                           </li>
                         ))}
                       </ul>
@@ -1149,7 +2108,7 @@ export function EvolutionView({
                 </>
               ) : null}
               <div className="metro-details-actions">
-                <button type="button" onClick={() => setSelection(null)}>Clear focus</button>
+                <button type="button" onClick={clearDetailsTarget}>Clear focus</button>
               </div>
             </>
           ) : selectedRelation ? (
@@ -1162,7 +2121,70 @@ export function EvolutionView({
                 <div><dt>Target stop</dt><dd>{selectedRelation.target.entry.workCount} works</dd></div>
                 <div><dt>Relation types</dt><dd>{selectedRelation.relation.relationTypes.length}</dd></div>
                 <div><dt>Chronology conflicts</dt><dd>{selectedRelation.relation.relations.filter((relation) => relation.chronologyConflict).length}</dd></div>
+                <div><dt>Shared unique tags</dt><dd>{selectedRelationSharedTags.length}</dd></div>
+                <div><dt>Bundled routes</dt><dd>{selectedRelationBundles.length}</dd></div>
               </dl>
+              <h4>Strongest shared tags</h4>
+              {selectedRelationSharedTags.length ? (
+                <ol className="metro-strength-profile">
+                  {selectedRelationSharedTags.slice(0, 3).map((tag) => (
+                    <li key={`strongest:${tag.tagId}`}>
+                      <button type="button" onClick={() => selectDetailsTarget({ kind: "tag", id: tag.tagId })}>
+                        <span>{tag.label}</span>
+                        <small>{tagStrengthBand(tag.strength)} · {strengthValueLabel(tag.strength)}</small>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+              ) : <p>No shared visible tags connect these stops.</p>}
+              <h4>Complete shared unique tags</h4>
+              {selectedRelationSharedTagGroups.length ? (
+                <div className="metro-unique-tag-list">
+                  {selectedRelationSharedTagGroups.map((group) => {
+                    const records = selectedRelationSharedTags.filter((tag) =>
+                      group.tagIds.includes(tag.tagId),
+                    );
+                    if (group.conceptRecordCount === 1) {
+                      const tag = records[0]!;
+                      return (
+                        <button type="button" key={group.normalizedLabel} onClick={() => selectDetailsTarget({ kind: "tag", id: tag.tagId })}>
+                          <span>{group.label}</span>
+                          <small>{tagStrengthBand(tag.strength)} · {strengthValueLabel(tag.strength)}</small>
+                        </button>
+                      );
+                    }
+                    return (
+                      <details key={group.normalizedLabel}>
+                        <summary>
+                          <span>{group.label}</span>
+                          <small>{group.conceptRecordCount} concept records · strongest {strengthValueLabel(group.strongestStrength)}</small>
+                        </summary>
+                        <div>
+                          {records.map((tag) => (
+                            <button type="button" key={tag.tagId} onClick={() => selectDetailsTarget({ kind: "tag", id: tag.tagId })}>
+                              <span>{tag.tagId}</span>
+                              <small>{tagStrengthBand(tag.strength)} · {strengthValueLabel(tag.strength)}</small>
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    );
+                  })}
+                </div>
+              ) : <p>No shared visible tags connect these stops.</p>}
+              {selectedRelationBundles.length ? (
+                <>
+                  <h4>Bundled shared tags</h4>
+                  <div className="metro-unique-tag-list">
+                    {selectedRelationBundles.map((bundle) => (
+                      <button type="button" key={bundle.id} onClick={() => selectDetailsTarget({ kind: "bundle", id: bundle.id })}>
+                        <span>{bundle.tagIds.length} bundled tags</span>
+                        <small>{bundle.tagIds.map((tagId) => tagLabel(index, tagId)).join(" · ")}</small>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
               <h4>Underlying work relations</h4>
               <ul>
                 {selectedRelation.relation.relations.map((relation) => (
@@ -1173,9 +2195,9 @@ export function EvolutionView({
                 ))}
               </ul>
               <div className="metro-details-actions">
-                <button type="button" onClick={() => selectTarget({ kind: "station", id: selectedRelation.source.id })}>Focus source stop</button>
-                <button type="button" onClick={() => selectTarget({ kind: "station", id: selectedRelation.target.id })}>Focus target stop</button>
-                <button type="button" onClick={() => setSelection(null)}>Clear focus</button>
+                <button type="button" onClick={() => selectDetailsTarget({ kind: "station", id: selectedRelation.source.id })}>Focus source stop</button>
+                <button type="button" onClick={() => selectDetailsTarget({ kind: "station", id: selectedRelation.target.id })}>Focus target stop</button>
+                <button type="button" onClick={clearDetailsTarget}>Clear focus</button>
               </div>
             </>
           ) : (
@@ -1184,14 +2206,15 @@ export function EvolutionView({
               <h3>Historical tag continuity</h3>
               <p>
                 Hover previews only the item under the pointer. Click a trajectory,
-                aggregate stop, or explicit relation for persistent focus, directional
-                provenance, and complete underlying records.
+                bundle, station, or explicit relation for persistent focus, path
+                provenance, strength details, and complete underlying records.
               </p>
               <dl>
                 <div><dt>Seeds</dt><dd>{seedTagIds.length}</dd></div>
                 <div><dt>Excluded</dt><dd>{excludedTagIds.length}</dd></div>
                 <div><dt>Earlier depth</dt><dd>{earlierDepth}</dd></div>
                 <div><dt>Later depth</dt><dd>{laterDepth}</dd></div>
+                <div><dt>Expansion mode</dt><dd>{expansionMode === "directional" ? "Directional" : "Connected context"}</dd></div>
               </dl>
             </>
           )}
