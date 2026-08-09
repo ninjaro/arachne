@@ -164,6 +164,7 @@ TEST(Contracts, ReferencedArtifactSchemasAndExamplesAreResolvableDataFormats) {
         = repository_root() / "contracts" / "artifacts";
     for (const std::string_view name :
          { "external_candidate_source_graph_v1",
+           "wikidata_image_hints_v1",
            "research_candidate_graph_materialization_v1",
            "viewer_projection_data_v1" }) {
         SCOPED_TRACE(name);

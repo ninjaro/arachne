@@ -15,6 +15,7 @@ mkdir -p logs
 : "${PRODUCT_CONTROL:?Set PRODUCT_CONTROL to product_graph_snapshot_v1 JSON}"
 : "${GRAPH_STORE:?Set GRAPH_STORE to Penelope graph custody}"
 : "${OUTPUT:?Set OUTPUT to a new external source graph path}"
+: "${IMAGE_HINTS_OUTPUT:?Set IMAGE_HINTS_OUTPUT to a new image hints path}"
 : "${WORK_DIRECTORY:?Set WORK_DIRECTORY to disposable HPC scratch}"
 : "${CANDIDATE_POLICY_CONFIG:?Set CANDIDATE_POLICY_CONFIG to Arachne operations config}"
 
@@ -26,6 +27,7 @@ python -u hpc/wikidata/build_external_graph.py \
   --config hpc/wikidata/config.json \
   --candidate-policy-config "$CANDIDATE_POLICY_CONFIG" \
   --output "$OUTPUT" \
+  --image-hints-output "$IMAGE_HINTS_OUTPUT" \
   --work-directory "$WORK_DIRECTORY" \
   --report "${REPORT:-$OUTPUT.run-report.json}" \
   --decompress-threads "${SLURM_CPUS_PER_TASK:-1}"

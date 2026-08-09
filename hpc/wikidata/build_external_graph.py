@@ -3,8 +3,9 @@
 
 This worker performs no network access. It verifies the acquired-artifact and
 product-snapshot controls, scans the compressed dump in bounded memory, uses a
-disposable SQLite graph for joins, and atomically emits the same versioned
-external graph consumed by local and GitHub Actions candidate runs.
+disposable SQLite graph for joins, and emits the same versioned external graph
+consumed by local and GitHub Actions candidate runs plus a separate bounded
+Wikidata/Commons image-hint projection for canonical works and agents.
 """
 
 from __future__ import annotations
@@ -36,7 +37,11 @@ MAX_DUMP_LINE_BYTES = 256 * 1024 * 1024
 MAX_PRODUCT_LINE_BYTES = 16 * 1024 * 1024
 MAX_CONTROL_BYTES = 64 * 1024 * 1024
 MAX_EXTERNAL_GRAPH_BYTES = 1024 * 1024 * 1024
+MAX_IMAGE_HINTS_BYTES = 64 * 1024 * 1024
 MAX_WORK_CLASSES = 10_000_000
+MAX_PRODUCT_IMAGE_TARGETS = 2_000_000
+MAX_IMAGE_CLAIMS_PER_PROPERTY = 16
+MAX_IMAGE_HINTS_PER_ENTITY = 3
 MAX_DECOMPRESS_THREADS = 1024
 STABLE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -62,6 +67,11 @@ PROFILE_TIME_PROPERTIES = {
     "P2031": "work_start",
     "P2032": "work_end",
 }
+IMAGE_PROPERTIES = {
+    "work": {"P3383": "work_poster", "P18": "work_image"},
+    "agent": {"P18": "agent_portrait", "P154": "agent_logo"},
+}
+IMAGE_CLAIM_PROPERTIES = ("P18", "P154", "P3383")
 
 
 class WorkerError(RuntimeError):
@@ -77,6 +87,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--config", type=Path, required=True)
     result.add_argument("--candidate-policy-config", type=Path, required=True)
     result.add_argument("--output", type=Path, required=True)
+    result.add_argument("--image-hints-output", type=Path, required=True)
     result.add_argument("--work-directory", type=Path, required=True)
     result.add_argument("--report", type=Path)
     result.add_argument("--decompress-threads", type=int, default=1)
@@ -433,10 +444,29 @@ def verify_product(
     ]
     if len(exports) != 1:
         raise WorkerError("product snapshot must declare one product-jsonl export")
+    _database_path, _database_ref, database_digest, _database_size = (
+        verified_artifact(graph_store, control["database"], "product database")
+    )
+    if database_digest != control["content_sha256"]:
+        raise WorkerError(
+            "product database SHA-256 disagrees with product snapshot content"
+        )
+    verified_artifact(
+        graph_store,
+        validation["report"],
+        "product structural validation report",
+    )
     path, _storage_ref, digest, _size = verified_artifact(
         graph_store, exports[0]["artifact"], "product export"
     )
-    return path, {"snapshot_id": control["snapshot_id"], "sha256": digest}
+    return path, {
+        "snapshot_id": control["snapshot_id"],
+        "content_sha256": control["content_sha256"],
+        "export_sha256": digest,
+        # Retain the report's existing field while making its export meaning
+        # explicit for consumers of the new derived artifact.
+        "sha256": digest,
+    }
 
 
 class DumpStream:
@@ -548,6 +578,64 @@ def claim_qids(entity: Mapping[str, Any], property_id: str) -> set[str]:
     return result
 
 
+def valid_commons_filename(value: object) -> bool:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value
+        or len(value) > 512
+        or "://" in value
+        or value.casefold().startswith(("data:", "javascript:"))
+        or any(ord(character) < 32 or character == "\x7f" for character in value)
+    ):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= 1024
+    except UnicodeEncodeError:
+        return False
+
+
+def commons_media_claims(
+    entity: Mapping[str, Any], property_id: str
+) -> list[tuple[int, str]]:
+    claims = entity.get("claims")
+    statements = claims.get(property_id) if isinstance(claims, Mapping) else None
+    if not isinstance(statements, list):
+        return []
+    candidates: dict[str, int] = {}
+    for statement in statements:
+        if not isinstance(statement, Mapping):
+            continue
+        rank = statement.get("rank")
+        if rank not in {"preferred", "normal"}:
+            continue
+        mainsnak = statement.get("mainsnak")
+        if (
+            not isinstance(mainsnak, Mapping)
+            or mainsnak.get("snaktype") != "value"
+            or mainsnak.get("datatype") != "commonsMedia"
+        ):
+            continue
+        datavalue = mainsnak.get("datavalue")
+        filename = (
+            datavalue.get("value") if isinstance(datavalue, Mapping) else None
+        )
+        if not valid_commons_filename(filename):
+            continue
+        priority = 0 if rank == "preferred" else 1
+        candidates[filename] = min(priority, candidates.get(filename, priority))
+        if len(candidates) > MAX_IMAGE_CLAIMS_PER_PROPERTY:
+            worst = max(
+                candidates,
+                key=lambda candidate: (candidates[candidate], candidate),
+            )
+            del candidates[worst]
+    return sorted(
+        ((rank_priority, filename) for filename, rank_priority in candidates.items()),
+        key=lambda value: (value[0], value[1]),
+    )
+
+
 def valid_qid(value: str) -> bool:
     digits = value[1:] if value.startswith("Q") else ""
     return (
@@ -643,9 +731,25 @@ def create_database(path: Path) -> sqlite3.Connection:
           PRIMARY KEY(work_id, agent_id)) WITHOUT ROWID;
         CREATE INDEX edges_agent_work ON edges(agent_id, work_id);
         CREATE TABLE product_work_entities(id TEXT PRIMARY KEY) WITHOUT ROWID;
+        CREATE TABLE product_agent_entities(id TEXT PRIMARY KEY) WITHOUT ROWID;
         CREATE TABLE product_external(entity_id TEXT NOT NULL, qid TEXT NOT NULL,
           PRIMARY KEY(entity_id, qid)) WITHOUT ROWID;
         CREATE TABLE covered_qids(id TEXT PRIMARY KEY) WITHOUT ROWID;
+        CREATE TABLE product_image_targets(
+          entity_id TEXT NOT NULL,
+          family TEXT NOT NULL CHECK(family IN ('work','agent')),
+          qid TEXT NOT NULL,
+          PRIMARY KEY(entity_id, family, qid)
+        ) WITHOUT ROWID;
+        CREATE INDEX product_image_targets_qid
+          ON product_image_targets(qid, family, entity_id);
+        CREATE TABLE product_image_claims(
+          qid TEXT NOT NULL,
+          property_id TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          rank_priority INTEGER NOT NULL CHECK(rank_priority IN (0,1)),
+          PRIMARY KEY(qid, property_id, filename)
+        ) WITHOUT ROWID;
         """
     )
     return connection
@@ -653,6 +757,7 @@ def create_database(path: Path) -> sqlite3.Connection:
 
 def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
     works: list[tuple[str]] = []
+    agents: list[tuple[str]] = []
     identifiers: list[tuple[str, str]] = []
     with export.open("rb") as stream:
         for line_number, raw in iter_bounded_lines(
@@ -667,8 +772,18 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
             if not isinstance(item, dict) or not isinstance(item.get("row"), dict):
                 raise WorkerError(f"invalid product JSONL row at line {line_number}")
             row = item["row"]
-            if item.get("table") == "works" and isinstance(row.get("entity_id"), str):
+            if (
+                item.get("table") == "works"
+                and isinstance(row.get("entity_id"), str)
+                and STABLE_ID.fullmatch(row["entity_id"])
+            ):
                 works.append((row["entity_id"],))
+            elif (
+                item.get("table") == "agents"
+                and isinstance(row.get("entity_id"), str)
+                and STABLE_ID.fullmatch(row["entity_id"])
+            ):
+                agents.append((row["entity_id"],))
             elif (
                 item.get("table") == "external_ids"
                 and row.get("scheme") == "wikidata"
@@ -682,6 +797,12 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
                     "INSERT OR IGNORE INTO product_work_entities VALUES(?)", works
                 )
                 works.clear()
+            if len(agents) >= BATCH_SIZE:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO product_agent_entities VALUES(?)",
+                    agents,
+                )
+                agents.clear()
             if len(identifiers) >= BATCH_SIZE:
                 connection.executemany(
                     "INSERT OR IGNORE INTO product_external VALUES(?,?)", identifiers
@@ -691,6 +812,9 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
         "INSERT OR IGNORE INTO product_work_entities VALUES(?)", works
     )
     connection.executemany(
+        "INSERT OR IGNORE INTO product_agent_entities VALUES(?)", agents
+    )
+    connection.executemany(
         "INSERT OR IGNORE INTO product_external VALUES(?,?)", identifiers
     )
     connection.execute(
@@ -698,7 +822,32 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
         "SELECT p.qid FROM product_external p JOIN product_work_entities w "
         "ON w.id=p.entity_id"
     )
+    connection.execute(
+        "INSERT OR IGNORE INTO product_image_targets "
+        "SELECT p.entity_id,'work',p.qid FROM product_external p "
+        "JOIN product_work_entities w ON w.id=p.entity_id"
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO product_image_targets "
+        "SELECT p.entity_id,'agent',p.qid FROM product_external p "
+        "JOIN product_agent_entities a ON a.id=p.entity_id"
+    )
     connection.commit()
+    ambiguous_qid = connection.execute(
+        "SELECT qid FROM product_image_targets GROUP BY qid "
+        "HAVING COUNT(*)>1 LIMIT 1"
+    ).fetchone()
+    if ambiguous_qid is not None:
+        raise WorkerError(
+            "a Wikidata image target maps to multiple product entities"
+        )
+    target_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM product_image_targets"
+        ).fetchone()[0]
+    )
+    if target_count > MAX_PRODUCT_IMAGE_TARGETS:
+        raise WorkerError("product image target mapping exceeds its safe bound")
     return int(connection.execute("SELECT COUNT(*) FROM covered_qids").fetchone()[0])
 
 
@@ -745,7 +894,14 @@ def build_graph(
     ):
         raise WorkerError("Wikidata worker configuration is invalid")
 
+    image_target_qids = {
+        row[0]
+        for row in connection.execute(
+            "SELECT DISTINCT qid FROM product_image_targets"
+        )
+    }
     class_edges: list[tuple[str, str]] = []
+    image_claims: list[tuple[str, str, str, int]] = []
     first_pass = 0
     for entity in iter_entities(dump, threads):
         first_pass += 1
@@ -753,14 +909,25 @@ def build_graph(
         if not isinstance(entity_id, str) or not valid_qid(entity_id):
             continue
         class_edges.extend((parent, entity_id) for parent in claim_qids(entity, "P279"))
+        if entity_id in image_target_qids:
+            for property_id in IMAGE_CLAIM_PROPERTIES:
+                image_claims.extend(
+                    (entity_id, property_id, filename, rank_priority)
+                    for rank_priority, filename in commons_media_claims(
+                        entity, property_id
+                    )
+                )
         if len(class_edges) >= BATCH_SIZE:
             connection.executemany(
                 "INSERT OR IGNORE INTO class_edges VALUES(?,?)", class_edges
             )
             class_edges.clear()
+        if len(image_claims) >= BATCH_SIZE:
+            flush_image_claims(connection, image_claims)
     connection.executemany(
         "INSERT OR IGNORE INTO class_edges VALUES(?,?)", class_edges
     )
+    flush_image_claims(connection, image_claims)
     connection.executemany(
         "INSERT OR IGNORE INTO work_classes VALUES(?)", ((value,) for value in roots)
     )
@@ -840,6 +1007,17 @@ def build_graph(
         "agents": int(connection.execute("SELECT COUNT(*) FROM agents").fetchone()[0]),
         "edges": int(connection.execute("SELECT COUNT(*) FROM edges").fetchone()[0]),
         "agent_profiles_resolved": updated,
+        "product_image_targets": int(
+            connection.execute(
+                "SELECT COUNT(*) FROM product_image_targets"
+            ).fetchone()[0]
+        ),
+        "product_image_target_qids": len(image_target_qids),
+        "wikidata_image_claims": int(
+            connection.execute(
+                "SELECT COUNT(*) FROM product_image_claims"
+            ).fetchone()[0]
+        ),
     }
 
 
@@ -855,6 +1033,19 @@ def flush_graph_rows(
     works.clear()
     agents.clear()
     edges.clear()
+
+
+def flush_image_claims(
+    connection: sqlite3.Connection,
+    claims: list[tuple[str, str, str, int]],
+) -> None:
+    connection.executemany(
+        "INSERT INTO product_image_claims VALUES(?,?,?,?) "
+        "ON CONFLICT(qid,property_id,filename) DO UPDATE SET "
+        "rank_priority=MIN(rank_priority,excluded.rank_priority)",
+        claims,
+    )
+    claims.clear()
 
 
 def candidate_policy(configuration: Mapping[str, Any]) -> dict[str, int]:
@@ -1087,6 +1278,139 @@ def emit_graph(
     return digest.hexdigest(), byte_count
 
 
+def image_hint_records(
+    connection: sqlite3.Connection,
+) -> Iterator[dict[str, Any]]:
+    rows = connection.execute(
+        "SELECT t.entity_id,t.family,t.qid,c.property_id,c.filename,"
+        "c.rank_priority FROM product_image_targets t "
+        "JOIN product_image_claims c ON c.qid=t.qid "
+        "WHERE (t.family='work' AND c.property_id IN ('P3383','P18')) "
+        "OR (t.family='agent' AND c.property_id IN ('P18','P154')) "
+        "ORDER BY t.entity_id,t.family,c.rank_priority,"
+        "CASE WHEN (t.family='work' AND c.property_id='P3383') "
+        "OR (t.family='agent' AND c.property_id='P18') THEN 0 ELSE 1 END,"
+        "c.filename,t.qid,c.property_id"
+    )
+    current: tuple[str, str] | None = None
+    images: list[dict[str, str]] = []
+    seen_files: set[str] = set()
+    for entity_id, family, qid, property_id, filename, rank_priority in rows:
+        key = (entity_id, family)
+        if current is not None and key != current:
+            if images:
+                yield {
+                    "entity_id": current[0],
+                    "family": current[1],
+                    "images": images,
+                }
+            images = []
+            seen_files = set()
+        current = key
+        if (
+            len(images) >= MAX_IMAGE_HINTS_PER_ENTITY
+            or filename in seen_files
+        ):
+            continue
+        seen_files.add(filename)
+        images.append(
+            {
+                "file": filename,
+                "kind": IMAGE_PROPERTIES[family][property_id],
+                "property": property_id,
+                "rank": "preferred" if rank_priority == 0 else "normal",
+                "source": "wikimedia_commons",
+                "wikidata_qid": qid,
+            }
+        )
+    if current is not None and images:
+        yield {
+            "entity_id": current[0],
+            "family": current[1],
+            "images": images,
+        }
+
+
+def emit_image_hints(
+    connection: sqlite3.Connection,
+    destination: Path,
+    source_snapshot: Mapping[str, str | int],
+    product_snapshot: Mapping[str, str],
+) -> tuple[str, int, int, int]:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise WorkerError(f"image hints output already exists: {destination}")
+    staging = destination.parent / f".{destination.name}.stage-{os.getpid()}"
+    digest = hashlib.sha256()
+    byte_count = 0
+    entity_count = 0
+    image_count = 0
+    published = False
+
+    def write(stream: BinaryIO, value: str) -> None:
+        nonlocal byte_count
+        encoded = value.encode("utf-8")
+        if byte_count + len(encoded) > MAX_IMAGE_HINTS_BYTES:
+            raise WorkerError("Wikidata image hints exceed their safe bound")
+        stream.write(encoded)
+        digest.update(encoded)
+        byte_count += len(encoded)
+
+    try:
+        with staging.open("xb") as stream:
+            write(stream, '{"artifact_type":"wikidata_image_hints_v1",')
+            write(stream, '"format_version":1,"source_snapshot":')
+            write(
+                stream,
+                json.dumps(
+                    {
+                        "snapshot_id": source_snapshot["snapshot_id"],
+                        "storage_ref": source_snapshot["storage_ref"],
+                        "sha256": source_snapshot["sha256"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            write(stream, ',"product_snapshot":')
+            write(
+                stream,
+                json.dumps(
+                    {
+                        "snapshot_id": product_snapshot["snapshot_id"],
+                        "content_sha256": product_snapshot["content_sha256"],
+                        "export_sha256": product_snapshot["export_sha256"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            write(stream, ',"entities":[')
+            first = True
+            for record in image_hint_records(connection):
+                if not first:
+                    write(stream, ",")
+                first = False
+                write(
+                    stream,
+                    json.dumps(record, sort_keys=True, separators=(",", ":")),
+                )
+                entity_count += 1
+                image_count += len(record["images"])
+            write(stream, "]}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(staging, destination)
+        published = True
+        staging.unlink()
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        if published:
+            destination.unlink(missing_ok=True)
+        raise
+    return digest.hexdigest(), byte_count, entity_count, image_count
+
+
 def write_report(path: Path, report: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     staging = path.parent / f".{path.name}.stage-{os.getpid()}"
@@ -1123,6 +1447,16 @@ def run(
     )
     ranking_policy = candidate_policy(policy_configuration)
     policy_configuration_hash = sha256_file(arguments.candidate_policy_config)
+    if arguments.output.resolve(strict=False) == arguments.image_hints_output.resolve(
+        strict=False
+    ):
+        raise WorkerError("graph and image hints outputs must be distinct")
+    if arguments.output.exists():
+        raise WorkerError(f"output already exists: {arguments.output}")
+    if arguments.image_hints_output.exists():
+        raise WorkerError(
+            f"image hints output already exists: {arguments.image_hints_output}"
+        )
     arguments.work_directory.mkdir(parents=True, exist_ok=True)
     work_database = arguments.work_directory / (
         f"wikidata-external-graph-{source_snapshot['sha256'][:16]}.sqlite3"
@@ -1139,9 +1473,27 @@ def run(
             ranking_policy,
             arguments.decompress_threads,
         )
-        output_hash, output_bytes = emit_graph(
-            connection, arguments.output, source_snapshot
-        )
+        image_output_emitted = False
+        try:
+            (
+                image_output_hash,
+                image_output_bytes,
+                image_entity_count,
+                image_count,
+            ) = emit_image_hints(
+                connection,
+                arguments.image_hints_output,
+                source_snapshot,
+                product_snapshot,
+            )
+            image_output_emitted = True
+            output_hash, output_bytes = emit_graph(
+                connection, arguments.output, source_snapshot
+            )
+        except BaseException:
+            if image_output_emitted:
+                arguments.image_hints_output.unlink(missing_ok=True)
+            raise
     finally:
         connection.close()
         if not arguments.keep_work_db:
@@ -1167,6 +1519,14 @@ def run(
             "path": str(arguments.output),
             "sha256": output_hash,
             "byte_length": output_bytes,
+        },
+        "image_hints_output": {
+            "artifact_type": "wikidata_image_hints_v1",
+            "path": str(arguments.image_hints_output),
+            "sha256": image_output_hash,
+            "byte_length": image_output_bytes,
+            "entity_count": image_entity_count,
+            "image_count": image_count,
         },
         "elapsed_seconds": round(time.time() - started, 3),
     }

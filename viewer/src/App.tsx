@@ -220,13 +220,19 @@ export default function App() {
     return <main className="state">Loading catalog…</main>;
   }
 
+  const imageHintProduct = catalog.databaseSha256
+    ? { contentSha256: catalog.databaseSha256 }
+    : { snapshotId: catalog.productSnapshotId };
+
   return (
     <div className="app">
       <header className="topbar">
         <div className="brand">
           <h1>Arachne</h1>
           <span>
-            {domain.works.length.toLocaleString()} works · {catalog.productSnapshotId}
+            {domain.works.length.toLocaleString()} works ·{" "}
+            {domain.agents.length.toLocaleString()} agents ·{" "}
+            {catalog.productSnapshotId}
           </span>
         </div>
 
@@ -327,6 +333,9 @@ export default function App() {
         domain={domain}
         ratings={ratings}
         onRate={rate}
+        onOpen={openWindow}
+        imageHintsUrl={`${import.meta.env.BASE_URL}data/wikidata-image-hints.json`}
+        imageHintProduct={imageHintProduct}
         onSearch={searchBrowse}
         onFocus={focusWindow}
         onClose={closeWindow}

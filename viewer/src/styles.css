@@ -554,6 +554,16 @@ tbody tr:focus {
   padding-left: 1.2rem;
 }
 
+.agent-work-list li + li {
+  margin-top: 0.24rem;
+}
+
+.window-note {
+  margin: 0.55rem 0 0;
+  color: #929da1;
+  font-size: 0.78rem;
+}
+
 @media (max-width: 1100px) {
   .filters {
     grid-template-columns: repeat(3, minmax(130px, 1fr));

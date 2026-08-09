@@ -15,12 +15,21 @@ The three dump passes and the SQLite ranking pass retain the baseline semantics:
 4. resolve labels and grouping profiles for that bounded pool.
 
 Product coverage comes from a hash-verified `product-jsonl` export named by a
-validated `product_graph_snapshot_v1` control. The output is an immutable,
+validated `product_graph_snapshot_v1` control whose database and structural
+report artifacts are also verified. The output is an immutable,
 deterministically ordered `external_candidate_source_graph_v1` artifact—the
 same input consumed by local, Actions, and HPC candidate runs. The complete
 dump is never loaded into memory, and the coordinator never has to load the
 full external graph. The candidate policy file and its SHA-256 are recorded in
 the run report. No source record enters the product graph.
+
+During the first existing dump pass, the worker also matches Wikidata IDs from
+product works and agents through a separate disposable `product_image_targets`
+table. It emits `wikidata_image_hints_v1` as a second, bounded derived artifact.
+That artifact contains only Commons filenames from non-deprecated P3383/P18
+work claims and P18/P154 agent claims, ordered with preferred rank first. It is
+bound to both the verified dump and product snapshot/export, does not broaden
+`covered_qids`, and never modifies the product database.
 
 Example:
 
@@ -33,6 +42,7 @@ python -u hpc/wikidata/build_external_graph.py \
   --config hpc/wikidata/config.json \
   --candidate-policy-config /state/config/arachne.json \
   --output /scratch/results/wikidata-source-graph.json \
+  --image-hints-output /scratch/results/wikidata-image-hints.json \
   --work-directory /scratch/work \
   --report /scratch/results/wikidata-source-graph.run-report.json \
   --decompress-threads 16

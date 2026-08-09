@@ -13,10 +13,14 @@ export interface ConceptAssignment {
   confidence: number | null;
 }
 
-export interface Contributor {
+export interface Agent {
   id: EntityId;
   label: string;
   agentType: string;
+  identifiers: Identifier[];
+}
+
+export interface Contributor extends Agent {
   role: string;
   order: number | null;
   importance: string;
@@ -102,11 +106,14 @@ export interface Catalog {
   productSnapshotId: string;
   databaseSha256?: string;
   databaseUserVersion?: number;
+  agents: Agent[];
   works: Work[];
   workRelations?: WorkRelation[];
 }
 
 export interface Domain {
+  agents: Agent[];
+  agentById: Map<EntityId, Agent>;
   works: Work[];
   workById: Map<EntityId, Work>;
   workRelations: WorkRelation[];

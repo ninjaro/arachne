@@ -1,0 +1,44 @@
+{
+  "artifact_type": "wikidata_image_hints_v1",
+  "format_version": 1,
+  "source_snapshot": {
+    "snapshot_id": "wikidata-20260801",
+    "storage_ref": "sources/wikidata-20260801.json.bz2",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "product_snapshot": {
+    "snapshot_id": "product-20260801",
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "export_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "entities": [
+    {
+      "entity_id": "work-000321",
+      "family": "work",
+      "images": [
+        {
+          "file": "Example poster.jpg",
+          "kind": "work_poster",
+          "property": "P3383",
+          "rank": "preferred",
+          "source": "wikimedia_commons",
+          "wikidata_qid": "Q123"
+        }
+      ]
+    },
+    {
+      "entity_id": "agent-000411",
+      "family": "agent",
+      "images": [
+        {
+          "file": "Example Person.jpg",
+          "kind": "agent_portrait",
+          "property": "P18",
+          "rank": "normal",
+          "source": "wikimedia_commons",
+          "wikidata_qid": "Q456"
+        }
+      ]
+    }
+  ]
+}

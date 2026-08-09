@@ -11,12 +11,19 @@ on:
         description: Optional candidate snapshot control path inside the state repository
         required: false
         type: string
+      image_hints_artifact:
+        description: Optional snapshot-bound Wikidata image-hints path inside the state repository
+        required: false
+        type: string
   workflow_call:
     inputs:
       product_snapshot_control:
         required: true
         type: string
       candidate_snapshot_control:
+        required: false
+        type: string
+      image_hints_artifact:
         required: false
         type: string
 
@@ -68,16 +75,6 @@ jobs:
           ARACHNE_BUILD_TESTS: "OFF"
           ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: viewer/package-lock.json
-      - name: Build React viewer assets
-        working-directory: viewer
-        run: |
-          npm ci
-          npm run build
       - name: Materialize config and resolve reviewed snapshot controls
         env:
           PRODUCT_SNAPSHOT_INPUT: ${{ inputs.product_snapshot_control }}
@@ -94,6 +91,26 @@ jobs:
           if [[ -n "${CANDIDATE_SNAPSHOT_INPUT}" ]]; then
             python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["CANDIDATE_SNAPSHOT_INPUT"]).resolve(strict=True); value.relative_to(root); print("CANDIDATE_SNAPSHOT_PATH=" + str(value))' >> "${GITHUB_ENV}"
           fi
+      - name: Stage optional snapshot-bound image hints
+        if: inputs.image_hints_artifact != ''
+        env:
+          IMAGE_HINTS_INPUT: ${{ inputs.image_hints_artifact }}
+        run: |
+          python3 viewer/scripts/stage_image_hints.py \
+            "${IMAGE_HINTS_INPUT}" \
+            viewer/public/data/wikidata-image-hints.json \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --product-snapshot-control "${PRODUCT_SNAPSHOT_PATH}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+      - name: Build React viewer assets
+        working-directory: viewer
+        run: |
+          npm ci
+          npm run build:assets
       - name: Build versioned static viewer
         id: viewer
         continue-on-error: true

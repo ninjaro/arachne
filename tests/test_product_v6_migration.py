@@ -149,18 +149,27 @@ class ProductV6MigrationTests(unittest.TestCase):
                     ),
                 ),
             )
-            connection.execute(
+            connection.executemany(
                 """
                 INSERT INTO external_ids(
                     id, entity_id, scheme, value, canonical_url
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    201,
-                    "work-000001",
-                    "wikidata",
-                    "Q123",
-                    "https://www.wikidata.org/wiki/Q123",
+                    (
+                        201,
+                        "work-000001",
+                        "wikidata",
+                        "Q123",
+                        "https://www.wikidata.org/wiki/Q123",
+                    ),
+                    (
+                        202,
+                        "agent-000001",
+                        "wikidata",
+                        "Q456",
+                        None,
+                    ),
                 ),
             )
             connection.execute(
@@ -436,6 +445,27 @@ class ProductV6MigrationTests(unittest.TestCase):
         self.assertEqual(
             [work["id"] for work in catalog["works"]],
             ["work-000001"],
+        )
+        expected_agent = {
+            "id": "agent-000001",
+            "label": "Example Agent",
+            "agentType": "person",
+            "identifiers": [
+                {
+                    "scheme": "wikidata",
+                    "value": "Q456",
+                    "url": None,
+                }
+            ],
+        }
+        self.assertEqual(catalog["agents"], [expected_agent])
+        self.assertEqual(
+            {
+                key: value
+                for key, value in catalog["works"][0]["contributors"][0].items()
+                if key in expected_agent
+            },
+            expected_agent,
         )
 
     def test_ignored_decisions_survive_while_disposable_hints_are_removed(self) -> None:

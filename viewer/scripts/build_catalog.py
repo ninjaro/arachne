@@ -45,20 +45,6 @@ def projection_id(namespace: str, value: Any) -> str:
     )
 
 
-def external_url(scheme: str, value: str, canonical: str | None) -> str | None:
-    if canonical:
-        return canonical
-    if scheme == "wikidata":
-        return f"https://www.wikidata.org/wiki/{value}"
-    if scheme == "imdb":
-        return f"https://www.imdb.com/title/{value}/"
-    if scheme == "doi":
-        return f"https://doi.org/{value}"
-    if scheme == "isbn":
-        return f"https://openlibrary.org/isbn/{value}"
-    return None
-
-
 def build_catalog(database: Path) -> dict[str, Any]:
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
@@ -105,7 +91,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
         }
         for row in rows(
             connection,
-            "SELECT entity_id, agent_type FROM agents",
+            "SELECT entity_id, agent_type FROM agents ORDER BY entity_id",
         )
     }
 
@@ -214,13 +200,20 @@ def build_catalog(database: Path) -> dict[str, Any]:
             {
                 "scheme": row["scheme"],
                 "value": row["value"],
-                "url": external_url(
-                    row["scheme"],
-                    row["value"],
-                    row["canonical_url"],
-                ),
+                "url": row["canonical_url"],
             }
         )
+
+    # Agents are first-class catalog entities. Credits retain the same agent
+    # projection so a contributor is useful on its own while its id also
+    # resolves to the authoritative catalog agent through agentById.
+    for agent_id, agent in agents.items():
+        agent["identifiers"] = identifiers.get(agent_id, [])
+    for work_contributors in contributors.values():
+        for contributor in work_contributors:
+            contributor["identifiers"] = identifiers.get(
+                contributor["id"], []
+            )
 
     manifestations: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows(
@@ -344,6 +337,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
         "productSnapshotId": "local-" + database_sha256(database)[:16],
         "databaseSha256": database_sha256(database),
         "databaseUserVersion": user_version,
+        "agents": [agents[agent_id] for agent_id in sorted(agents)],
         "works": works,
         "workRelations": work_relations,
     }
@@ -377,6 +371,7 @@ def main() -> int:
     output.write_text(payload + "\n", encoding="utf-8")
     print(
         f"Wrote {output}: {len(catalog['works'])} works, "
+        f"{len(catalog['agents'])} agents, "
         f"{output.stat().st_size / 1024 / 1024:.2f} MiB"
     )
     return 0

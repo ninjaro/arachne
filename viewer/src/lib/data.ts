@@ -1,4 +1,50 @@
-import type { Catalog, Domain, ResearchData, WorkRelation } from "./types";
+import type {
+  Agent,
+  Catalog,
+  Domain,
+  Identifier,
+  ResearchData,
+  WorkRelation,
+} from "./types";
+
+function isIdentifier(value: unknown): value is Identifier {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.scheme === "string" &&
+    record.scheme.length > 0 &&
+    typeof record.value === "string" &&
+    record.value.length > 0 &&
+    (record.url === null || typeof record.url === "string")
+  );
+}
+
+function isAgent(value: unknown): value is Agent {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    record.id.length > 0 &&
+    typeof record.label === "string" &&
+    record.label.length > 0 &&
+    typeof record.agentType === "string" &&
+    record.agentType.length > 0 &&
+    Array.isArray(record.identifiers) &&
+    record.identifiers.every(isIdentifier)
+  );
+}
+
+function identifiersEqual(left: Identifier[], right: Identifier[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (identifier, index) =>
+        identifier.scheme === right[index].scheme &&
+        identifier.value === right[index].value &&
+        identifier.url === right[index].url,
+    )
+  );
+}
 
 function isWorkRelation(value: unknown): value is WorkRelation {
   if (!value || typeof value !== "object") return false;
@@ -13,16 +59,41 @@ function isWorkRelation(value: unknown): value is WorkRelation {
   );
 }
 
-function isCatalog(value: unknown): value is Catalog {
+export function isCatalog(value: unknown): value is Catalog {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return (
-    record.formatVersion === 1 &&
-    Array.isArray(record.works) &&
-    (record.workRelations === undefined ||
-      (Array.isArray(record.workRelations) &&
-        record.workRelations.every(isWorkRelation)))
-  );
+  if (
+    record.formatVersion !== 1 ||
+    !Array.isArray(record.agents) ||
+    !record.agents.every(isAgent) ||
+    !Array.isArray(record.works) ||
+    (record.workRelations !== undefined &&
+      (!Array.isArray(record.workRelations) ||
+        !record.workRelations.every(isWorkRelation)))
+  ) {
+    return false;
+  }
+
+  const agentById = new Map(record.agents.map((agent) => [agent.id, agent]));
+  if (agentById.size !== record.agents.length) return false;
+
+  return record.works.every((work) => {
+    if (!work || typeof work !== "object") return false;
+    const contributors = (work as Record<string, unknown>).contributors;
+    return (
+      Array.isArray(contributors) &&
+      contributors.every((contributor) => {
+        if (!isAgent(contributor)) return false;
+        const canonical = agentById.get(contributor.id);
+        return (
+          canonical !== undefined &&
+          canonical.label === contributor.label &&
+          canonical.agentType === contributor.agentType &&
+          identifiersEqual(canonical.identifiers, contributor.identifiers)
+        );
+      })
+    );
+  });
 }
 
 function isResearchData(value: unknown): value is ResearchData {
@@ -53,6 +124,10 @@ export async function loadResearch(): Promise<ResearchData | null> {
 }
 
 export function buildDomain(catalog: Catalog): Domain {
+  const agents = [...catalog.agents].sort(
+    (left, right) =>
+      left.label.localeCompare(right.label) || left.id.localeCompare(right.id),
+  );
   const works = [...catalog.works].sort(
     (left, right) =>
       (left.yearStart ?? Number.MAX_SAFE_INTEGER) -
@@ -76,6 +151,8 @@ export function buildDomain(catalog: Catalog): Domain {
   const workIds = new Set(works.map((work) => work.id));
 
   return {
+    agents,
+    agentById: new Map(agents.map((agent) => [agent.id, agent])),
     works,
     workById: new Map(works.map((work) => [work.id, work])),
     workRelations: (catalog.workRelations ?? []).filter(

@@ -195,6 +195,7 @@ python3 -u hpc/wikidata/build_external_graph.py \
   --config hpc/wikidata/config.json \
   --candidate-policy-config /state/config/arachne.json \
   --output /scratch/external-graph.json \
+  --image-hints-output /scratch/wikidata-image-hints.json \
   --work-directory /scratch/wikidata-work
 ```
 
@@ -202,8 +203,11 @@ The worker has no network client. It verifies the receipt and product JSONL hash
 streams compressed JSON three times, stages joins in SQLite, runs the exact
 coverage/gray-frontier ranking against the full graph, and emits only the bounded
 candidate pool as the same `external_candidate_source_graph_v1` used locally and
-in Actions. Its temporary report binds the candidate policy hash and distinguishes
-transport verification from algorithm failure. After a
+in Actions. The same pass emits a bounded `wikidata_image_hints_v1` projection
+for product work and agent Wikidata IDs without changing work-only coverage or
+the product database. Its temporary report binds the candidate policy hash and
+both derived outputs to their verified inputs, and distinguishes transport
+verification from algorithm failure. After a
 successful candidate activation, the workflow verifies and removes the raw dump
 and disposable graph, records the refresh marker, and proposes the candidate
 snapshot and run manifest for review. `ARACHNE_HPC_RUNNER_LABEL` should name a
@@ -251,6 +255,17 @@ then runs `scripts/resolve_site_bundle.py` to resolve that content-addressed
 bundle, reject traversal and symbolic links, and verify its aggregate SHA-256 and
 byte length before uploading only the selected immutable directory. A failed
 build, verification, or deploy leaves the previous Pages site valid.
+
+Publication accepts an optional `image_hints_artifact` path relative to the
+reviewed state repository. The workflow resolves the path without permitting it
+to escape that checkout, then `viewer/scripts/stage_image_hints.py` requires its
+`wikidata_image_hints_v1.product_snapshot` identity to match the selected
+product snapshot control. Only then is the disposable file staged as
+`data/wikidata-image-hints.json` before the asset-only Vite build; the normal
+immutable site builder copies it and includes it in the bundle digest. A missing
+input is normal and produces a viewer without local image hints. A supplied but
+missing, malformed, or stale artifact fails publication rather than being
+silently relabelled or retained.
 
 Back up the Git-LFS product SQLite and operational state. Candidate state and HPC
 intermediates are independently replaceable. Product idempotency depends only on

@@ -100,6 +100,7 @@ jobs:
           echo "FETCH_REQUEST=${RUNNER_TEMP}/wikidata-fetch-controls/wikidata-official-dump.json" >> "${GITHUB_ENV}"
           echo "SOURCE_CONTROL=${RUNNER_TEMP}/wikidata-source.acquired.json" >> "${GITHUB_ENV}"
           echo "EXTERNAL_GRAPH=${RUNNER_TEMP}/wikidata-external-graph.json" >> "${GITHUB_ENV}"
+          echo "IMAGE_HINTS=${RUNNER_TEMP}/wikidata-image-hints.json" >> "${GITHUB_ENV}"
           echo "HPC_REPORT=${RUNNER_TEMP}/wikidata-hpc-report.json" >> "${GITHUB_ENV}"
       - name: Declare and translate official bulk acquisition
         if: steps.cadence.outputs.due == 'true'
@@ -141,6 +142,7 @@ jobs:
             --config hpc/wikidata/config.json \
             --candidate-policy-config "${RUNNER_TEMP}/arachne-config.json" \
             --output "${EXTERNAL_GRAPH}" \
+            --image-hints-output "${IMAGE_HINTS}" \
             --work-directory "${RUNNER_TEMP}/wikidata-work" \
             --report "${HPC_REPORT}" \
             --decompress-threads "$(nproc)"
@@ -167,6 +169,7 @@ jobs:
           path: |
             ${{ env.SOURCE_CONTROL }}
             ${{ env.HPC_REPORT }}
+            ${{ env.IMAGE_HINTS }}
           if-no-files-found: warn
           retention-days: 14
       - name: Stop after fresh acquisition or rebuild failure
@@ -183,6 +186,7 @@ jobs:
             --acquired-control "${SOURCE_CONTROL}" \
             --config "${RUNNER_TEMP}/arachne-config.json"
           rm -f "${EXTERNAL_GRAPH}"
+          rm -f "${IMAGE_HINTS}"
       - name: Persist source cadence and propose reviewed candidate state
         if: steps.cadence.outputs.due == 'true'
         env:

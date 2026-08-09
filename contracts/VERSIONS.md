@@ -89,6 +89,10 @@ members of the C++ `contract_name` enumeration:
 - `external_candidate_source_graph_v1` is Ariadne's compact, untrusted input
   adjacency for one immutable external source snapshot. It is not a product
   graph contract and cannot introduce accepted research claims.
+- `wikidata_image_hints_v1` is a bounded, disposable mapping from canonical
+  work and agent IDs to Commons filenames found in non-deprecated Wikidata
+  media claims. It binds the exact source dump and verified product export,
+  carries no image bytes or URLs, and is never canonical product state.
 - `research_candidate_graph_materialization_v1` is the complete resolved graph
   payload referenced by `research_candidate_graph_plan_v1.plan_artifact`. It
   declares the stable `plan_id`, source snapshot, algorithm/configuration

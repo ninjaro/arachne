@@ -36,5 +36,23 @@ assert.match(rootHtml, /rel="canonical"/);
 assert.match(rootHtml, /rel="alternate"/);
 assert.match(rootHtml, /rel="service-desc"/);
 assert.doesNotMatch(rootHtml, /arachne-document-links/);
+const encodedCsp = rootHtml.match(
+  /http-equiv="Content-Security-Policy" content="([^"]+)"/,
+)?.[1];
+assert.ok(encodedCsp, "production HTML must include a content security policy");
+const csp = encodedCsp.replaceAll("&#39;", "'").replaceAll("&amp;", "&");
+assert.match(csp, /connect-src 'self' https:\/\/api\.tvmaze\.com/);
+assert.equal(
+  csp.match(/connect-src ([^;]+)/)?.[1],
+  "'self' https://api.tvmaze.com",
+);
+assert.match(csp, /img-src 'self'/);
+assert.match(csp, /https:\/\/commons\.wikimedia\.org/);
+assert.match(csp, /https:\/\/covers\.openlibrary\.org/);
+assert.match(csp, /https:\/\/coverartarchive\.org/);
+assert.match(csp, /https:\/\/archive\.org/);
+assert.match(csp, /object-src 'none'/);
+assert.match(csp, /script-src 'self'/);
+assert.doesNotMatch(csp, /(?:^|[ ;])http:/);
 
 console.log("static API checks passed");

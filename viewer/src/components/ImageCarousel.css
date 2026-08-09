@@ -1,0 +1,49 @@
+.image-carousel {
+  margin: 0 0 0.9rem;
+}
+
+.image-carousel-frame {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  background: #0f1315;
+}
+
+.image-carousel-frame a {
+  display: contents;
+}
+
+.image-carousel-frame img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: min(44vh, 28rem);
+  object-fit: contain;
+}
+
+.image-carousel figcaption {
+  margin-top: 0.38rem;
+  color: #9fa8ac;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.image-carousel nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  margin-top: 0.4rem;
+}
+
+.image-carousel nav button {
+  padding: 0.16rem 0.55rem;
+}
+
+.image-carousel nav span {
+  color: #aeb6b9;
+  font-size: 0.75rem;
+}

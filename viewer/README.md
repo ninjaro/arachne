@@ -15,7 +15,8 @@ current Arachne product database.
   relation overlays, and adaptive compressed chronology
 - rated/recommended Islands graph with disconnected components preserved
 - draggable multi-window work details
-- concepts, credits, content-guide assertions, measurements, identifiers,
+- first-class agents with external identifiers and credit references from works
+- concepts, content-guide assertions, measurements, work identifiers,
   manifestations and financial facts from the current database
 
 ## Local development
@@ -48,6 +49,42 @@ is an error rather than a database fallback.
 
 Open the Vite URL printed by the command, normally `http://localhost:5173/`.
 
+### Optional local Wikidata image hints
+
+An HPC-produced `wikidata_image_hints_v1` file can be staged beside the
+generated catalog without making it part of that catalog:
+
+```sh
+npm run data
+npm run stage:image-hints -- \
+  /path/to/wikidata-image-hints.json \
+  public/data/wikidata-image-hints.json \
+  --catalog public/data/catalog.json
+npm run dev
+```
+
+The staging command fails closed unless the artifact's product content hash
+matches the generated catalog. The staged file is ignored, optional, and
+disposable; remove or restage it when switching product inputs. Images and image
+hints never enter SQLite or the catalog schema.
+
+### Image providers and browser requests
+
+The provider registry currently supports local Wikimedia Commons filenames from
+the optional artifact, direct Open Library covers and Cover Art Archive images,
+and lazy TVmaze show/person lookups. Resolution starts only when an entity card
+is opened, runs sequentially per provider, targets two successful images, and
+never displays more than three. Candidates are probed in the browser; failed
+candidates reserve no space and produce no heading, placeholder, or broken image.
+
+Results are cached for the browser session. Definite missing responses are held
+longer than transient failures, while TVmaze `429` responses establish a
+provider-wide `Retry-After` cooldown instead of being retried immediately. The
+production CSP is derived from the registry's explicit HTTPS API and image-host
+allowlists. Direct loading means the relevant provider or CDN receives the
+visitor's IP address even though image requests use a no-referrer policy; Arachne
+does not proxy those bytes.
+
 ## Production build
 
 ```sh
@@ -58,15 +95,31 @@ npm run preview
 
 The static site is written to `viewer/dist/`.
 
+`npm run build:assets` performs only type-checking and the Vite asset build. It
+exists for the protected publication workflow, where the C++ site builder
+injects the catalog from a verified product snapshot and then content-addresses
+the complete bundle. A normal local build should continue to use `npm run
+build`, which also generates the JSON-first static API from the local catalog.
+
+Publication may receive an `image_hints_artifact` path relative to the reviewed
+state repository. When supplied, the workflow verifies all three product
+identity fields against the selected product snapshot control, stages the file
+before `build:assets`, and includes it in the immutable site bundle. Omitting the
+input publishes the same viewer without local hints.
+
 ## Generated data
 
 `public/data/catalog.json` is deliberately not committed. The full old
 `projection.json` contains provenance nodes that the catalog UI does not need and
-was about 79 MiB. The compact browser read model is generated directly from the
-canonical SQLite database and is about 12 MiB for the current corpus.
+was about 79 MiB. The browser read model is generated directly from the
+canonical SQLite database and is about 27 MiB for the current corpus, including
+its first-class `agents` collection. Each contributor retains its agent identity
+fields and resolves by `id` to that collection.
 
 The SQLite database remains the source of truth. `catalog.json` and
-`research.json` are disposable viewer projections.
+`research.json` are disposable viewer projections. The optional
+`wikidata-image-hints.json` file is a separate snapshot-bound cache, not product
+data and not a source for rebuilds.
 
 ## Evolution date contract
 

@@ -238,6 +238,10 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_publication_adapter -v
     )
     add_test(
+        NAME image_hint_staging_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_stage_image_hints -v
+    )
+    add_test(
         NAME wikidata_hpc_worker_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest
             tests.test_wikidata_hpc_worker -v
@@ -269,7 +273,7 @@ if(BUILD_TESTS)
     )
     set_tests_properties(
         actor_boundary_tests intake_adapter_tests workflow_yaml_tests
-        publication_adapter_tests
+        publication_adapter_tests image_hint_staging_tests
         wikidata_hpc_worker_tests source_refresh_tests
         product_v5_migration_tests product_v6_migration_tests
         viewer_research_tests operations_cli_tests

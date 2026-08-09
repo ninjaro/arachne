@@ -3,6 +3,7 @@ from __future__ import annotations
 import bz2
 import hashlib
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,22 @@ def time_claim(value: str) -> dict[str, object]:
     }
 
 
+def media_claim(
+    filename: str,
+    *,
+    rank: str = "normal",
+    datatype: str = "commonsMedia",
+) -> dict[str, object]:
+    return {
+        "rank": rank,
+        "mainsnak": {
+            "snaktype": "value",
+            "datatype": datatype,
+            "datavalue": {"value": filename, "type": "string"},
+        },
+    }
+
+
 class WikidataHpcWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="arachne-hpc-test-")
@@ -61,6 +78,21 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                 "claims": {
                     "P31": [item_claim("Q1001")],
                     "P170": [item_claim("Q10")],
+                    "P3383": [
+                        media_claim("Normal poster.jpg"),
+                        media_claim("Preferred poster.jpg", rank="preferred"),
+                        media_claim("Deprecated poster.jpg", rank="deprecated"),
+                    ],
+                    "P18": [
+                        media_claim("Representative work.jpg"),
+                        media_claim("https://invalid.example/work.jpg"),
+                        media_claim("Not Commons.jpg", datatype="string"),
+                        media_claim("\ud800invalid.jpg"),
+                        *[
+                            media_claim(f"Z overflow {index:02d}.jpg")
+                            for index in range(20)
+                        ],
+                    ],
                 },
             },
             {
@@ -91,6 +123,10 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                     "P27": [item_claim("Q183")],
                     "P106": [item_claim("Q1028181")],
                     "P569": [time_claim("+1900-01-01T00:00:00Z")],
+                    "P18": [media_claim("Example portrait.jpg")],
+                    "P154": [
+                        media_claim("Example logo.svg", rank="preferred")
+                    ],
                 },
             },
             {
@@ -151,12 +187,30 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             json.dumps(value, separators=(",", ":"))
             for value in (
                 {"table": "works", "row": {"entity_id": "product-work-1"}},
+                {"table": "agents", "row": {"entity_id": "product-agent-1"}},
+                {"table": "agents", "row": {"entity_id": "product-agent-2"}},
                 {
                     "table": "external_ids",
                     "row": {
                         "entity_id": "product-work-1",
                         "scheme": "wikidata",
                         "value": "Q1",
+                    },
+                },
+                {
+                    "table": "external_ids",
+                    "row": {
+                        "entity_id": "product-agent-1",
+                        "scheme": "wikidata",
+                        "value": "Q10",
+                    },
+                },
+                {
+                    "table": "external_ids",
+                    "row": {
+                        "entity_id": "product-agent-2",
+                        "scheme": "wikidata",
+                        "value": "Q11",
                     },
                 },
             )
@@ -243,6 +297,7 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.output = self.root / "results" / "external-graph.json"
+        self.image_hints_output = self.root / "results" / "image-hints.json"
         self.report = self.root / "results" / "run-report.json"
 
     def tearDown(self) -> None:
@@ -267,6 +322,8 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                 str(self.candidate_policy),
                 "--output",
                 str(self.output),
+                "--image-hints-output",
+                str(self.image_hints_output),
                 "--work-directory",
                 str(self.work),
                 "--report",
@@ -306,7 +363,120 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         self.assertEqual(
             report["algorithm"]["statistics"]["ranked_pool_agents"], 2
         )
+        self.assertEqual(
+            report["algorithm"]["statistics"]["product_image_targets"], 3
+        )
+        self.assertEqual(
+            report["algorithm"]["statistics"]["wikidata_image_claims"], 20
+        )
+        self.assertEqual(report["image_hints_output"]["entity_count"], 2)
+        self.assertEqual(report["image_hints_output"]["image_count"], 5)
         self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_emits_bounded_ranked_work_and_agent_commons_hints(self) -> None:
+        result = self.run_worker()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        document = json.loads(self.image_hints_output.read_text(encoding="utf-8"))
+        self.assertEqual(document["artifact_type"], "wikidata_image_hints_v1")
+        self.assertEqual(document["format_version"], 1)
+        self.assertEqual(document["source_snapshot"]["sha256"], digest(self.dump))
+        self.assertEqual(
+            document["product_snapshot"],
+            {
+                "snapshot_id": "product-tiny-snapshot",
+                "content_sha256": digest(self.product_database),
+                "export_sha256": digest(self.product_export),
+            },
+        )
+        entities = {
+            (entity["family"], entity["entity_id"]): entity["images"]
+            for entity in document["entities"]
+        }
+        self.assertEqual(
+            entities[("work", "product-work-1")],
+            [
+                {
+                    "file": "Preferred poster.jpg",
+                    "kind": "work_poster",
+                    "property": "P3383",
+                    "rank": "preferred",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q1",
+                },
+                {
+                    "file": "Normal poster.jpg",
+                    "kind": "work_poster",
+                    "property": "P3383",
+                    "rank": "normal",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q1",
+                },
+                {
+                    "file": "Representative work.jpg",
+                    "kind": "work_image",
+                    "property": "P18",
+                    "rank": "normal",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q1",
+                },
+            ],
+        )
+        self.assertEqual(
+            entities[("agent", "product-agent-1")],
+            [
+                {
+                    "file": "Example logo.svg",
+                    "kind": "agent_logo",
+                    "property": "P154",
+                    "rank": "preferred",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q10",
+                },
+                {
+                    "file": "Example portrait.jpg",
+                    "kind": "agent_portrait",
+                    "property": "P18",
+                    "rank": "normal",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q10",
+                },
+            ],
+        )
+        self.assertNotIn(("agent", "product-agent-2"), entities)
+
+        first_bytes = self.image_hints_output.read_bytes()
+        self.image_hints_output.unlink()
+        self.output.unlink()
+        self.report.unlink()
+        second = self.run_worker()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.image_hints_output.read_bytes(), first_bytes)
+
+    def test_image_targets_do_not_broaden_covered_qids(self) -> None:
+        result = self.run_worker("--keep-work-db")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        databases = list(self.work.glob("*.sqlite3"))
+        self.assertEqual(len(databases), 1)
+        with sqlite3.connect(databases[0]) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT id FROM covered_qids ORDER BY id"
+                ).fetchall(),
+                [("Q1",)],
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT entity_id,family,qid FROM product_image_targets "
+                    "ORDER BY entity_id,family,qid"
+                ).fetchall(),
+                [
+                    ("product-agent-1", "agent", "Q10"),
+                    ("product-agent-2", "agent", "Q11"),
+                    ("product-work-1", "work", "Q1"),
+                ],
+            )
 
     def test_tampered_source_fails_before_algorithm_or_output(self) -> None:
         control = json.loads(self.source_control.read_text(encoding="utf-8"))
@@ -317,9 +487,24 @@ class WikidataHpcWorkerTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.output.exists())
+        self.assertFalse(self.image_hints_output.exists())
         report = json.loads(self.report.read_text(encoding="utf-8"))
         self.assertEqual(report["transport"]["status"], "failed")
         self.assertEqual(report["algorithm"]["status"], "not_started")
+
+    def test_tampered_product_snapshot_fails_without_derived_outputs(self) -> None:
+        control = json.loads(self.product_control.read_text(encoding="utf-8"))
+        control["content_sha256"] = "0" * 64
+        self.product_control.write_text(json.dumps(control), encoding="utf-8")
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.image_hints_output.exists())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "verified")
+        self.assertEqual(report["algorithm"]["status"], "failed")
 
     def test_incomplete_or_stale_source_receipt_fails_closed(self) -> None:
         control = json.loads(self.source_control.read_text(encoding="utf-8"))

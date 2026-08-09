@@ -129,6 +129,21 @@ class WorkflowYamlTests(unittest.TestCase):
         self.assertNotIn("build/arachne product apply-inbox", text)
         self.assertNotIn("dispatch_intake_request.py", text)
 
+    def test_publication_stages_optional_snapshot_bound_image_hints(self) -> None:
+        text = (WORKFLOWS / "publication.yml").read_text(encoding="utf-8")
+        resolve_product = "PRODUCT_SNAPSHOT_PATH="
+        stage = "viewer/scripts/stage_image_hints.py"
+        asset_build = "npm run build:assets"
+        site_build = "viewer-build"
+        self.assertIn("image_hints_artifact:", text)
+        self.assertIn("--state-root", text)
+        self.assertIn("--product-snapshot-control", text)
+        self.assertIn("viewer/public/data/wikidata-image-hints.json", text)
+        self.assertLess(text.index(resolve_product), text.index(stage))
+        self.assertLess(text.index(stage), text.index(asset_build))
+        self.assertLess(text.index(asset_build), text.index(site_build))
+        self.assertNotIn("npm run build\n", text)
+
 
 if __name__ == "__main__":
     unittest.main()

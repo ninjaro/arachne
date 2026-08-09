@@ -84,6 +84,40 @@ nlohmann::json product_export() {
     };
 }
 
+nlohmann::json product_export_with_agent() {
+    auto product = product_export();
+    product["entities"].push_back(
+        { { "id", "agent-a" }, { "entity_type", "person" } }
+    );
+    product["agents"] = nlohmann::json::array(
+        { { { "entity_id", "agent-a" }, { "agent_type", "person" } } }
+    );
+    product["names"].push_back(
+        { { "entity_id", "agent-a" },
+          { "value", "Example Agent" },
+          { "is_preferred", true } }
+    );
+    product["external_ids"] = nlohmann::json::array(
+        { { { "entity_id", "agent-a" },
+            { "scheme", "wikidata" },
+            { "value", "Q456" },
+            { "canonical_url", nullptr } },
+          { { "entity_id", "work-a" },
+            { "scheme", "wikidata" },
+            { "value", "Q123" },
+            { "canonical_url", "https://www.wikidata.org/wiki/Q123" } } }
+    );
+    product["credits"] = nlohmann::json::array(
+        { { { "id", 1 },
+            { "work_id", "work-a" },
+            { "agent_id", "agent-a" },
+            { "role", "director" },
+            { "credit_order", 1 },
+            { "importance", "primary" } } }
+    );
+    return product;
+}
+
 nlohmann::json candidate_export() {
     return {
         { "artifact_type", "research_candidate_graph_materialization_v1" },
@@ -306,9 +340,36 @@ TEST(AriadneViewer, SimilarityProjectionIsOrderIndependentAndUsesNoHeuristics) {
     );
 }
 
+TEST(AriadneViewer, CatalogPublishesFirstClassAgentsWithIdentifiers) {
+    const auto catalog = arachne::ariadne::viewer_builder::catalog(
+        product_export_with_agent(), "product-1"
+    );
+
+    ASSERT_EQ(catalog.at("agents").size(), 1U);
+    const auto& agent = catalog.at("agents").at(0);
+    EXPECT_EQ(agent.at("id"), "agent-a");
+    EXPECT_EQ(agent.at("label"), "Example Agent");
+    EXPECT_EQ(agent.at("agentType"), "person");
+    ASSERT_EQ(agent.at("identifiers").size(), 1U);
+    EXPECT_EQ(agent.at("identifiers").at(0).at("scheme"), "wikidata");
+    EXPECT_EQ(agent.at("identifiers").at(0).at("value"), "Q456");
+    EXPECT_TRUE(agent.at("identifiers").at(0).at("url").is_null());
+
+    const auto& first_work = catalog.at("works").at(0);
+    ASSERT_EQ(first_work.at("contributors").size(), 1U);
+    const auto& contributor = first_work.at("contributors").at(0);
+    EXPECT_EQ(contributor.at("id"), agent.at("id"));
+    EXPECT_EQ(contributor.at("label"), agent.at("label"));
+    EXPECT_EQ(contributor.at("agentType"), agent.at("agentType"));
+    EXPECT_EQ(contributor.at("identifiers"), agent.at("identifiers"));
+    EXPECT_EQ(contributor.at("role"), "director");
+    ASSERT_EQ(first_work.at("identifiers").size(), 1U);
+    EXPECT_EQ(first_work.at("identifiers").at(0).at("value"), "Q123");
+}
+
 TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     temporary_directory temporary;
-    const auto product = product_export();
+    const auto product = product_export_with_agent();
     const auto projection = arachne::ariadne::viewer_builder::project(
         product, candidate_export(), "product-1", "candidate-1"
     );
@@ -316,6 +377,7 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
         = arachne::ariadne::viewer_builder::catalog(product, "product-1");
     EXPECT_EQ(catalog.at("formatVersion"), 1);
     EXPECT_EQ(catalog.at("productSnapshotId"), "product-1");
+    EXPECT_EQ(catalog.at("agents").size(), 1U);
     EXPECT_EQ(catalog.at("works").size(), 2U);
     for (const auto& work : catalog.at("works")) {
         EXPECT_FALSE(work.contains("assets"));
@@ -324,13 +386,39 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     const auto template_root = temporary.path() / "templates";
     const auto dist = template_root / "dist";
     std::filesystem::create_directories(dist / "assets");
+    std::filesystem::create_directories(dist / "data");
     {
         std::ofstream(dist / "index.html") << "<div id=\"root\"></div>\n";
         std::ofstream(dist / "assets" / "app.js")
             << "console.log('viewer');\n";
         std::ofstream(dist / "assets" / "app.css")
             << ".app { display: block; }\n";
+        std::ofstream(dist / "data" / "wikidata-image-hints.json")
+            << "{\"artifact_type\":\"wikidata_image_hints_v1\"}\n";
     }
+
+    auto legacy_catalog = catalog;
+    legacy_catalog.erase("agents");
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::build_site(
+            projection, legacy_catalog, template_root,
+            temporary.path() / "invalid-site-missing-agents",
+            "2026-07-18T05:45:00Z"
+        )),
+        std::invalid_argument
+    );
+
+    auto mismatched_catalog = catalog;
+    mismatched_catalog["works"][0]["contributors"][0]["identifiers"]
+        = nlohmann::json::array();
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::build_site(
+            projection, mismatched_catalog, template_root,
+            temporary.path() / "invalid-site-mismatched-agent",
+            "2026-07-18T05:45:00Z"
+        )),
+        std::invalid_argument
+    );
 
     const auto first = arachne::ariadne::viewer_builder::build_site(
         projection, catalog, template_root, temporary.path() / "site",
@@ -356,6 +444,9 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     EXPECT_TRUE(
         std::filesystem::is_regular_file(bundle / "data" / "catalog.json")
     );
+    EXPECT_TRUE(std::filesystem::is_regular_file(
+        bundle / "data" / "wikidata-image-hints.json"
+    ));
     EXPECT_FALSE(
         std::filesystem::exists(bundle / "data" / "projection.json")
     );

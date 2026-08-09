@@ -140,15 +140,22 @@ dump in `fetch_plan_v1`; Arachne translates that need into a concrete door reque
 Pheidippides delivers an opaque archive; and `hpc/wikidata/` performs the baseline
 three-pass class/work/agent scan in bounded memory with disposable SQLite. The
 worker hash-verifies the source receipt and product export, derives coverage, and
-emits `external_candidate_source_graph_v1`. Point requests are reserved for
-bounded enrichment or repair. A failed fresh acquisition cannot be relabelled as a
-fresh rebuild using old cache data.
+emits `external_candidate_source_graph_v1`. Its first existing dump pass also
+derives the separate, bounded `wikidata_image_hints_v1` Commons-filename cache
+for product works and agents. Image targets never enter work-only coverage and
+neither image hints nor image data enter the canonical database. Point requests
+are reserved for bounded enrichment or repair. A failed fresh acquisition cannot
+be relabelled as a fresh rebuild using old cache data.
 
 The browser consumes versioned exports, never writable SQLite or operational
 state. Ariadne's static projection keeps human-authored relations, derived
 chronological/similarity paths, and research suggestions machine-readably and
 visually distinct. Publication identifies source snapshot IDs and projection
-version; a failed build leaves the prior Pages deployment valid.
+version; a failed build leaves the prior Pages deployment valid. The optional
+image-hint projection has a deliberate one-way handoff: publication accepts it
+only from inside reviewed state, verifies its product snapshot identity, and
+then includes it as a disposable, content-addressed viewer asset. It remains
+separate from the catalog and is never required to publish a product snapshot.
 
 ## Remote state and concurrency
 

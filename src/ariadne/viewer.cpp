@@ -300,6 +300,97 @@ namespace {
         }
     }
 
+    bool valid_catalog_identifier(const nlohmann::json& identifier) {
+        if (!identifier.is_object() || !identifier.contains("scheme")
+            || !identifier.at("scheme").is_string()
+            || identifier.at("scheme").get_ref<const std::string&>().empty()
+            || !identifier.contains("value")
+            || !identifier.at("value").is_string()
+            || identifier.at("value").get_ref<const std::string&>().empty()
+            || !identifier.contains("url")) {
+            return false;
+        }
+        const auto& url = identifier.at("url");
+        return url.is_null() || url.is_string();
+    }
+
+    bool valid_catalog_agent(const nlohmann::json& agent) {
+        if (!agent.is_object() || !agent.contains("id")
+            || !agent.at("id").is_string()
+            || agent.at("id").get_ref<const std::string&>().empty()
+            || !agent.contains("label") || !agent.at("label").is_string()
+            || agent.at("label").get_ref<const std::string&>().empty()
+            || !agent.contains("agentType")
+            || !agent.at("agentType").is_string()
+            || agent.at("agentType").get_ref<const std::string&>().empty()
+            || !agent.contains("identifiers")
+            || !agent.at("identifiers").is_array()) {
+            return false;
+        }
+        return std::ranges::all_of(
+            agent.at("identifiers"), valid_catalog_identifier
+        );
+    }
+
+    void validate_viewer_catalog(const nlohmann::json& catalog) {
+        if (!catalog.is_object() || catalog.value("formatVersion", 0) != 1
+            || !catalog.contains("productSnapshotId")
+            || !catalog.at("productSnapshotId").is_string()
+            || catalog.at("productSnapshotId")
+                   .get_ref<const std::string&>()
+                   .empty()
+            || !catalog.contains("agents")
+            || !catalog.at("agents").is_array()
+            || !catalog.contains("works")
+            || !catalog.at("works").is_array()) {
+            throw std::invalid_argument("site build requires viewer catalog v1");
+        }
+
+        std::map<std::string, const nlohmann::json*, std::less<>> agents;
+        for (const auto& agent : catalog.at("agents")) {
+            if (!valid_catalog_agent(agent)) {
+                throw std::invalid_argument(
+                    "viewer catalog contains a malformed agent"
+                );
+            }
+            const auto id = agent.at("id").get<std::string>();
+            if (!agents.emplace(id, &agent).second) {
+                throw std::invalid_argument(
+                    "viewer catalog contains duplicate agents"
+                );
+            }
+        }
+
+        for (const auto& work : catalog.at("works")) {
+            if (!work.is_object() || !work.contains("contributors")
+                || !work.at("contributors").is_array()) {
+                throw std::invalid_argument(
+                    "viewer catalog contains a malformed work"
+                );
+            }
+            for (const auto& contributor : work.at("contributors")) {
+                if (!valid_catalog_agent(contributor)) {
+                    throw std::invalid_argument(
+                        "viewer catalog contains a malformed contributor"
+                    );
+                }
+                const auto id = contributor.at("id").get<std::string>();
+                const auto canonical = agents.find(id);
+                if (canonical == agents.end()
+                    || contributor.at("label")
+                        != canonical->second->at("label")
+                    || contributor.at("agentType")
+                        != canonical->second->at("agentType")
+                    || contributor.at("identifiers")
+                        != canonical->second->at("identifiers")) {
+                    throw std::invalid_argument(
+                        "viewer contributor does not resolve to its canonical agent"
+                    );
+                }
+            }
+        }
+    }
+
 } // namespace
 
 nlohmann::ordered_json viewer_builder::project(
@@ -972,6 +1063,7 @@ nlohmann::ordered_json viewer_builder::catalog(
             { "id", id },
             { "label", label_for(id, id) },
             { "agentType", agent.value("agent_type", "person") },
+            { "identifiers", nlohmann::ordered_json::array() },
         };
     }
 
@@ -1022,6 +1114,27 @@ nlohmann::ordered_json viewer_builder::catalog(
         item["manifestations"] = nlohmann::ordered_json::array();
         item["financialFacts"] = nlohmann::ordered_json::array();
         works.emplace(id, std::move(item));
+    }
+
+    for (const auto& identifier :
+         array_or_empty(product_export, "external_ids")) {
+        const auto entity_id = identifier.value("entity_id", "");
+        const auto work = works.find(entity_id);
+        const auto agent = agents.find(entity_id);
+        if (work == works.end() && agent == agents.end()) {
+            continue;
+        }
+        nlohmann::ordered_json item {
+            { "scheme", identifier.value("scheme", "unknown") },
+            { "value", identifier.value("value", "") },
+        };
+        copy_field(item, "url", identifier, "canonical_url");
+        if (work != works.end()) {
+            work->second["identifiers"].push_back(item);
+        }
+        if (agent != agents.end()) {
+            agent->second["identifiers"].push_back(std::move(item));
+        }
     }
 
     for (const auto& assignment :
@@ -1105,20 +1218,6 @@ nlohmann::ordered_json viewer_builder::catalog(
         work->second["measurements"].push_back(std::move(item));
     }
 
-    for (const auto& identifier :
-         array_or_empty(product_export, "external_ids")) {
-        const auto work = works.find(identifier.value("entity_id", ""));
-        if (work == works.end()) {
-            continue;
-        }
-        nlohmann::ordered_json item {
-            { "scheme", identifier.value("scheme", "unknown") },
-            { "value", identifier.value("value", "") },
-        };
-        copy_field(item, "url", identifier, "canonical_url");
-        work->second["identifiers"].push_back(std::move(item));
-    }
-
     for (const auto& manifestation :
          array_or_empty(product_export, "manifestations")) {
         const auto work = works.find(manifestation.value("work_id", ""));
@@ -1176,9 +1275,15 @@ nlohmann::ordered_json viewer_builder::catalog(
         static_cast<void>(id);
         work_array.push_back(std::move(work));
     }
+    nlohmann::ordered_json agent_array = nlohmann::ordered_json::array();
+    for (auto& [id, agent] : agents) {
+        static_cast<void>(id);
+        agent_array.push_back(std::move(agent));
+    }
     return {
         { "formatVersion", 1 },
         { "productSnapshotId", std::move(product_snapshot_id) },
+        { "agents", std::move(agent_array) },
         { "works", std::move(work_array) },
     };
 }
@@ -1243,12 +1348,7 @@ nlohmann::ordered_json viewer_builder::build_site(
             "site build requires viewer_projection_data_v1"
         );
     }
-    if (!catalog_data.is_object()
-        || catalog_data.value("formatVersion", 0) != 1
-        || !catalog_data.contains("works")
-        || !catalog_data.at("works").is_array()) {
-        throw std::invalid_argument("site build requires viewer catalog v1");
-    }
+    validate_viewer_catalog(catalog_data);
 
     const auto asset_root = template_root / "dist";
     if (!std::filesystem::is_directory(asset_root)) {

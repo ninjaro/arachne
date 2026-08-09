@@ -77,6 +77,8 @@ export function fixtureDomain(
     }
   }
   return {
+    agents: [],
+    agentById: new Map(),
     works,
     workById: new Map(works.map((work) => [work.id, work])),
     workRelations,
