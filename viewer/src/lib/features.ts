@@ -4,6 +4,7 @@ import type {
   FeatureSettings,
   Work,
 } from "./types";
+import type { TasteIndex } from "./taste";
 
 export type FeatureSource =
   | "direct-concept"
@@ -42,6 +43,75 @@ export interface FeatureIndex {
   documentFrequency: Map<string, number>;
   postings: Map<string, EntityId[]>;
   size: number;
+}
+
+function artifactFeatureSource(value: string): FeatureSource {
+  return value === "contributor" ||
+    value === "organization" ||
+    value === "content-guide"
+    ? value
+    : "direct-concept";
+}
+
+/**
+ * Hydrate the existing recommendation/similarity API from build-time sparse
+ * vectors. This intentionally does not recompute document frequencies or
+ * catalog-wide feature distributions in the browser.
+ */
+export function featureIndexFromTasteIndex(taste: TasteIndex): FeatureIndex {
+  const featuresById = new Map<EntityId, WeightedFeature[]>();
+  const vectors = new Map<EntityId, Map<string, number>>();
+  const norms = new Map<EntityId, number>();
+  const documentFrequency = new Map<string, number>();
+  const postings = new Map<string, EntityId[]>();
+
+  for (const [id, entity] of taste.entities) {
+    if (entity.family !== "work") continue;
+    const vector = new Map(entity.features);
+    vectors.set(id, vector);
+    const squared = [...vector.values()].reduce(
+      (sum, value) => sum + value * value,
+      0,
+    );
+    norms.set(id, entity.norm ?? Math.sqrt(squared));
+    featuresById.set(id, [...vector].map(([key, value]) => {
+      const metadata = taste.features.get(key);
+      return {
+        key,
+        label: metadata?.label ?? key,
+        value,
+        source: artifactFeatureSource(metadata?.source ?? "direct-concept"),
+        category: metadata?.category ?? undefined,
+        relationType: metadata?.relationType ?? undefined,
+      };
+    }));
+  }
+
+  if (taste.postings.size) {
+    for (const [key, values] of taste.postings) {
+      const ids = [...values.keys()].filter((id) => vectors.has(id));
+      postings.set(key, ids);
+      documentFrequency.set(key, ids.length);
+    }
+  } else {
+    for (const [id, vector] of vectors) {
+      for (const key of vector.keys()) {
+        const ids = postings.get(key);
+        if (ids) ids.push(id);
+        else postings.set(key, [id]);
+      }
+    }
+    for (const [key, ids] of postings) documentFrequency.set(key, ids.length);
+  }
+
+  return {
+    featuresById,
+    vectors,
+    norms,
+    documentFrequency,
+    postings,
+    size: vectors.size,
+  };
 }
 
 const ROLE_SETTING: Record<string, keyof FeatureSettings> = {

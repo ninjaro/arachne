@@ -67,6 +67,22 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: viewer/package-lock.json
+      - name: Install native projection dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcxxopts-dev \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
+      - name: Build native projection CLI
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF
+          cmake --build build --target arachne_app --parallel
       - name: Build generated viewer
         working-directory: viewer
         run: |

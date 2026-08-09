@@ -1,14 +1,37 @@
 import { useCallback, useRef, useState } from "react";
-import type { Domain, EntityId, Ratings } from "../lib/types";
+import type {
+  Domain,
+  EntityId,
+  EntityOpenContext,
+  Ratings,
+} from "../lib/types";
 import type { ImageHintProductIdentity } from "../lib/image-hints";
+import { buildEntityPermalink } from "../lib/location";
 import type { RateHandler } from "./common";
 import { AgentEntityBody, WorkEntityBody } from "./EntityWindowBody";
 
-interface WindowState {
+export interface WindowState {
   id: EntityId;
   x: number;
   y: number;
   z: number;
+  context?: EntityOpenContext;
+}
+
+export type EntityWindowMode = "append" | "replace";
+
+export interface EntityWindowOptions {
+  mode?: EntityWindowMode;
+  /** Maximum retained windows in append mode. Omit for an unbounded comparison set. */
+  limit?: number;
+  context?: EntityOpenContext;
+}
+
+function initialWindowPosition(index: number): Pick<WindowState, "x" | "y"> {
+  return {
+    x: 28 + (index % 6) * 34,
+    y: 90 + (index % 5) * 30,
+  };
 }
 
 export function useEntityWindows() {
@@ -24,26 +47,60 @@ export function useEntityWindows() {
     );
   }, []);
 
-  const openWindow = useCallback((id: EntityId) => {
+  const openWindow = useCallback((
+    id: EntityId,
+    options: EntityWindowOptions = {},
+  ) => {
     zCounter.current += 1;
     setWindows((current) => {
       const existing = current.find((window) => window.id === id);
+      const mode = options.mode ?? "append";
+      const limit = options.limit === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.max(1, Math.trunc(options.limit));
+
       if (existing) {
-        return current.map((window) =>
-          window.id === id ? { ...window, z: zCounter.current } : window,
+        const focused = current.map((window) =>
+          window.id === id
+            ? {
+                ...window,
+                z: zCounter.current,
+                context: options.context ?? window.context,
+              }
+            : window,
         );
+        if (mode === "replace") {
+          return focused.filter((window) => window.id === id);
+        }
+        if (focused.length <= limit) return focused;
+        return [
+          ...focused.filter((window) => window.id !== id).slice(-(limit - 1)),
+          focused.find((window) => window.id === id)!,
+        ];
       }
-      const index = current.length;
+
+      const retained = mode === "replace"
+        ? []
+        : current.slice(-Math.max(0, limit - 1));
+      const position = initialWindowPosition(retained.length);
       return [
-        ...current,
-        {
-          id,
-          x: 28 + (index % 6) * 34,
-          y: 90 + (index % 5) * 30,
-          z: zCounter.current,
-        },
+        ...retained,
+        { id, ...position, z: zCounter.current, context: options.context },
       ];
     });
+  }, []);
+
+  const openWindows = useCallback((ids: readonly EntityId[]) => {
+    const unique = [...new Set(ids)].slice(0, 2);
+    setWindows(unique.map((id, index) => {
+      zCounter.current += 1;
+      return {
+        id,
+        x: 28 + index * 430,
+        y: 90,
+        z: zCounter.current,
+      };
+    }));
   }, []);
 
   const closeWindow = useCallback((id: EntityId) => {
@@ -58,7 +115,14 @@ export function useEntityWindows() {
     );
   }, []);
 
-  return { windows, openWindow, focusWindow, closeWindow, moveWindow };
+  return {
+    windows,
+    openWindow,
+    openWindows,
+    focusWindow,
+    closeWindow,
+    moveWindow,
+  };
 }
 
 export function FloatingEntityWindows({
@@ -160,6 +224,17 @@ export function FloatingEntityWindows({
               }}
             >
               <strong>{label}</strong>
+              <a
+                href={buildEntityPermalink(
+                  { family: work ? "work" : "agent", id: windowState.id },
+                  import.meta.env.BASE_URL,
+                )}
+                onPointerDown={(event) => event.stopPropagation()}
+                aria-label={`Permalink for ${label}`}
+                title="Open canonical viewer permalink"
+              >
+                Link
+              </a>
               <button
                 type="button"
                 onPointerDown={(event) => event.stopPropagation()}
@@ -170,6 +245,16 @@ export function FloatingEntityWindows({
               </button>
             </header>
             <div className="entity-window-body">
+              {windowState.context ? (
+                <aside className="entity-window-context">
+                  <strong>{windowState.context.title}</strong>
+                  <ul>
+                    {windowState.context.details.map((detail) => (
+                      <li key={detail}>{detail}</li>
+                    ))}
+                  </ul>
+                </aside>
+              ) : null}
               {work ? (
                 <WorkEntityBody
                   work={work}
@@ -184,6 +269,8 @@ export function FloatingEntityWindows({
                 <AgentEntityBody
                   agent={agent}
                   domain={domain}
+                  ratings={ratings}
+                  onRate={onRate}
                   onOpen={onOpen}
                   imageHintsUrl={imageHintsUrl}
                   imageHintProduct={imageHintProduct}

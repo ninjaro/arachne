@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type {
   ConceptAssignment,
+  EntityOpenContext,
   EntityId,
   RatingValue,
   Ratings,
@@ -8,8 +9,46 @@ import type {
 } from "../lib/types";
 import { dateLabel, humanize } from "../lib/format";
 
-export type OpenHandler = (id: EntityId) => void;
+export type OpenHandler = (
+  id: EntityId,
+  context?: EntityOpenContext,
+) => void;
 export type RateHandler = (id: EntityId, value: RatingValue) => void;
+
+export function EntityRatingButtons({
+  id,
+  label,
+  ratings,
+  onRate,
+}: {
+  id: EntityId;
+  label: string;
+  ratings: Ratings;
+  onRate: RateHandler;
+}) {
+  return (
+    <div className="rating-buttons" onClick={(event) => event.stopPropagation()}>
+      <button
+        type="button"
+        className={ratings[id] === 1 ? "rate like active" : "rate like"}
+        onClick={() => onRate(id, 1)}
+        aria-label={`Like ${label}`}
+        aria-pressed={ratings[id] === 1}
+      >
+        +
+      </button>
+      <button
+        type="button"
+        className={ratings[id] === -1 ? "rate dislike active" : "rate dislike"}
+        onClick={() => onRate(id, -1)}
+        aria-label={`Dislike ${label}`}
+        aria-pressed={ratings[id] === -1}
+      >
+        −
+      </button>
+    </div>
+  );
+}
 
 export function RatingButtons({
   work,
@@ -21,26 +60,12 @@ export function RatingButtons({
   onRate: RateHandler;
 }) {
   return (
-    <div className="rating-buttons" onClick={(event) => event.stopPropagation()}>
-      <button
-        type="button"
-        className={ratings[work.id] === 1 ? "rate like active" : "rate like"}
-        onClick={() => onRate(work.id, 1)}
-        aria-label={`Like ${work.label}`}
-        aria-pressed={ratings[work.id] === 1}
-      >
-        +
-      </button>
-      <button
-        type="button"
-        className={ratings[work.id] === -1 ? "rate dislike active" : "rate dislike"}
-        onClick={() => onRate(work.id, -1)}
-        aria-label={`Dislike ${work.label}`}
-        aria-pressed={ratings[work.id] === -1}
-      >
-        −
-      </button>
-    </div>
+    <EntityRatingButtons
+      id={work.id}
+      label={work.label}
+      ratings={ratings}
+      onRate={onRate}
+    />
   );
 }
 

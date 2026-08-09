@@ -18,9 +18,9 @@ import {
   MAX_UNSELECTED_TRAJECTORY_WIDTH,
   normalizedStrengthRangeLabel,
   provenanceOverlayTagIds,
-  selectedFocusLabelPosition,
   shouldRenderTemporalRegion,
   strengthChangesByTemporalGroup,
+  tagExcludedByTaste,
 } from "./EvolutionView";
 
 function renderEvolution() {
@@ -45,7 +45,12 @@ function renderEvolution() {
     fixtureWork({ id: "year-two", year: 1901, tags: ["S"] }),
   ]);
   return renderToStaticMarkup(
-    createElement(EvolutionView, { domain, onOpen: () => undefined }),
+    createElement(EvolutionView, {
+      domain,
+      ratings: {},
+      onRate: () => undefined,
+      onOpen: () => undefined,
+    }),
   );
 }
 
@@ -59,8 +64,9 @@ describe("Evolution view temporal and directional controls", () => {
     expect(markup).toContain('class="metro-details"');
     expect(markup).toContain('tabindex="-1"');
     expect(markup).toContain("Year-only dates");
-    expect(markup).toContain("aggregate station");
-    expect(markup).toContain("Hover is a local preview");
+    expect(markup).toContain("Aggregate stop + count");
+    expect(markup).toContain("How to read this view");
+    expect(markup).not.toContain("metro-work-label");
     expect(markup).not.toContain("Expansion depth");
   });
 
@@ -70,6 +76,15 @@ describe("Evolution view temporal and directional controls", () => {
     expect(markup).not.toContain('data-temporal-region="day"');
     expect(markup).toContain('data-temporal-region="month"');
     expect(markup).toContain('data-temporal-region="year"');
+  });
+
+  it("classifies explicit tag taste filters strictly", () => {
+    expect(tagExcludedByTaste(undefined, "positive", false)).toBe(true);
+    expect(tagExcludedByTaste(1, "positive", false)).toBe(false);
+    expect(tagExcludedByTaste(-1, "negative", false)).toBe(false);
+    expect(tagExcludedByTaste(1, "unrated", false)).toBe(true);
+    expect(tagExcludedByTaste(undefined, "unrated", false)).toBe(false);
+    expect(tagExcludedByTaste(-1, "all", true)).toBe(true);
   });
 
   it("keeps an ambiguous exact day out of the full-height region layer", () => {
@@ -335,17 +350,6 @@ describe("Evolution view temporal and directional controls", () => {
       { kind: "station", id: "station-1" },
       baseBundleIds,
     )).toBeNull();
-  });
-
-  it("keeps the persistent station card inside a sparse scene", () => {
-    const position = selectedFocusLabelPosition(
-      { x: 125, y: 108 },
-      { width: 269, height: 180 },
-    );
-    expect(position.x).toBeGreaterThanOrEqual(8);
-    expect(position.x + 220).toBeLessThanOrEqual(269 - 8);
-    expect(position.y).toBeGreaterThanOrEqual(8);
-    expect(position.y + 38).toBeLessThanOrEqual(180 - 8);
   });
 
   it("does not invent strength changes between stations in one temporal stop", () => {

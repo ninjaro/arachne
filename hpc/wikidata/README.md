@@ -1,55 +1,193 @@
-# Wikidata bulk worker
+# Wikidata on RWTH CLAIX
 
-This worker adapts the graph-extraction baseline in `wikidata_art_hpc.zip` to
-the Arachne actor and contract boundaries. It never downloads data. A reviewed
-`bulk_snapshot` or `resume_download` request is executed by Pheidippides first;
-the worker then verifies that `acquired_artifact_v1` receipt and streams the
-delivered dump into disposable SQLite staging.
+The repository-owned `run` command prepares acquisition, submits the existing
+streaming worker to Slurm, and reports predictable results. It uses Arachne's
+native transport and candidate commands; it does not implement another
+downloader, validator, retry loop, or Wikidata extraction pipeline.
 
-The three dump passes and the SQLite ranking pass retain the baseline semantics:
+## Normal run
 
-1. calculate the configured creative-work subclass closure;
-2. retain works and contributor edges in disposable SQLite;
-3. run Ariadne's exact iterative coverage/gray-frontier ranking and retain only
-   the configured candidate pool;
-4. resolve labels and grouping profiles for that bounded pool.
-
-Product coverage comes from a hash-verified `product-jsonl` export named by a
-validated `product_graph_snapshot_v1` control whose database and structural
-report artifacts are also verified. The output is an immutable,
-deterministically ordered `external_candidate_source_graph_v1` artifact—the
-same input consumed by local, Actions, and HPC candidate runs. The complete
-dump is never loaded into memory, and the coordinator never has to load the
-full external graph. The candidate policy file and its SHA-256 are recorded in
-the run report. No source record enters the product graph.
-
-During the first existing dump pass, the worker also matches Wikidata IDs from
-product works and agents through a separate disposable `product_image_targets`
-table. It emits `wikidata_image_hints_v1` as a second, bounded derived artifact.
-That artifact contains only Commons filenames from non-deprecated P3383/P18
-work claims and P18/P154 agent claims, ordered with preferred rank first. It is
-bound to both the verified dump and product snapshot/export, does not broaden
-`covered_qids`, and never modifies the product database.
-
-Example:
+Use the current public repository HEAD:
 
 ```bash
-python -u hpc/wikidata/build_external_graph.py \
-  --source-control /scratch/controls/wikidata.acquired.json \
-  --artifact-store /scratch/arachne-artifacts \
-  --product-snapshot-control /state/graphs/product/active.json \
-  --graph-store /state/graphs \
-  --config hpc/wikidata/config.json \
-  --candidate-policy-config /state/config/arachne.json \
-  --output /scratch/results/wikidata-source-graph.json \
-  --image-hints-output /scratch/results/wikidata-image-hints.json \
-  --work-directory /scratch/work \
-  --report /scratch/results/wikidata-source-graph.run-report.json \
-  --decompress-threads 16
+cd "$HOME"
+
+git clone https://github.com/ninjaro/arachne.git
+cd arachne
+
+git pull --ff-only
+git lfs pull
+scripts/build.sh
+
+hpc/wikidata/run prepare
 ```
 
-`lbzip2` is used when installed; otherwise Python's streaming bzip2 reader is
-used. The SQLite work database is removed after success unless `--keep-work-db`
-is set. Raw archives and other scratch data may be removed after the external
-graph and run report have been delivered. A fresh-acquisition failure must not
-be replaced with an older receipt while claiming a fresh rebuild.
+`prepare` creates a run beneath `$HPCWORK/arachne/wikidata`, materializes its
+operations configuration, locates the reviewed product snapshot, and translates
+the official dump fetch plan. When the public state has no activated snapshot
+control, it validates the checkout's canonical `database/art-islands.sqlite`
+and materializes a content-addressed, run-local snapshot control and generic
+export through the existing product tools. It does not download the dump or
+start heavy computation.
+
+Acquire the large dump on either RWTH high-bandwidth file-transfer node:
+
+```bash
+ssh copy23-1.hpc.itc.rwth-aachen.de
+
+cd "$HOME/arachne"
+hpc/wikidata/run acquire
+exit
+```
+
+`copy23-1` and `copy23-2` are deliberately separate from Slurm compute nodes.
+The command invokes `build/arachne fetch`, including its reviewed retry, resume,
+timeout, redirect, verification, and `Retry-After` behavior. The dump remains in
+the configured `$HPCWORK` artifact store. `acquire` refuses to run elsewhere so
+an accidental login-node invocation cannot start the large transfer.
+
+Return to the normal CLAIX environment and submit extraction:
+
+```bash
+cd "$HOME/arachne"
+hpc/wikidata/run submit
+```
+
+The default job requests one node, 16 CPUs, 64 GiB of memory, and 24 hours.
+Normal `sbatch` resource overrides follow `--`, for example:
+
+```bash
+hpc/wikidata/run submit -- --time=36:00:00 --mem=96G
+```
+
+A prepared run can be submitted only once because all jobs would otherwise
+share its output and scratch paths. Prepare a new run after a failed job rather
+than launching a concurrent resubmission.
+
+After the job completes:
+
+```bash
+hpc/wikidata/run result
+```
+
+The fixed result paths are:
+
+```text
+results/wikidata-external-graph.json
+results/wikidata-image-hints.json
+results/wikidata-hpc-report.json
+```
+
+`result` shows the Slurm job and logs, acquisition/extraction/candidate status,
+and work, agent, entity, and image counts from the image-hint artifact. While an
+extraction is outstanding it reconciles metadata with `sacct`, falling back to
+`squeue`, so cancellation, timeout, out-of-memory, and other scheduler failures
+identify the failed step and error log.
+
+Candidate planning and activation are optional. Run them only when the external
+candidate snapshot is wanted:
+
+```bash
+hpc/wikidata/run rebuild-candidates
+```
+
+This calls `build/arachne candidate plan` and then
+`build/arachne candidate rebuild`. A run intended only to refresh Wikidata image
+hints may stop after extraction.
+
+Once the graph, image hints, and successful report are safely present, remove
+the verified raw dump and disposable worker state with:
+
+```bash
+hpc/wikidata/run clean
+```
+
+Run the optional candidate rebuild before cleanup when it is wanted; candidate
+planning deliberately re-verifies the source snapshot and cannot be started
+after its raw bytes have been removed.
+
+Cleanup delegates raw-custody verification to the existing
+`discard_acquired_artifact.py` implementation. Before that deletion it verifies
+the external graph and image-hint byte lengths and SHA-256 values recorded by
+the successful worker report. It keeps the run metadata, logs, reports,
+external graph, image hints, and any requested candidate artifacts.
+
+## Discovery and overrides
+
+Commands discover the prepared run through one `run.json` file behind
+`$HPCWORK/arachne/wikidata/current`. No path exports are required.
+
+```bash
+hpc/wikidata/run help
+hpc/wikidata/run --help
+hpc/wikidata/run prepare --help
+```
+
+Use `--run-root PATH` when `$HPCWORK/arachne/wikidata` is not appropriate. An
+advanced command may select a particular prepared run with `--metadata PATH`.
+
+The default persistent-state checkout is
+`$HPCWORK/arachne/wikidata/.arachne-state`. `prepare` creates it from
+`https://github.com/ninjaro/arachne.git` once, then reuses it with
+`git pull --ff-only` and `git lfs pull`. This is another checkout of the same
+public repository, not an unknown or private state repository. Read-only setup
+does not require a GitHub token; authentication becomes relevant only for a
+later operation that actually pushes reviewed state.
+
+For an existing reviewed worktree, use:
+
+```bash
+hpc/wikidata/run prepare --state-root /path/to/arachne-state
+```
+
+An existing `graphs/product/active.json` is preferred inside that state
+checkout. Otherwise `prepare` derives the verified run-local snapshot described
+above from the checkout's canonical database. If a reviewed checkout uses a
+different control path, select it explicitly:
+
+```bash
+hpc/wikidata/run prepare \
+  --state-root /path/to/arachne-state \
+  --product-control graphs/product/snapshots/product-20260809/metadata.json
+```
+
+## Architecture and debugging
+
+The data boundary remains:
+
+```text
+copy23-* transfer node
+        │
+        │ build/arachne fetch
+        ▼
+verified acquired Wikidata dump
+        │
+        │ Slurm
+        ▼
+build_external_graph.py (offline, bounded streaming)
+        │
+        ├── external_candidate_source_graph_v1
+        └── wikidata_image_hints_v1
+```
+
+The worker derives artifact and graph custody from the materialized operations
+configuration. `hpc/wikidata/config.json` remains separate because it contains
+Wikidata-specific extraction policy. Source receipt verification, product
+snapshot/export verification, bounded multi-pass streaming, Ariadne candidate
+ranking, and image-hint generation remain in the existing worker.
+
+The Slurm path retains its disposable SQLite database until the explicit
+`clean` command. Metadata changes are file-locked, including the interval in
+which `sbatch` returns a job ID, so a fast-starting compute job cannot overwrite
+the submission record.
+
+On the first real transfer, use the built `build/arachne fetch` executable on
+`copy23-*` as shown above. If the executable cannot start there because of a
+missing runtime dependency, stop rather than substituting an unrelated
+downloader or passing raw bytes to the worker. Fix the Pheidippides executable
+boundary (or add a verified local-file adoption operation that emits the normal
+acquired control) so downstream verification remains unchanged.
+
+`submit` prints the numeric job ID and absolute stdout/stderr paths. If a run
+fails, `result` identifies the failed step and relevant error log without asking
+the user to reconstruct the worker's internal path set.

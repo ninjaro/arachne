@@ -80,19 +80,52 @@ class WorkerError(RuntimeError):
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="materialized Arachne operations configuration",
+    )
     result.add_argument("--source-control", type=Path, required=True)
-    result.add_argument("--artifact-store", type=Path, required=True)
     result.add_argument("--product-snapshot-control", type=Path, required=True)
-    result.add_argument("--graph-store", type=Path, required=True)
-    result.add_argument("--config", type=Path, required=True)
-    result.add_argument("--candidate-policy-config", type=Path, required=True)
-    result.add_argument("--output", type=Path, required=True)
-    result.add_argument("--image-hints-output", type=Path, required=True)
+    result.add_argument(
+        "--output-directory",
+        type=Path,
+        required=True,
+        help="directory for the graph, image hints, and run report",
+    )
     result.add_argument("--work-directory", type=Path, required=True)
-    result.add_argument("--report", type=Path)
+    result.add_argument(
+        "--wikidata-config",
+        type=Path,
+        default=Path(__file__).with_name("config.json"),
+        help="Wikidata extraction policy (default: adjacent config.json)",
+    )
     result.add_argument("--decompress-threads", type=int, default=1)
     result.add_argument("--keep-work-db", action="store_true")
     return result
+
+
+def configured_stores(
+    configuration: Mapping[str, Any],
+) -> tuple[Path, Path]:
+    paths = configuration.get("paths")
+    artifact_store = paths.get("artifact_store") if isinstance(paths, dict) else None
+    graph_store = paths.get("graph_store") if isinstance(paths, dict) else None
+    if (
+        configuration.get("format_version") != 1
+        or not isinstance(artifact_store, str)
+        or not artifact_store
+        or not Path(artifact_store).is_absolute()
+        or not isinstance(graph_store, str)
+        or not graph_store
+        or not Path(graph_store).is_absolute()
+    ):
+        raise WorkerError(
+            "operations configuration must define absolute artifact_store and "
+            "graph_store paths"
+        )
+    return Path(artifact_store), Path(graph_store)
 
 
 def sha256_file(path: Path) -> str:
@@ -1431,31 +1464,43 @@ def run(
         or arguments.decompress_threads > MAX_DECOMPRESS_THREADS
     ):
         raise WorkerError("decompress thread count is invalid or unbounded")
+    operations_configuration = load_json(
+        arguments.config, "Arachne operations configuration"
+    )
+    artifact_store, graph_store = configured_stores(operations_configuration)
+    try:
+        arguments.output_directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise WorkerError(f"cannot create result directory: {error}") from error
+    if (
+        not arguments.output_directory.is_dir()
+        or arguments.output_directory.is_symlink()
+    ):
+        raise WorkerError("result directory must be a non-symlink directory")
+    output = arguments.output_directory / "wikidata-external-graph.json"
+    image_hints_output = (
+        arguments.output_directory / "wikidata-image-hints.json"
+    )
     progress["phase"] = "transport"
     source_path, source_snapshot = verify_source(
-        arguments.source_control, arguments.artifact_store
+        arguments.source_control, artifact_store
     )
     progress["source_snapshot"] = source_snapshot
     progress["phase"] = "algorithm"
     product_path, product_snapshot = verify_product(
-        arguments.product_snapshot_control, arguments.graph_store
+        arguments.product_snapshot_control, graph_store
     )
-    configuration = load_json(arguments.config, "Wikidata worker configuration")
-    configuration_hash = sha256_file(arguments.config)
-    policy_configuration = load_json(
-        arguments.candidate_policy_config, "candidate policy configuration"
+    ranking_policy = candidate_policy(operations_configuration)
+    policy_configuration_hash = sha256_file(arguments.config)
+    configuration = load_json(
+        arguments.wikidata_config, "Wikidata worker configuration"
     )
-    ranking_policy = candidate_policy(policy_configuration)
-    policy_configuration_hash = sha256_file(arguments.candidate_policy_config)
-    if arguments.output.resolve(strict=False) == arguments.image_hints_output.resolve(
-        strict=False
-    ):
-        raise WorkerError("graph and image hints outputs must be distinct")
-    if arguments.output.exists():
-        raise WorkerError(f"output already exists: {arguments.output}")
-    if arguments.image_hints_output.exists():
+    configuration_hash = sha256_file(arguments.wikidata_config)
+    if output.exists():
+        raise WorkerError(f"output already exists: {output}")
+    if image_hints_output.exists():
         raise WorkerError(
-            f"image hints output already exists: {arguments.image_hints_output}"
+            f"image hints output already exists: {image_hints_output}"
         )
     arguments.work_directory.mkdir(parents=True, exist_ok=True)
     work_database = arguments.work_directory / (
@@ -1463,6 +1508,7 @@ def run(
     )
     if work_database.exists():
         raise WorkerError(f"work database already exists: {work_database}")
+    progress["work_database"] = work_database
     connection = create_database(work_database)
     try:
         covered = load_product_coverage(connection, product_path)
@@ -1482,22 +1528,20 @@ def run(
                 image_count,
             ) = emit_image_hints(
                 connection,
-                arguments.image_hints_output,
+                image_hints_output,
                 source_snapshot,
                 product_snapshot,
             )
             image_output_emitted = True
             output_hash, output_bytes = emit_graph(
-                connection, arguments.output, source_snapshot
+                connection, output, source_snapshot
             )
         except BaseException:
             if image_output_emitted:
-                arguments.image_hints_output.unlink(missing_ok=True)
+                image_hints_output.unlink(missing_ok=True)
             raise
     finally:
         connection.close()
-        if not arguments.keep_work_db:
-            work_database.unlink(missing_ok=True)
     return {
         "status": "succeeded",
         "transport": {
@@ -1516,13 +1560,13 @@ def run(
         },
         "output": {
             "artifact_type": "external_candidate_source_graph_v1",
-            "path": str(arguments.output),
+            "path": str(output),
             "sha256": output_hash,
             "byte_length": output_bytes,
         },
         "image_hints_output": {
             "artifact_type": "wikidata_image_hints_v1",
-            "path": str(arguments.image_hints_output),
+            "path": str(image_hints_output),
             "sha256": image_output_hash,
             "byte_length": image_output_bytes,
             "entity_count": image_entity_count,
@@ -1534,9 +1578,7 @@ def run(
 
 def main() -> int:
     arguments = parser().parse_args()
-    report_path = arguments.report or arguments.output.with_suffix(
-        arguments.output.suffix + ".run-report.json"
-    )
+    report_path = arguments.output_directory / "wikidata-hpc-report.json"
     progress: dict[str, Any] = {}
     try:
         report = run(arguments, progress)
@@ -1562,6 +1604,10 @@ def main() -> int:
         print(f"wikidata_external_graph: {error}", file=sys.stderr)
         return 2
     write_report(report_path, report)
+    if not arguments.keep_work_db:
+        work_database = progress.get("work_database")
+        if isinstance(work_database, Path):
+            work_database.unlink(missing_ok=True)
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0
 

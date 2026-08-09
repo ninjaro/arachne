@@ -256,6 +256,10 @@ class StageImageHintsTests(unittest.TestCase):
         ]
         invalid_rank = copy.deepcopy(valid_entity)
         invalid_rank["images"][0]["rank"] = "deprecated"
+        image_url = copy.deepcopy(valid_entity)
+        image_url["images"][0]["file"] = "https://example.invalid/poster.jpg"
+        image_bytes = copy.deepcopy(valid_entity)
+        image_bytes["images"][0]["file"] = "data:image/png;base64,AA=="
         duplicate_filename = copy.deepcopy(valid_entity)
         duplicate_filename["images"] = [
             copy.deepcopy(valid_image),
@@ -274,6 +278,8 @@ class StageImageHintsTests(unittest.TestCase):
             ("empty images", [empty_images]),
             ("too many images", [too_many_images]),
             ("invalid rank", [invalid_rank]),
+            ("image URL", [image_url]),
+            ("inline image bytes", [image_bytes]),
             ("duplicate filename", [duplicate_filename]),
             ("duplicate entity", duplicate_entity),
         ]

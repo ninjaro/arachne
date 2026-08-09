@@ -257,11 +257,336 @@ class OperationsCliTests(unittest.TestCase):
                 "product-apply-inbox",
                 "product-rebuild-merge-hints",
                 "product-export-merge-hints",
+                "product-research",
+                "product-entity",
+                "product-taste-index",
                 "candidate-plan",
                 "candidate-rebuild",
                 "viewer-build",
             },
         )
+
+    def product_snapshot(self) -> tuple[Path, Path, Path]:
+        graph_store = self.root / "graphs"
+        export = graph_store / "product" / "exports" / "product.jsonl"
+        export.parent.mkdir(parents=True, exist_ok=True)
+        records = [
+            {
+                "table": "entities",
+                "row": {"id": "work-000001", "entity_type": "work"},
+            },
+            {
+                "table": "entities",
+                "row": {"id": "agent-000001", "entity_type": "person"},
+            },
+            {
+                "table": "entities",
+                "row": {"id": "concept-000001", "entity_type": "concept"},
+            },
+            {
+                "table": "works",
+                "row": {
+                    "entity_id": "work-000001",
+                    "medium": "film",
+                    "year_start": 1950,
+                    "year_end": None,
+                    "date_start_text": None,
+                    "production_info_json": None,
+                },
+            },
+            {
+                "table": "agents",
+                "row": {
+                    "entity_id": "agent-000001",
+                    "agent_type": "person",
+                },
+            },
+            {
+                "table": "concepts",
+                "row": {
+                    "entity_id": "concept-000001",
+                    "concept_type": "genre",
+                    "slug": "test-genre",
+                },
+            },
+            {
+                "table": "names",
+                "row": {
+                    "id": 1,
+                    "entity_id": "work-000001",
+                    "name_type": "original",
+                    "value": "Test Work",
+                    "is_preferred": 1,
+                },
+            },
+            {
+                "table": "names",
+                "row": {
+                    "id": 2,
+                    "entity_id": "agent-000001",
+                    "name_type": "original",
+                    "value": "Test Agent",
+                    "is_preferred": 1,
+                },
+            },
+            {
+                "table": "names",
+                "row": {
+                    "id": 3,
+                    "entity_id": "concept-000001",
+                    "name_type": "original",
+                    "value": "Test genre",
+                    "is_preferred": 1,
+                },
+            },
+            {
+                "table": "credits",
+                "row": {
+                    "id": 1,
+                    "work_id": "work-000001",
+                    "agent_id": "agent-000001",
+                    "role": "director",
+                    "importance": "primary",
+                    "credit_order": 1,
+                    "credited_as": None,
+                },
+            },
+            {
+                "table": "work_concepts",
+                "row": {
+                    "id": 1,
+                    "work_id": "work-000001",
+                    "concept_id": "concept-000001",
+                    "relation_type": "exemplifies",
+                    "centrality": 90,
+                    "historical_role": "canonical",
+                    "confidence": 0.9,
+                },
+            },
+            {
+                "table": "ingest_issues",
+                "row": {
+                    "batch_id": "batch-test",
+                    "code": "unknown_reference",
+                    "json_path": "/create/credits/0",
+                    "message": "Unknown agent.",
+                    "value_json": '{"agent_id":"agent-999999"}',
+                    "status": "open",
+                },
+            },
+        ]
+        export.write_text(
+            "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        database = graph_store / "product" / "product.sqlite"
+        database.write_bytes(b"immutable product snapshot")
+        report = graph_store / "product" / "reports" / "validation.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text('{"passed":true}\n', encoding="utf-8")
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        control = self.root / "product-control.json"
+        control.write_text(
+            json.dumps(
+                {
+                    "contract": "product_graph_snapshot_v1",
+                    "format_version": 1,
+                    "snapshot_id": "product-cli-test",
+                    "run_id": "run-cli-test",
+                    "graph_version": "test-1",
+                    "content_sha256": digest(database),
+                    "database": {
+                        "storage_ref": "product/product.sqlite",
+                        "sha256": digest(database),
+                        "byte_length": database.stat().st_size,
+                    },
+                    "exports": [
+                        {
+                            "kind": "product-jsonl",
+                            "artifact": {
+                                "storage_ref": "product/exports/product.jsonl",
+                                "sha256": digest(export),
+                                "byte_length": export.stat().st_size,
+                            },
+                        }
+                    ],
+                    "activated_at": "2026-08-09T12:00:00Z",
+                    "structural_validation": {
+                        "passed": True,
+                        "report": {
+                            "storage_ref": "product/reports/validation.json",
+                            "sha256": digest(report),
+                            "byte_length": report.stat().st_size,
+                        },
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        decisions = self.root / "merge-hint-decisions.json"
+        decisions.write_text(
+            '{"artifact_type":"arachne_merge_hint_decisions_v1",'
+            '"format_version":1,"ignored_pairs":[]}\n',
+            encoding="utf-8",
+        )
+        review = self.root / "merge-hints-review.json"
+        review.write_text(
+            json.dumps(
+                {
+                    "artifactType": "arachne_merge_hint_review_v1",
+                    "formatVersion": 1,
+                    "source": {
+                        "productSha256": digest(database),
+                        "decisionsSha256": digest(decisions),
+                        "ignoredPairCount": 0,
+                    },
+                    "items": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return control, review, decisions
+
+    def test_human_help_is_available_at_root_product_and_subcommand_levels(self) -> None:
+        for arguments, expected in (
+            (("--help",), "Arachne\n"),
+            (("-h",), "Usage:"),
+            (("help",), "Commands:"),
+            (("help", "product"), "Arachne product"),
+            (("product", "--help"), "taste-index"),
+            (("help", "product", "research"), "Required options:"),
+            (("product", "research", "--help"), "--product-snapshot"),
+            (("product", "entity", "--help"), "--id ID"),
+            (("help", "fetch"), "Pheidippides"),
+            (("fetch", "--help"), "fetch plan"),
+            (("help", "fetch", "plan"), "--output-directory"),
+            (("fetch", "plan", "--help"), "fetch_plan_v1"),
+            (("help", "candidate"), "candidate snapshot"),
+            (("candidate", "--help"), "candidate rebuild"),
+            (("help", "candidate", "plan"), "--external-graph"),
+            (("candidate", "plan", "--help"), "--output-artifact"),
+            (("help", "candidate", "rebuild"), "--run-id"),
+            (("candidate", "rebuild", "--help"), "plan-control"),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(expected, result.stdout)
+
+        unknown = self.run_cli("unknown-command")
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("arachne help", unknown.stderr)
+
+    def test_product_research_entity_and_taste_index_are_snapshot_bound_json(self) -> None:
+        control, review, decisions = self.product_snapshot()
+        research_path = self.root / "research.json"
+        research = self.run_cli(
+            "product",
+            "research",
+            "--config",
+            str(self.config_path),
+            "--product-snapshot",
+            str(control),
+            "--merge-hints",
+            str(review),
+            "--merge-hint-decisions",
+            str(decisions),
+            "--output",
+            str(research_path),
+        )
+        self.assertEqual(research.returncode, 0, research.stderr)
+        self.assertFalse(research.stdout)
+        report = json.loads(research_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["artifact_type"], "product_research_report_v1")
+        self.assertEqual(report["product_snapshot"]["snapshot_id"], "product-cli-test")
+        self.assertEqual(report["summary"]["ingestIssues"], 1)
+        self.assertEqual(report["summary"]["qualityGaps"], 1)
+
+        entity = self.run_cli(
+            "product",
+            "entity",
+            "--config",
+            str(self.config_path),
+            "--product-snapshot",
+            str(control),
+            "--id",
+            "agent-000001",
+            "--compact",
+        )
+        self.assertEqual(entity.returncode, 0, entity.stderr)
+        entity_document = self.document(entity)
+        self.assertEqual(entity_document["family"], "agent")
+        self.assertEqual(entity_document["credits"][0]["work_label"], "Test Work")
+        self.assertNotIn("\n  ", entity.stdout)
+
+        taste = self.run_cli(
+            "product",
+            "taste-index",
+            "--config",
+            str(self.config_path),
+            "--product-snapshot",
+            str(control),
+        )
+        self.assertEqual(taste.returncode, 0, taste.stderr)
+        taste_document = self.document(taste)
+        self.assertEqual(taste_document["artifact_type"], "taste_index_v1")
+        self.assertIn("work-000001", taste_document["entities"])
+        self.assertIn("agent-000001", taste_document["entities"])
+
+        database = self.root / "graphs" / "product" / "product.sqlite"
+        product_export = (
+            self.root / "graphs" / "product" / "exports" / "product.jsonl"
+        )
+        local_export = self.root / "local-product.jsonl"
+        database_hash = hashlib.sha256(database.read_bytes()).hexdigest()
+        local_export.write_text(
+            json.dumps(
+                {
+                    "table": "__local_product_identity",
+                    "row": {
+                        "database_sha256": database_hash,
+                        "snapshot_id": "local-" + database_hash[:16],
+                    },
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+            + product_export.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        local = self.run_cli(
+            "product",
+            "research",
+            "--database",
+            str(database),
+            "--product-export",
+            str(local_export),
+            "--merge-hints",
+            str(review),
+            "--merge-hint-decisions",
+            str(decisions),
+            "--compact",
+        )
+        self.assertEqual(local.returncode, 0, local.stderr)
+        local_document = self.document(local)
+        self.assertEqual(
+            local_document["product_snapshot"]["snapshot_id"],
+            "local-" + database_hash[:16],
+        )
+
+        database.write_bytes(b"changed local product snapshot")
+        stale = self.run_cli(
+            "product",
+            "taste-index",
+            "--database",
+            str(database),
+            "--product-export",
+            str(local_export),
+        )
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("does not match", stale.stderr)
 
     def test_fixed_product_inbox_commands_reject_arguments(self) -> None:
         for command, unexpected in (

@@ -1,5 +1,7 @@
 import type { Domain, Ratings, Settings, Work } from "./types";
 import type { EdgeFactor, FeatureIndex } from "./features";
+import { buildTasteVector } from "./taste";
+import type { TasteIndex } from "./taste";
 
 export interface ScoredRecommendation {
   work: Work;
@@ -13,20 +15,30 @@ export function scoreRecommendations(
   index: FeatureIndex,
   ratings: Ratings,
   settings: Settings,
+  tasteIndex: TasteIndex | null = null,
 ): ScoredRecommendation[] {
-  const profile = new Map<string, number>();
-  let likedCount = 0;
+  const profile = tasteIndex
+    ? buildTasteVector(domain, ratings, tasteIndex)
+    : new Map<string, number>();
+  let likedCount = Object.entries(ratings).filter(
+    ([id, value]) =>
+      value === 1 &&
+      (domain.workById.has(id) || domain.agentById.has(id) || domain.conceptById.has(id)),
+  ).length;
 
-  for (const work of domain.works) {
-    const rating = ratings[work.id];
-    if (rating !== 1 && rating !== -1) continue;
-    if (rating === 1) likedCount += 1;
-    const direction =
-      rating === 1
-        ? settings.recommendation.likeWeight
-        : -settings.recommendation.dislikeWeight;
-    for (const [key, value] of index.vectors.get(work.id) ?? []) {
-      profile.set(key, (profile.get(key) ?? 0) + direction * value);
+  if (!tasteIndex) {
+    likedCount = 0;
+    for (const work of domain.works) {
+      const rating = ratings[work.id];
+      if (rating !== 1 && rating !== -1) continue;
+      if (rating === 1) likedCount += 1;
+      const direction =
+        rating === 1
+          ? settings.recommendation.likeWeight
+          : -settings.recommendation.dislikeWeight;
+      for (const [key, value] of index.vectors.get(work.id) ?? []) {
+        profile.set(key, (profile.get(key) ?? 0) + direction * value);
+      }
     }
   }
 

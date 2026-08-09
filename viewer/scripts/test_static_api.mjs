@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const distDirectory = join(dirname(scriptDirectory), "dist");
-const views = ["browse", "recommendations", "evolution", "islands", "research"];
+const views = ["browse", "evolution", "taste", "research", "recommendations", "islands"];
 
 async function json(relative) {
   return JSON.parse(await readFile(join(distDirectory, relative), "utf8"));
@@ -13,7 +13,25 @@ async function json(relative) {
 
 const index = await json("api/v1/index.json");
 assert.equal(index.kind, "arachne.viewer.index");
-assert.ok(index.datasets.catalog.count >= 0);
+assert.ok(index.datasets.catalog.counts.works >= 0);
+assert.ok(index.datasets.catalog.counts.agents >= 0);
+assert.equal(index.datasets.tasteIndex.artifactType, "taste_index_v1");
+assert.ok(index.datasets.tasteIndex.featureCount >= 0);
+assert.ok(index.datasets.tasteIndex.entityCount >= 0);
+
+const catalog = await json("data/catalog.json");
+const research = await json("data/research.json");
+const tasteIndex = await json("data/taste-index.json");
+assert.equal(research.artifact_type, "product_research_report_v1");
+assert.equal(tasteIndex.artifact_type, "taste_index_v1");
+assert.equal(research.product_snapshot.snapshot_id, catalog.productSnapshotId);
+assert.equal(tasteIndex.product_snapshot.snapshot_id, catalog.productSnapshotId);
+assert.equal(research.product_snapshot.sha256, catalog.databaseSha256);
+assert.equal(tasteIndex.product_snapshot.content_sha256, catalog.databaseSha256);
+await assert.rejects(
+  access(join(distDirectory, "data", "product-local.jsonl")),
+  /ENOENT/,
+);
 
 for (const view of views) {
   const descriptor = await json(`api/v1/views/${view}.json`);

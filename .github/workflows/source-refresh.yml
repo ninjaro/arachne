@@ -92,16 +92,17 @@ jobs:
             --source-root "${GITHUB_WORKSPACE}" \
             --runner-temp "${RUNNER_TEMP}" \
             --output "${RUNNER_TEMP}/arachne-config.json"
-          python3 -c 'import json,os; p=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json"))["paths"]; print("ARACHNE_ARTIFACTS=" + p["artifact_store"]); print("ARACHNE_GRAPHS=" + p["graph_store"])' >> "${GITHUB_ENV}"
+          python3 -c 'import json,os; p=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json"))["paths"]; print("ARACHNE_ARTIFACTS=" + p["artifact_store"])' >> "${GITHUB_ENV}"
           python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["PRODUCT_CONTROL_INPUT"]).resolve(strict=True); value.relative_to(root); print("PRODUCT_CONTROL=" + str(value))' >> "${GITHUB_ENV}"
           echo "REFRESH_ID=wikidata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
           echo "FETCH_PLAN=${RUNNER_TEMP}/wikidata-fetch-plan.json" >> "${GITHUB_ENV}"
           echo "FETCH_CONTROLS=${RUNNER_TEMP}/wikidata-fetch-controls" >> "${GITHUB_ENV}"
           echo "FETCH_REQUEST=${RUNNER_TEMP}/wikidata-fetch-controls/wikidata-official-dump.json" >> "${GITHUB_ENV}"
           echo "SOURCE_CONTROL=${RUNNER_TEMP}/wikidata-source.acquired.json" >> "${GITHUB_ENV}"
-          echo "EXTERNAL_GRAPH=${RUNNER_TEMP}/wikidata-external-graph.json" >> "${GITHUB_ENV}"
-          echo "IMAGE_HINTS=${RUNNER_TEMP}/wikidata-image-hints.json" >> "${GITHUB_ENV}"
-          echo "HPC_REPORT=${RUNNER_TEMP}/wikidata-hpc-report.json" >> "${GITHUB_ENV}"
+          echo "RESULT_DIRECTORY=${RUNNER_TEMP}/wikidata-results" >> "${GITHUB_ENV}"
+          echo "EXTERNAL_GRAPH=${RUNNER_TEMP}/wikidata-results/wikidata-external-graph.json" >> "${GITHUB_ENV}"
+          echo "IMAGE_HINTS=${RUNNER_TEMP}/wikidata-results/wikidata-image-hints.json" >> "${GITHUB_ENV}"
+          echo "HPC_REPORT=${RUNNER_TEMP}/wikidata-results/wikidata-hpc-report.json" >> "${GITHUB_ENV}"
       - name: Declare and translate official bulk acquisition
         if: steps.cadence.outputs.due == 'true'
         env:
@@ -112,10 +113,8 @@ jobs:
             --plan-id "${REFRESH_ID}" \
             --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --output "${FETCH_PLAN}"
-          python3 scripts/arachne_ops.py \
+          "${GITHUB_WORKSPACE}/build/arachne" fetch plan \
             --config "${RUNNER_TEMP}/arachne-config.json" \
-            --binary "${GITHUB_WORKSPACE}/build/arachne" \
-            fetch-plan-translate \
             --plan "${FETCH_PLAN}" \
             --output-directory "${FETCH_CONTROLS}"
       - name: Acquire raw dump through Pheidippides
@@ -123,10 +122,8 @@ jobs:
         if: steps.cadence.outputs.due == 'true'
         continue-on-error: true
         run: |
-          python3 scripts/arachne_ops.py \
+          "${GITHUB_WORKSPACE}/build/arachne" fetch \
             --config "${RUNNER_TEMP}/arachne-config.json" \
-            --binary "${GITHUB_WORKSPACE}/build/arachne" \
-            fetch \
             --request "${FETCH_REQUEST}" \
             --output-control "${SOURCE_CONTROL}"
       - name: Stream source graph and recompute candidate snapshot
@@ -135,30 +132,22 @@ jobs:
         continue-on-error: true
         run: |
           python3 -u hpc/wikidata/build_external_graph.py \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
             --source-control "${SOURCE_CONTROL}" \
-            --artifact-store "${ARACHNE_ARTIFACTS}" \
             --product-snapshot-control "${PRODUCT_CONTROL}" \
-            --graph-store "${ARACHNE_GRAPHS}" \
-            --config hpc/wikidata/config.json \
-            --candidate-policy-config "${RUNNER_TEMP}/arachne-config.json" \
-            --output "${EXTERNAL_GRAPH}" \
-            --image-hints-output "${IMAGE_HINTS}" \
+            --output-directory "${RESULT_DIRECTORY}" \
             --work-directory "${RUNNER_TEMP}/wikidata-work" \
-            --report "${HPC_REPORT}" \
+            --wikidata-config hpc/wikidata/config.json \
             --decompress-threads "$(nproc)"
           mkdir -p "${ARACHNE_ARTIFACTS}/candidate-plans"
-          python3 scripts/arachne_ops.py \
+          "${GITHUB_WORKSPACE}/build/arachne" candidate plan \
             --config "${RUNNER_TEMP}/arachne-config.json" \
-            --binary "${GITHUB_WORKSPACE}/build/arachne" \
-            candidate-plan \
             --external-graph "${EXTERNAL_GRAPH}" \
             --product-snapshot "${PRODUCT_CONTROL}" \
             --output-artifact "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.json" \
             --output-control "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.control.json"
-          python3 scripts/arachne_ops.py \
+          "${GITHUB_WORKSPACE}/build/arachne" candidate rebuild \
             --config "${RUNNER_TEMP}/arachne-config.json" \
-            --binary "${GITHUB_WORKSPACE}/build/arachne" \
-            candidate-rebuild \
             --plan-control "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.control.json" \
             --run-id "candidate-${REFRESH_ID}"
       - name: Preserve source and algorithm diagnostics
@@ -177,10 +166,14 @@ jobs:
           steps.cadence.outputs.due == 'true' &&
           (steps.acquire.outcome != 'success' || steps.rebuild.outcome != 'success')
         run: exit 1
-      - name: Record success and remove disposable source bytes
+      - name: Stage reviewed image hints and remove disposable source bytes
         if: steps.cadence.outputs.due == 'true'
         run: |
           python3 -c 'import json,os; d=json.load(open(os.environ["SOURCE_CONTROL"])); print("SOURCE_ID=" + d["artifact_id"]); print("SOURCE_SHA=" + d["artifact"]["sha256"])' >> "${GITHUB_ENV}"
+          python3 viewer/scripts/stage_image_hints.py \
+            "${IMAGE_HINTS}" \
+            "${GITHUB_WORKSPACE}/.arachne-state/derived/wikidata-image-hints.json" \
+            --product-snapshot-control "${PRODUCT_CONTROL}"
           python3 scripts/discard_acquired_artifact.py \
             --fetch-request "${FETCH_REQUEST}" \
             --acquired-control "${SOURCE_CONTROL}" \
@@ -205,4 +198,4 @@ jobs:
             --base "${STATE_BASE_BRANCH}" \
             --branch "arachne/wikidata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --title "Arachne Wikidata bulk candidate refresh" \
-            --body "Full bulk-first candidate recomputation from ${SOURCE_ID}. Review transport evidence, HPC report, plan, run manifest, and structural validation before merge."
+            --body "Full bulk-first candidate recomputation from ${SOURCE_ID}. Review transport evidence, HPC report, plan, run manifest, derived image hints, and structural validation before merge."

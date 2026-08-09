@@ -58,6 +58,7 @@ falls back to stale bytes.
 | Product inbox | Penelope | Strict JSON files at repository `inbox/`; successful files are removed only after commit and rejected files move to `inbox/rejected/` |
 | Product SQLite | Penelope | `database/art-islands.sqlite`; schema v6 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, and ingest issues, with no disposable merge-hint state |
 | Merge-hint projection | Ariadne | `.arachne/tmp/merge-hints.sqlite` is disposable generation state; `database/merge-hints-review.json` is the small hash-bound review projection; `database/merge-hint-decisions.json` durably preserves ignored pairs |
+| Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
 
@@ -157,10 +158,21 @@ only from inside reviewed state, verifies its product snapshot identity, and
 then includes it as a disposable, content-addressed viewer asset. It remains
 separate from the catalog and is never required to publish a product snapshot.
 
+Ariadne also owns the shared product research and taste projection semantics.
+The native CLI can write a physical report, inspect a work or agent, or produce
+the sparse taste index over the exact export selected by a verified product
+snapshot control. Viewer publication invokes those same builders, excludes any
+stale catalog/research/taste files from compiled assets, and injects fresh
+snapshot-bound artifacts before the immutable bundle is content-addressed.
+Quality-gap scoring and global feature weighting therefore have no separate
+Python or React implementation.
+
 ## Remote state and concurrency
 
-Official GitHub operations use a separate protected state repository for
-transport configuration, artifact custody, and generic operational state.
+Official GitHub operations may use a protected `.arachne-state` checkout or
+worktree of `ninjaro/arachne` for transport configuration, artifact custody, and
+generic operational state; this is an isolated checkout of the same public
+repository, not a separate unknown or private repository.
 Product issue intake proposes only a validated repository inbox file; product
 and candidate graph changes remain reviewable pull requests. Canonical SQLite
 paths are Git LFS objects, not ordinary Git blobs. Caches and Actions artifacts

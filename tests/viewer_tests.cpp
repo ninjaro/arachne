@@ -70,6 +70,15 @@ nlohmann::json product_export() {
               { "work_id", "work-b" },
               { "concept_id", "concept-a" },
               { "relation_type", "associated_with" } } } },
+        { "work_relations",
+          { { { "id", 2 },
+              { "subject_work_id", "work-b" },
+              { "object_work_id", "work-a" },
+              { "relation_type", "influenced_by" } },
+            { { "id", 1 },
+              { "subject_work_id", "work-a" },
+              { "object_work_id", "work-b" },
+              { "relation_type", "inspired" } } } },
         { "sources",
           { { { "id", 1 },
               { "source_type", "book" },
@@ -365,6 +374,16 @@ TEST(AriadneViewer, CatalogPublishesFirstClassAgentsWithIdentifiers) {
     EXPECT_EQ(contributor.at("role"), "director");
     ASSERT_EQ(first_work.at("identifiers").size(), 1U);
     EXPECT_EQ(first_work.at("identifiers").at(0).at("value"), "Q123");
+
+    ASSERT_EQ(catalog.at("workRelations").size(), 2U);
+    const auto& first_relation = catalog.at("workRelations").at(0);
+    EXPECT_EQ(first_relation.at("subjectId"), "work-a");
+    EXPECT_EQ(first_relation.at("objectId"), "work-b");
+    EXPECT_EQ(first_relation.at("relationType"), "inspired");
+    const auto& second_relation = catalog.at("workRelations").at(1);
+    EXPECT_EQ(second_relation.at("subjectId"), "work-b");
+    EXPECT_EQ(second_relation.at("objectId"), "work-a");
+    EXPECT_EQ(second_relation.at("relationType"), "influenced_by");
 }
 
 TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
@@ -389,13 +408,36 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     std::filesystem::create_directories(dist / "data");
     {
         std::ofstream(dist / "index.html") << "<div id=\"root\"></div>\n";
-        std::ofstream(dist / "assets" / "app.js")
-            << "console.log('viewer');\n";
+        std::ofstream(dist / "assets" / "app.js") << "console.log('viewer');\n";
         std::ofstream(dist / "assets" / "app.css")
             << ".app { display: block; }\n";
         std::ofstream(dist / "data" / "wikidata-image-hints.json")
             << "{\"artifact_type\":\"wikidata_image_hints_v1\"}\n";
+        std::ofstream(dist / "data" / "research.json") << "{\"stale\":true}\n";
+        std::ofstream(dist / "data" / "taste-index.json")
+            << "{\"stale\":true}\n";
+        std::ofstream(dist / "data" / "product-local.jsonl")
+            << "{\"table\":\"should-never-publish\"}\n";
     }
+
+    const std::string product_content_sha256(64U, 'a');
+    const nlohmann::ordered_json research {
+        { "artifact_type", "product_research_report_v1" },
+        { "format_version", 1 },
+        { "product_snapshot",
+          { { "snapshot_id", "product-1" },
+            { "sha256", product_content_sha256 } } },
+        { "items", nlohmann::json::array() },
+    };
+    const nlohmann::ordered_json taste_index {
+        { "artifact_type", "taste_index_v1" },
+        { "format_version", 1 },
+        { "product_snapshot",
+          { { "snapshot_id", "product-1" },
+            { "content_sha256", product_content_sha256 } } },
+        { "features", nlohmann::json::object() },
+        { "entities", nlohmann::json::object() },
+    };
 
     auto legacy_catalog = catalog;
     legacy_catalog.erase("agents");
@@ -420,13 +462,26 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
         std::invalid_argument
     );
 
+    auto stale_taste_index = taste_index;
+    stale_taste_index["product_snapshot"]["content_sha256"]
+        = std::string(64U, 'b');
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::build_site(
+            projection, catalog, template_root,
+            temporary.path() / "invalid-site-stale-taste",
+            "2026-07-18T05:45:00Z", research, stale_taste_index,
+            product_content_sha256
+        )),
+        std::invalid_argument
+    );
+
     const auto first = arachne::ariadne::viewer_builder::build_site(
         projection, catalog, template_root, temporary.path() / "site",
-        "2026-07-18T05:45:00Z"
+        "2026-07-18T05:45:00Z", research, taste_index, product_content_sha256
     );
     const auto second = arachne::ariadne::viewer_builder::build_site(
         projection, catalog, template_root, temporary.path() / "site",
-        "2026-07-18T05:45:00Z"
+        "2026-07-18T05:45:00Z", research, taste_index, product_content_sha256
     );
     EXPECT_EQ(first, second);
     EXPECT_EQ(first.at("product_snapshot_id"), "product-1");
@@ -435,21 +490,38 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     const auto bundle = temporary.path() / "site"
         / first.at("bundle").at("storage_ref").get<std::string>();
     EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "index.html"));
-    EXPECT_TRUE(
-        std::filesystem::is_regular_file(bundle / "assets" / "app.js")
-    );
+    EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "assets" / "app.js"));
     EXPECT_TRUE(
         std::filesystem::is_regular_file(bundle / "assets" / "app.css")
     );
     EXPECT_TRUE(
         std::filesystem::is_regular_file(bundle / "data" / "catalog.json")
     );
-    EXPECT_TRUE(std::filesystem::is_regular_file(
-        bundle / "data" / "wikidata-image-hints.json"
-    ));
-    EXPECT_FALSE(
-        std::filesystem::exists(bundle / "data" / "projection.json")
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(bundle / "data" / "research.json")
     );
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(bundle / "data" / "taste-index.json")
+    );
+    EXPECT_EQ(
+        nlohmann::json::parse(std::ifstream(bundle / "data" / "research.json")),
+        research
+    );
+    EXPECT_EQ(
+        nlohmann::json::parse(
+            std::ifstream(bundle / "data" / "taste-index.json")
+        ),
+        taste_index
+    );
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(
+            bundle / "data" / "wikidata-image-hints.json"
+        )
+    );
+    EXPECT_FALSE(
+        std::filesystem::exists(bundle / "data" / "product-local.jsonl")
+    );
+    EXPECT_FALSE(std::filesystem::exists(bundle / "data" / "projection.json"));
     EXPECT_TRUE(std::filesystem::is_regular_file(bundle / "build-info.json"));
 
     {
@@ -459,7 +531,8 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
     EXPECT_THROW(
         static_cast<void>(arachne::ariadne::viewer_builder::build_site(
             projection, catalog, template_root, temporary.path() / "site",
-            "2026-07-18T05:45:00Z"
+            "2026-07-18T05:45:00Z", research, taste_index,
+            product_content_sha256
         )),
         std::runtime_error
     );

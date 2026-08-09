@@ -267,8 +267,8 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.config = self.root / "worker-config.json"
-        self.config.write_text(
+        self.wikidata_config = self.root / "worker-config.json"
+        self.wikidata_config.write_text(
             json.dumps(
                 {
                     "format_version": 1,
@@ -284,6 +284,10 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             json.dumps(
                 {
                     "format_version": 1,
+                    "paths": {
+                        "artifact_store": str(self.artifacts),
+                        "graph_store": str(self.graphs),
+                    },
                     "candidate_rebuild": {
                         "sources": {
                             "wikidata": {
@@ -296,9 +300,10 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.output = self.root / "results" / "external-graph.json"
-        self.image_hints_output = self.root / "results" / "image-hints.json"
-        self.report = self.root / "results" / "run-report.json"
+        self.results = self.root / "results"
+        self.output = self.results / "wikidata-external-graph.json"
+        self.image_hints_output = self.results / "wikidata-image-hints.json"
+        self.report = self.results / "wikidata-hpc-report.json"
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -308,26 +313,18 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             [
                 sys.executable,
                 str(WORKER),
+                "--config",
+                str(self.candidate_policy),
                 "--source-control",
                 str(self.source_control),
-                "--artifact-store",
-                str(self.artifacts),
                 "--product-snapshot-control",
                 str(self.product_control),
-                "--graph-store",
-                str(self.graphs),
-                "--config",
-                str(self.config),
-                "--candidate-policy-config",
-                str(self.candidate_policy),
-                "--output",
-                str(self.output),
-                "--image-hints-output",
-                str(self.image_hints_output),
+                "--output-directory",
+                str(self.results),
                 "--work-directory",
                 str(self.work),
-                "--report",
-                str(self.report),
+                "--wikidata-config",
+                str(self.wikidata_config),
                 *extra,
             ],
             check=False,
@@ -478,6 +475,47 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                 ],
             )
 
+    def test_report_write_failure_retains_work_database_for_recovery(self) -> None:
+        self.report.mkdir(parents=True)
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.output.is_file())
+        self.assertTrue(self.image_hints_output.is_file())
+        databases = list(self.work.glob("*.sqlite3"))
+        self.assertEqual(len(databases), 1)
+        with sqlite3.connect(databases[0]) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT id FROM covered_qids ORDER BY id"
+                ).fetchall(),
+                [("Q1",)],
+            )
+
+    def test_algorithm_failure_retains_work_database_for_recovery(self) -> None:
+        self.dump.write_bytes(bz2.compress(b"not a Wikidata JSON array\n"))
+        control = json.loads(self.source_control.read_text(encoding="utf-8"))
+        control["artifact"]["sha256"] = digest(self.dump)
+        control["artifact"]["byte_length"] = self.dump.stat().st_size
+        self.source_control.write_text(json.dumps(control), encoding="utf-8")
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.report.is_file())
+        self.assertEqual(
+            json.loads(self.report.read_text(encoding="utf-8"))["status"],
+            "failed",
+        )
+        databases = list(self.work.glob("*.sqlite3"))
+        self.assertEqual(len(databases), 1)
+        with sqlite3.connect(databases[0]) as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA integrity_check").fetchone()[0],
+                "ok",
+            )
+
     def test_tampered_source_fails_before_algorithm_or_output(self) -> None:
         control = json.loads(self.source_control.read_text(encoding="utf-8"))
         control["artifact"]["sha256"] = "0" * 64
@@ -521,9 +559,13 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         self.assertEqual(report["algorithm"]["status"], "not_started")
 
     def test_unknown_worker_configuration_version_fails_closed(self) -> None:
-        configuration = json.loads(self.config.read_text(encoding="utf-8"))
+        configuration = json.loads(
+            self.wikidata_config.read_text(encoding="utf-8")
+        )
         configuration["format_version"] = 2
-        self.config.write_text(json.dumps(configuration), encoding="utf-8")
+        self.wikidata_config.write_text(
+            json.dumps(configuration), encoding="utf-8"
+        )
 
         result = self.run_worker()
 

@@ -2,10 +2,11 @@ import type { BrowseFilters, BrowseSort } from "./browse";
 
 export const VIEW_NAMES = [
   "browse",
-  "recommendations",
   "evolution",
-  "islands",
+  "taste",
   "research",
+  "recommendations",
+  "islands",
 ] as const;
 
 export type ViewName = (typeof VIEW_NAMES)[number];
@@ -25,6 +26,11 @@ export interface ViewerLocationState {
 export interface BrowseLocationDefaults {
   pageSize: number;
   pageSizeOptions: readonly number[];
+}
+
+export interface EntityPermalink {
+  family: "work" | "agent";
+  id: string;
 }
 
 const SORTS: readonly BrowseSort[] = ["date", "label", "medium", "relevance"];
@@ -51,27 +57,71 @@ function viewFromPathname(pathname: string, baseUrl: string): ViewName {
     : "browse";
 }
 
+export function readEntityPermalink(
+  pathname: string,
+  baseUrl: string,
+  hash = "",
+): EntityPermalink | null {
+  const hashMatch = /^#\/(work|agent)\/([^/]+)\/?$/u.exec(hash);
+  if (hashMatch) {
+    try {
+      const id = decodeURIComponent(hashMatch[2]!);
+      return id && !id.includes("/")
+        ? { family: hashMatch[1] as EntityPermalink["family"], id }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  const base = normalizeBaseUrl(baseUrl);
+  const relative = pathname.startsWith(base)
+    ? pathname.slice(base.length)
+    : pathname.replace(/^\/+/, "");
+  const [family, encodedId, ...rest] = relative.split("/").filter(Boolean);
+  if ((family !== "work" && family !== "agent") || !encodedId || rest.length) {
+    return null;
+  }
+  try {
+    const id = decodeURIComponent(encodedId);
+    return id && !id.includes("/") ? { family, id } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function buildEntityPermalink(
+  entity: EntityPermalink,
+  baseUrl: string,
+): string {
+  return `${normalizeBaseUrl(baseUrl)}browse/#/${entity.family}/${encodeURIComponent(entity.id)}`;
+}
+
 export function readViewerLocation(
   location: Pick<Location, "pathname" | "search">,
   baseUrl: string,
   defaults: BrowseLocationDefaults,
 ): ViewerLocationState {
   const params = new URLSearchParams(location.search);
-  const requestedSort = params.get("sort") as BrowseSort | null;
-  const requestedPageSize = positiveInteger(params.get("pageSize"), defaults.pageSize);
+  const view = viewFromPathname(location.pathname, baseUrl);
+  const browseParams = view === "browse" ? params : new URLSearchParams();
+  const requestedSort = browseParams.get("sort") as BrowseSort | null;
+  const requestedPageSize = positiveInteger(
+    browseParams.get("pageSize"),
+    defaults.pageSize,
+  );
 
   return {
-    view: viewFromPathname(location.pathname, baseUrl),
+    view,
     browse: {
       filters: {
-        query: params.get("q") ?? "",
-        minimumYear: params.get("from") ?? "",
-        maximumYear: params.get("to") ?? "",
-        medium: params.get("medium") ?? "",
-        conceptId: params.get("concept") ?? "",
+        query: browseParams.get("q") ?? "",
+        minimumYear: browseParams.get("from") ?? "",
+        maximumYear: browseParams.get("to") ?? "",
+        medium: browseParams.get("medium") ?? "",
+        conceptId: browseParams.get("concept") ?? "",
       },
       sort: requestedSort && SORTS.includes(requestedSort) ? requestedSort : "date",
-      page: positiveInteger(params.get("page"), 1),
+      page: positiveInteger(browseParams.get("page"), 1),
       pageSize: defaults.pageSizeOptions.includes(requestedPageSize)
         ? requestedPageSize
         : defaults.pageSize,

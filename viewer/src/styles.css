@@ -90,7 +90,46 @@ a {
 
 .view-tabs {
   display: flex;
+  align-items: center;
   gap: 0.3rem;
+}
+
+.labs-menu {
+  position: relative;
+}
+
+.labs-menu > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.labs-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.labs-menu > div {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  display: grid;
+  min-width: 12rem;
+  padding: 0.35rem;
+  background: #151a1c;
+  border: 1px solid #3b4549;
+  border-radius: 0.5rem;
+  box-shadow: 0 0.8rem 2rem rgba(0, 0, 0, 0.4);
+}
+
+.labs-menu > div a {
+  padding: 0.5rem 0.6rem;
+  color: #c2cbcd;
+  text-decoration: none;
+  border-radius: 0.35rem;
+}
+
+.labs-menu > div a:hover,
+.labs-menu > div a.active {
+  background: #273034;
 }
 
 .tab.active {
@@ -494,9 +533,16 @@ tbody tr:focus {
 }
 
 .entity-window-title strong {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.entity-window-title a {
+  color: #9ecac3;
+  font-size: 0.72rem;
+  text-decoration: none;
 }
 
 .entity-window-title button {
@@ -511,6 +557,20 @@ tbody tr:focus {
 
 .entity-window-body section {
   margin-top: 1rem;
+}
+
+.entity-window-context {
+  margin-bottom: 0.85rem;
+  padding: 0.65rem 0.75rem;
+  background: rgba(92, 137, 128, 0.1);
+  border-left: 3px solid #699b91;
+  color: #b8c5c2;
+  font-size: 0.78rem;
+}
+
+.entity-window-context ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1rem;
 }
 
 .entity-window-body h3 {
@@ -690,6 +750,34 @@ tbody tr:focus {
 .research-list {
   display: grid;
   gap: 0.7rem;
+}
+
+.research-group {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.research-group > h2 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0.8rem 0 0;
+  color: #b8c6c8;
+  font-size: 0.95rem;
+}
+
+.research-group > h2 span {
+  color: #7f8b8e;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.research-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
 }
 
 .research-card {

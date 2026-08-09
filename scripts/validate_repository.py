@@ -196,12 +196,20 @@ def check_repository_surface(root: Path) -> None:
         "source refresh cadence gate": "source_refresh_gate.py",
         "Wikidata bulk plan adapter": "wikidata_bulk_fetch_plan.py",
         "product batch materializer": "materialize_product_batch.py",
+        "local product snapshot materializer": (
+            "materialize_local_product_snapshot.py"
+        ),
     }
     for label, name in required_scripts.items():
         path = root / "scripts" / name
         require(path.is_file(), f"missing {label}: {path}")
     worker = root / "hpc" / "wikidata" / "build_external_graph.py"
     require(worker.is_file(), f"missing streaming HPC worker: {worker}")
+    hpc_entrypoint = root / "hpc" / "wikidata" / "run"
+    require(
+        hpc_entrypoint.is_file() and hpc_entrypoint.stat().st_mode & 0o111,
+        f"missing executable Wikidata HPC entrypoint: {hpc_entrypoint}",
+    )
     forbidden_legacy_paths = (
         "scripts/analyze_legacy_corpus.py",
         "scripts/build_canonical_merge_plan.py",

@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -43,6 +45,135 @@ def projection_id(namespace: str, value: Any) -> str:
     raise ValueError(
         f"{namespace} identifier must be a positive integer or non-empty string"
     )
+
+
+def sql_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def sqlite_sidecars(database: Path) -> tuple[Path, Path]:
+    return (Path(f"{database}-journal"), Path(f"{database}-wal"))
+
+
+def require_stable_database_file(database: Path) -> None:
+    if not database.is_file():
+        raise RuntimeError(f"product database is not a regular file: {database}")
+    sidecars = [path for path in sqlite_sidecars(database) if path.exists()]
+    if sidecars:
+        names = ", ".join(path.name for path in sidecars)
+        raise RuntimeError(
+            "local product export requires checkpointed SQLite bytes; "
+            f"found sidecar file(s): {names}"
+        )
+
+
+def export_local_product_jsonl(database: Path, output: Path) -> int:
+    """Write a generic local read-only export for the native projection CLI.
+
+    This performs no research, quality, or feature semantics. The leading
+    identity record lets the native command reject an export from different
+    SQLite bytes.
+    """
+    database = database.resolve(strict=True)
+    output = output.expanduser().absolute()
+    if output.resolve(strict=False) == database:
+        raise RuntimeError("product export must not replace the source database")
+    require_stable_database_file(database)
+    before = database_sha256(database)
+    connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    temporary_path: Path | None = None
+    record_count = 0
+    try:
+        connection.execute("BEGIN")
+        integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"database quick_check failed: {integrity}")
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 6:
+            raise RuntimeError("local product export requires schema version 6")
+        tables = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        ]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            dir=output.parent,
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            identity = {
+                "table": "__local_product_identity",
+                "row": {
+                    "database_sha256": before,
+                    "snapshot_id": "local-" + before[:16],
+                },
+            }
+            stream.write(
+                json.dumps(
+                    identity,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            for table in tables:
+                quoted_table = sql_identifier(table)
+                columns = list(
+                    connection.execute(f"PRAGMA table_info({quoted_table})")
+                )
+                primary = [
+                    str(row[1])
+                    for row in sorted(columns, key=lambda row: int(row[5]))
+                    if int(row[5]) > 0
+                ]
+                if not primary:
+                    raise RuntimeError(
+                        f"local product table has no stable primary key: {table}"
+                    )
+                order = ", ".join(sql_identifier(column) for column in primary)
+                query = f"SELECT * FROM {quoted_table} ORDER BY {order}"
+                for row in connection.execute(query):
+                    record = {"table": table, "row": dict(row)}
+                    stream.write(
+                        json.dumps(
+                            record,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+                    record_count += 1
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+            temporary_path = None
+        raise
+    finally:
+        connection.close()
+    try:
+        require_stable_database_file(database)
+        if database_sha256(database) != before:
+            raise RuntimeError("product database changed during local export")
+        if temporary_path is None:
+            raise RuntimeError("product export staging file was not created")
+        os.replace(temporary_path, output)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return record_count
 
 
 def build_catalog(database: Path) -> dict[str, Any]:
@@ -348,7 +479,22 @@ def parser() -> argparse.ArgumentParser:
         description="Build the compact static Arachne web catalog from SQLite."
     )
     result.add_argument("database", type=Path)
-    result.add_argument("output", type=Path)
+    result.add_argument(
+        "output",
+        nargs="?",
+        type=Path,
+        help="viewer catalog output (omitted with --export-only)",
+    )
+    result.add_argument(
+        "--product-export",
+        type=Path,
+        help="also write a generic JSONL input for native product projections",
+    )
+    result.add_argument(
+        "--export-only",
+        action="store_true",
+        help="write only --product-export and skip the viewer catalog",
+    )
     result.add_argument("--pretty", action="store_true")
     return result
 
@@ -356,8 +502,33 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     arguments = parser().parse_args()
     database = arguments.database.resolve(strict=True)
-    output = arguments.output.resolve(strict=False)
+    product_export = (
+        arguments.product_export.expanduser().absolute()
+        if arguments.product_export
+        else None
+    )
+    if arguments.export_only:
+        if product_export is None:
+            raise SystemExit("--export-only requires --product-export")
+        exported_rows = export_local_product_jsonl(database, product_export)
+        print(f"Wrote {product_export}: {exported_rows} product rows exported")
+        return 0
+    if arguments.output is None:
+        raise SystemExit("viewer catalog output is required without --export-only")
+    output = arguments.output.expanduser().absolute()
+    if output.resolve(strict=False) == database:
+        raise SystemExit("viewer catalog output must not replace the source database")
+    if (
+        product_export is not None
+        and product_export.resolve(strict=False) == output.resolve(strict=False)
+    ):
+        raise SystemExit("viewer catalog and product export must use different paths")
     catalog = build_catalog(database)
+    exported_rows = (
+        export_local_product_jsonl(database, product_export)
+        if product_export is not None
+        else None
+    )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     if arguments.pretty:
@@ -373,6 +544,11 @@ def main() -> int:
         f"Wrote {output}: {len(catalog['works'])} works, "
         f"{len(catalog['agents'])} agents, "
         f"{output.stat().st_size / 1024 / 1024:.2f} MiB"
+        + (
+            f", {exported_rows} product rows exported"
+            if exported_rows is not None
+            else ""
+        )
     )
     return 0
 

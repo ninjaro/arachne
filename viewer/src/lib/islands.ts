@@ -8,6 +8,7 @@ import type {
 import type { EdgeFactor, FeatureIndex } from "./features";
 import { similarityBetween, similarityCandidates } from "./features";
 import { scoreRecommendations } from "./recommendations";
+import type { TasteIndex } from "./taste";
 
 export type IslandNodeState = "liked" | "disliked" | "recommended";
 
@@ -51,6 +52,7 @@ export function buildIslandsGraph(
   index: FeatureIndex,
   ratings: Ratings,
   settings: Settings,
+  tasteIndex: TasteIndex | null = null,
 ): IslandsGraph {
   const config: IslandsSettings = settings.islands;
   const nodes: IslandNode[] = [];
@@ -61,13 +63,20 @@ export function buildIslandsGraph(
     else if (rating === -1) nodes.push({ id: work.id, state: "disliked" });
   }
 
-  const recommended = scoreRecommendations(domain, index, ratings, {
+  const recommendationSettings = {
     ...settings,
     recommendation: {
       ...settings.recommendation,
       limit: Math.max(1, Math.floor(config.maxRecommendationNodes)),
     },
-  });
+  };
+  const recommended = scoreRecommendations(
+    domain,
+    index,
+    ratings,
+    recommendationSettings,
+    tasteIndex,
+  );
   for (const result of recommended) {
     nodes.push({
       id: result.work.id,

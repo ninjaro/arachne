@@ -24,6 +24,9 @@ current Arachne product database.
 From `viewer/`:
 
 ```sh
+cd ..
+scripts/build.sh
+cd viewer
 npm run data
 npm run dev
 ```
@@ -31,23 +34,83 @@ npm run dev
 Run the viewer model tests with `npm test`; `npm run test:watch` keeps them open
 during development.
 
-The data command reads three explicit inputs:
+Paths passed to the native executable are repository-relative, even though npm
+runs from `viewer/`. `ARACHNE_BINARY` can select a non-default CMake output
+(the default is `../build/arachne`). Local data generation needs no graph store
+or operations configuration: the catalog script writes a generic working export to
+`../.arachne/tmp/viewer-product-local.jsonl` from the canonical database, and
+the native commands require its embedded database identity to match the current
+SQLite bytes before applying any research or taste semantics. The export stays
+outside `public/` and cannot become part of a browser or static-site build.
+
+The data command reads four explicit inputs:
 
 - `../database/art-islands.sqlite`, the schema-v6 product database;
+- the generic local JSONL produced from those exact SQLite bytes;
 - `../database/merge-hints-review.json`, the disposable bounded hint
   projection; and
 - `../database/merge-hint-decisions.json`, the durable ignored-pair decisions.
 
-It then writes the generated, ignored files `public/data/catalog.json` and
-`public/data/research.json`. Ingest issues come from the product database, while
-merge-hint content comes only from the review artifact. The review's source
-identity must match both the product bytes used for the catalog and the exact
-decision artifact: its `productSha256` must match the catalog database hash,
-and its `decisionsSha256` and `ignoredPairCount` must match the decision file's
-byte hash and ignored-pair count. A missing or stale review or decision artifact
-is an error rather than a database fallback.
+It writes the generated, ignored files `public/data/catalog.json`,
+`public/data/research.json`, and `public/data/taste-index.json`. The native
+`product research` command is the only research-semantics implementation: it
+combines quality gaps, ingest issues, and merge hints into a readable,
+snapshot-bound physical JSON report. The npm workflow uses its compact output
+for static delivery; direct CLI output remains readable by default. `product
+taste-index` precomputes sparse
+work vectors, agent-to-concept affinities, norms, feature metadata, and postings
+so React does not scan the full catalog to derive global weights. The review's
+source identity must match both the product snapshot and the exact decision
+artifact. A missing or stale review, decision, snapshot, or export is an error
+rather than a fallback.
+
+Both projections can also be generated or inspected directly over SSH:
+
+```sh
+# Reviewed snapshot mode:
+build/arachne product research \
+  --config config/arachne.local.json \
+  --product-snapshot graphs/product/active.json \
+  --output research.json
+build/arachne product taste-index \
+  --config config/arachne.local.json \
+  --product-snapshot graphs/product/active.json \
+  --output taste-index.json --compact
+build/arachne product entity \
+  --config config/arachne.local.json \
+  --product-snapshot graphs/product/active.json \
+  --id work-001234
+
+# Local canonical-database mode (after npm run data:catalog):
+build/arachne product taste-index \
+  --database database/art-islands.sqlite \
+  --product-export .arachne/tmp/viewer-product-local.jsonl \
+  --output viewer/public/data/taste-index.json
+```
 
 Open the Vite URL printed by the command, normally `http://localhost:5173/`.
+
+### Local Taste and portable profiles
+
+Browse searches and rates both works and first-class agents; its `All` mode
+keeps the two families in separate tables. Taste stores explicit `+1`/`-1`
+ratings for works, agents, and concepts only in `arachne-viewer-ratings-v2` in
+the browser. The previous `arachne-viewer-ratings-v1` value map is migrated as
+work ratings. Reset, JSON import, and JSON export are local operations; imports
+report records missing from the active snapshot rather than failing the whole
+profile.
+
+Portable rating exports include a format version, product snapshot, entity ID,
+family, and value. The separate interest-profile export contains signed,
+explainable agent and concept signals for possible future CLI mining; exporting
+it does not schedule work. `Load demo profile` opens a small static, read-only
+example and never merges it into the browser's real ratings.
+
+Inferred concept preferences are a disposable projection, not an explicit
+rating. The frontend combines the user's small rating set with the
+snapshot-bound `taste_index_v1`; it does not rebuild document frequencies or
+agent distributions. Explicit and inferred values remain visible independently,
+including when they disagree.
 
 ### Optional local Wikidata image hints
 
@@ -97,15 +160,20 @@ The static site is written to `viewer/dist/`.
 
 `npm run build:assets` performs only type-checking and the Vite asset build. It
 exists for the protected publication workflow, where the C++ site builder
-injects the catalog from a verified product snapshot and then content-addresses
-the complete bundle. A normal local build should continue to use `npm run
-build`, which also generates the JSON-first static API from the local catalog.
+injects the catalog and freshly derives both research and taste artifacts from
+the selected verified product snapshot. It excludes any pre-existing copies of
+those three files from compiled assets, preventing stale local data from entering
+a bundle, and then content-addresses the complete result. A normal local build
+should continue to use `npm run build`, which also generates the JSON-first
+static API from the local catalog.
 
-Publication may receive an `image_hints_artifact` path relative to the reviewed
-state repository. When supplied, the workflow verifies all three product
-identity fields against the selected product snapshot control, stages the file
-before `build:assets`, and includes it in the immutable site bundle. Omitting the
-input publishes the same viewer without local hints.
+Publication looks for `derived/wikidata-image-hints.json` in the reviewed state
+repository and may receive another relative `image_hints_artifact` path as an
+override. When a file is selected, the workflow verifies all three product
+identity fields against the selected product snapshot control, stages it before
+`build:assets`, and includes it in the immutable site bundle. If neither a
+reviewed default nor an override exists, it publishes the same viewer without
+local hints.
 
 ## Generated data
 
@@ -116,8 +184,8 @@ canonical SQLite database and is about 27 MiB for the current corpus, including
 its first-class `agents` collection. Each contributor retains its agent identity
 fields and resolves by `id` to that collection.
 
-The SQLite database remains the source of truth. `catalog.json` and
-`research.json` are disposable viewer projections. The optional
+The SQLite database remains the source of truth. `catalog.json`,
+`research.json`, and `taste-index.json` are disposable viewer projections. The optional
 `wikidata-image-hints.json` file is a separate snapshot-bound cache, not product
 data and not a source for rebuilds.
 

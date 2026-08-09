@@ -12,6 +12,7 @@
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -339,11 +340,11 @@ namespace {
             || catalog.at("productSnapshotId")
                    .get_ref<const std::string&>()
                    .empty()
-            || !catalog.contains("agents")
-            || !catalog.at("agents").is_array()
-            || !catalog.contains("works")
-            || !catalog.at("works").is_array()) {
-            throw std::invalid_argument("site build requires viewer catalog v1");
+            || !catalog.contains("agents") || !catalog.at("agents").is_array()
+            || !catalog.contains("works") || !catalog.at("works").is_array()) {
+            throw std::invalid_argument(
+                "site build requires viewer catalog v1"
+            );
         }
 
         std::map<std::string, const nlohmann::json*, std::less<>> agents;
@@ -377,14 +378,14 @@ namespace {
                 const auto id = contributor.at("id").get<std::string>();
                 const auto canonical = agents.find(id);
                 if (canonical == agents.end()
-                    || contributor.at("label")
-                        != canonical->second->at("label")
+                    || contributor.at("label") != canonical->second->at("label")
                     || contributor.at("agentType")
                         != canonical->second->at("agentType")
                     || contributor.at("identifiers")
                         != canonical->second->at("identifiers")) {
                     throw std::invalid_argument(
-                        "viewer contributor does not resolve to its canonical agent"
+                        "viewer contributor does not resolve to its canonical "
+                        "agent"
                     );
                 }
             }
@@ -1019,26 +1020,23 @@ nlohmann::ordered_json viewer_builder::catalog(
         }
     }
 
-    const auto label_for = [&](const std::string& id, const std::string& fallback) {
-        const auto found = preferred_names.find(id);
-        return found == preferred_names.end() ? fallback : found->second;
-    };
-    const auto copy_field = [](
-                                nlohmann::ordered_json& destination,
-                                const std::string_view destination_key,
-                                const nlohmann::json& source,
-                                const std::string_view source_key
-                            ) {
-        const auto found = source.find(std::string(source_key));
-        destination[std::string(destination_key)]
-            = found == source.end() ? nlohmann::json(nullptr) : *found;
-    };
+    const auto label_for
+        = [&](const std::string& id, const std::string& fallback) {
+              const auto found = preferred_names.find(id);
+              return found == preferred_names.end() ? fallback : found->second;
+          };
+    const auto copy_field
+        = [](nlohmann::ordered_json& destination,
+             const std::string_view destination_key,
+             const nlohmann::json& source, const std::string_view source_key) {
+              const auto found = source.find(std::string(source_key));
+              destination[std::string(destination_key)]
+                  = found == source.end() ? nlohmann::json(nullptr) : *found;
+          };
 
     std::map<std::string, nlohmann::ordered_json, std::less<>> concepts;
-    for (const auto& concept_row :
-         array_or_empty(product_export, "concepts")) {
-        if (!concept_row.is_object()
-            || !concept_row.contains("entity_id")
+    for (const auto& concept_row : array_or_empty(product_export, "concepts")) {
+        if (!concept_row.is_object() || !concept_row.contains("entity_id")
             || !concept_row.at("entity_id").is_string()) {
             continue;
         }
@@ -1046,8 +1044,7 @@ nlohmann::ordered_json viewer_builder::catalog(
         concepts[id] = {
             { "id", id },
             { "label", label_for(id, concept_row.value("slug", id)) },
-            { "conceptType",
-              concept_row.value("concept_type", "concept") },
+            { "conceptType", concept_row.value("concept_type", "concept") },
             { "slug", concept_row.value("slug", id) },
         };
     }
@@ -1243,8 +1240,7 @@ nlohmann::ordered_json viewer_builder::catalog(
         work->second["manifestations"].push_back(std::move(item));
     }
 
-    for (const auto& fact :
-         array_or_empty(product_export, "financial_facts")) {
+    for (const auto& fact : array_or_empty(product_export, "financial_facts")) {
         const auto work = works.find(fact.value("work_id", ""));
         if (work == works.end()) {
             continue;
@@ -1258,8 +1254,7 @@ nlohmann::ordered_json viewer_builder::catalog(
         copy_field(item, "valueYear", fact, "value_year");
         copy_field(item, "confidence", fact, "confidence");
         bool estimate = false;
-        if (const auto value = fact.find("is_estimate");
-            value != fact.end()) {
+        if (const auto value = fact.find("is_estimate"); value != fact.end()) {
             if (value->is_boolean()) {
                 estimate = value->get<bool>();
             } else if (value->is_number_integer()) {
@@ -1269,6 +1264,43 @@ nlohmann::ordered_json viewer_builder::catalog(
         item["isEstimate"] = estimate;
         work->second["financialFacts"].push_back(std::move(item));
     }
+
+    std::vector<nlohmann::ordered_json> work_relations;
+    for (const auto& relation :
+         array_or_empty(product_export, "work_relations")) {
+        if (!relation.is_object() || !relation.contains("subject_work_id")
+            || !relation.at("subject_work_id").is_string()
+            || !relation.contains("object_work_id")
+            || !relation.at("object_work_id").is_string()
+            || !relation.contains("relation_type")
+            || !relation.at("relation_type").is_string()) {
+            continue;
+        }
+        const auto subject = relation.at("subject_work_id").get<std::string>();
+        const auto object = relation.at("object_work_id").get<std::string>();
+        const auto type = relation.at("relation_type").get<std::string>();
+        if (subject.empty() || object.empty() || type.empty()
+            || !works.contains(subject) || !works.contains(object)) {
+            continue;
+        }
+        work_relations.push_back(
+            { { "subjectId", subject },
+              { "objectId", object },
+              { "relationType", type } }
+        );
+    }
+    std::ranges::sort(work_relations, [](const auto& left, const auto& right) {
+        return std::tuple {
+            left.at("subjectId").template get_ref<const std::string&>(),
+            left.at("relationType").template get_ref<const std::string&>(),
+            left.at("objectId").template get_ref<const std::string&>()
+        }
+        < std::tuple {
+              right.at("subjectId").template get_ref<const std::string&>(),
+              right.at("relationType").template get_ref<const std::string&>(),
+              right.at("objectId").template get_ref<const std::string&>()
+          };
+    });
 
     nlohmann::ordered_json work_array = nlohmann::ordered_json::array();
     for (auto& [id, work] : works) {
@@ -1285,6 +1317,7 @@ nlohmann::ordered_json viewer_builder::catalog(
         { "productSnapshotId", std::move(product_snapshot_id) },
         { "agents", std::move(agent_array) },
         { "works", std::move(work_array) },
+        { "workRelations", std::move(work_relations) },
     };
 }
 
@@ -1338,7 +1371,9 @@ nlohmann::ordered_json viewer_builder::write_projection(
 nlohmann::ordered_json viewer_builder::build_site(
     const nlohmann::json& projection, const nlohmann::json& catalog_data,
     const std::filesystem::path& template_root,
-    const std::filesystem::path& site_root, std::string generated_at
+    const std::filesystem::path& site_root, std::string generated_at,
+    const nlohmann::json& research_data, const nlohmann::json& taste_index,
+    std::string product_content_sha256
 ) {
     validate_site_root(site_root);
     if (!projection.is_object()
@@ -1349,11 +1384,55 @@ nlohmann::ordered_json viewer_builder::build_site(
         );
     }
     validate_viewer_catalog(catalog_data);
+    const std::string product_snapshot_id
+        = projection.at("product_snapshot_id").get<std::string>();
+    if (catalog_data.value("productSnapshotId", "") != product_snapshot_id) {
+        throw std::invalid_argument(
+            "viewer catalog belongs to a different product snapshot"
+        );
+    }
+    const auto validate_product_projection
+        = [&product_snapshot_id, &product_content_sha256](
+              const nlohmann::json& artifact, const std::string_view type,
+              const std::string_view content_hash_field
+          ) {
+              if (artifact.is_null()) {
+                  return;
+              }
+              if (!artifact.is_object()
+                  || artifact.value("artifact_type", "") != type
+                  || artifact.value("format_version", 0) != 1
+                  || !artifact.contains("product_snapshot")
+                  || !artifact.at("product_snapshot").is_object()
+                  || artifact.at("product_snapshot").value("snapshot_id", "")
+                      != product_snapshot_id) {
+                  throw std::invalid_argument(
+                      "viewer " + std::string(type)
+                      + " belongs to a different product snapshot"
+                  );
+              }
+              if (!product_content_sha256.empty()
+                  && artifact.at("product_snapshot")
+                          .value(std::string(content_hash_field), "")
+                      != product_content_sha256) {
+                  throw std::invalid_argument(
+                      "viewer " + std::string(type)
+                      + " belongs to different product content"
+                  );
+              }
+          };
+    validate_product_projection(
+        research_data, "product_research_report_v1", "sha256"
+    );
+    validate_product_projection(
+        taste_index, "taste_index_v1", "content_sha256"
+    );
 
     const auto asset_root = template_root / "dist";
     if (!std::filesystem::is_directory(asset_root)) {
         throw std::runtime_error(
-            "compiled viewer assets are missing; run npm ci && npm run build in "
+            "compiled viewer assets are missing; run npm ci && npm run build "
+            "in "
             + template_root.string()
         );
     }
@@ -1374,7 +1453,10 @@ nlohmann::ordered_json viewer_builder::build_site(
         const auto relative
             = std::filesystem::relative(entry.path(), asset_root)
                   .generic_string();
-        if (relative.empty() || relative == "data/catalog.json") {
+        if (relative.empty() || relative == "data/catalog.json"
+            || relative == "data/research.json"
+            || relative == "data/taste-index.json"
+            || relative == "data/product-local.jsonl") {
             continue;
         }
         content.emplace(relative, read_file(entry.path()));
@@ -1384,6 +1466,12 @@ nlohmann::ordered_json viewer_builder::build_site(
     }
 
     content["data/catalog.json"] = catalog_data.dump() + "\n";
+    if (!research_data.is_null()) {
+        content["data/research.json"] = research_data.dump() + "\n";
+    }
+    if (!taste_index.is_null()) {
+        content["data/taste-index.json"] = taste_index.dump() + "\n";
+    }
     const nlohmann::ordered_json build_info {
         { "artifact_format", "site_build_info_v1" },
         { "format_version", 1 },

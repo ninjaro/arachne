@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "data": "python3 scripts/build_catalog.py ../database/art-islands.sqlite public/data/catalog.json && python3 scripts/build_research.py ../database/art-islands.sqlite public/data/catalog.json public/data/research.json --merge-hints ../database/merge-hints-review.json --merge-hint-decisions ../database/merge-hint-decisions.json",
+    "data:catalog": "python3 scripts/build_catalog.py ../database/art-islands.sqlite public/data/catalog.json --product-export ../.arachne/tmp/viewer-product-local.jsonl",
+    "data:projections": "${ARACHNE_BINARY:-../build/arachne} product research --database database/art-islands.sqlite --product-export .arachne/tmp/viewer-product-local.jsonl --output viewer/public/data/research.json --compact && ${ARACHNE_BINARY:-../build/arachne} product taste-index --database database/art-islands.sqlite --product-export .arachne/tmp/viewer-product-local.jsonl --output viewer/public/data/taste-index.json --compact",
+    "data": "npm run data:catalog && npm run data:projections",
     "stage:image-hints": "python3 scripts/stage_image_hints.py",
     "dev": "vite",
     "build:assets": "tsc --noEmit && vite build",

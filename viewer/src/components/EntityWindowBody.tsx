@@ -17,7 +17,11 @@ import {
 import { buildQueryToken } from "../lib/query";
 import type { ImageHintProductIdentity } from "../lib/image-hints";
 import type { RateHandler } from "./common";
-import { GroupedConceptChips, RatingButtons } from "./common";
+import {
+  EntityRatingButtons,
+  GroupedConceptChips,
+  RatingButtons,
+} from "./common";
 import { EntityImageCarousel } from "./ImageCarousel";
 
 interface FilterMenuOption {
@@ -353,12 +357,16 @@ export function WorkEntityBody({
 export function AgentEntityBody({
   agent,
   domain,
+  ratings,
+  onRate,
   onOpen,
   imageHintsUrl,
   imageHintProduct,
 }: {
   agent: Agent;
   domain: Domain;
+  ratings: Ratings;
+  onRate: RateHandler;
   onOpen: (id: EntityId) => void;
   imageHintsUrl: string;
   imageHintProduct: ImageHintProductIdentity;
@@ -378,6 +386,13 @@ export function AgentEntityBody({
         <span>Agent</span>
         <span>{humanize(agent.agentType)}</span>
       </div>
+
+      <EntityRatingButtons
+        id={agent.id}
+        label={agent.label}
+        ratings={ratings}
+        onRate={onRate}
+      />
 
       <EntityImageCarousel
         entity={{

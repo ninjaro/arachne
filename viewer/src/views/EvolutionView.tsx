@@ -6,7 +6,8 @@ import type {
   PointerEvent,
 } from "react";
 import { TagPicker } from "../components/TagPicker";
-import type { OpenHandler } from "../components/common";
+import { EntityRatingButtons } from "../components/common";
+import type { OpenHandler, RateHandler } from "../components/common";
 import {
   buildEvolutionIndex,
   buildVisibleEvolution,
@@ -59,14 +60,34 @@ import type {
   MetroScene,
   MetroStation,
 } from "../lib/timenets";
-import type { Domain, EntityId } from "../lib/types";
+import type { Domain, EntityId, Ratings } from "../lib/types";
 import { humanize } from "../lib/format";
+import {
+  deterministicTasteSeedTags,
+  inferConceptTaste,
+} from "../lib/taste";
+import type { TasteIndex } from "../lib/taste";
 
 const DEFAULT_EARLIER_DEPTH = 0;
 const DEFAULT_LATER_DEPTH = 0;
 const DEFAULT_EXPANSION_MODE: ExpansionMode = "directional";
 const DEFAULT_INCLUDE_YEAR_ONLY = true;
 const DEFAULT_INCLUDE_AMBIGUOUS = false;
+
+export type EvolutionTasteFilter = "all" | "positive" | "negative" | "unrated";
+
+export function tagExcludedByTaste(
+  rating: -1 | 1 | undefined,
+  filter: EvolutionTasteFilter,
+  hideDisliked: boolean,
+): boolean {
+  return (
+    (filter === "positive" && rating !== 1) ||
+    (filter === "negative" && rating !== -1) ||
+    (filter === "unrated" && rating !== undefined) ||
+    (hideDisliked && rating === -1)
+  );
+}
 
 interface TooltipPosition {
   left: number;
@@ -457,22 +478,6 @@ export function nextIsolatedTagId(
   return null;
 }
 
-export function selectedFocusLabelPosition(
-  station: Pick<MetroStation, "x" | "y">,
-  scene: Pick<MetroScene, "width" | "height">,
-): { x: number; y: number } {
-  const cardWidth = 220;
-  const cardHeight = 38;
-  const margin = 8;
-  const preferredX = station.x + 10 + cardWidth <= scene.width - margin
-    ? station.x + 10
-    : station.x - cardWidth - 10;
-  return {
-    x: Math.max(margin, Math.min(scene.width - cardWidth - margin, preferredX)),
-    y: Math.max(margin, Math.min(scene.height - cardHeight - margin, station.y - 28)),
-  };
-}
-
 export function evolutionItemInteractionClasses({
   kind,
   id,
@@ -745,9 +750,19 @@ function Tooltip({
 
 export function EvolutionView({
   domain,
+  ratings,
+  onRate,
+  tasteIndex = null,
+  requestedTagId = null,
+  onRequestedTagHandled,
   onOpen,
 }: {
   domain: Domain;
+  ratings: Ratings;
+  onRate: RateHandler;
+  tasteIndex?: TasteIndex | null;
+  requestedTagId?: EntityId | null;
+  onRequestedTagHandled?: (id: EntityId) => void;
   onOpen: OpenHandler;
 }) {
   const titleId = useId();
@@ -767,6 +782,9 @@ export function EvolutionView({
     defaultSeedId ? [defaultSeedId] : [],
   );
   const [excludedTagIds, setExcludedTagIds] = useState<EntityId[]>([]);
+  const [tasteFilter, setTasteFilter] = useState<EvolutionTasteFilter>("all");
+  const [hideDislikedTags, setHideDislikedTags] = useState(false);
+  const [showInferredPreference, setShowInferredPreference] = useState(true);
   const [earlierDepth, setEarlierDepth] = useState(DEFAULT_EARLIER_DEPTH);
   const [laterDepth, setLaterDepth] = useState(DEFAULT_LATER_DEPTH);
   const [expansionMode, setExpansionMode] = useState<ExpansionMode>(DEFAULT_EXPANSION_MODE);
@@ -780,6 +798,14 @@ export function EvolutionView({
   const [refinedWorkId, setRefinedWorkId] = useState<EntityId | null>(null);
   const [explicitExpandedTagIds, setExplicitExpandedTagIds] = useState<EntityId[]>([]);
   const [isolatedTagId, setIsolatedTagId] = useState<EntityId | null>(null);
+  const inferredConceptTaste = useMemo(
+    () => inferConceptTaste(domain, ratings, tasteIndex),
+    [domain, ratings, tasteIndex],
+  );
+  const inferredByConceptId = useMemo(
+    () => new Map(inferredConceptTaste.map((entry) => [entry.conceptId, entry])),
+    [inferredConceptTaste],
+  );
   const traversalCache = useRef<TraversalProjectionCache>({
     index: null,
     byMode: new Map(),
@@ -801,10 +827,37 @@ export function EvolutionView({
     });
   }
 
+  useEffect(() => {
+    if (!requestedTagId) return;
+    if (!index.tagById.has(requestedTagId)) {
+      onRequestedTagHandled?.(requestedTagId);
+      return;
+    }
+    setExcludedTagIds((current) =>
+      current.filter((candidate) => candidate !== requestedTagId),
+    );
+    setSeedTagIds((current) =>
+      current.includes(requestedTagId) ? current : [...current, requestedTagId],
+    );
+    setSelection({ kind: "tag", id: requestedTagId });
+    setFocusTarget({ kind: "tag", id: requestedTagId });
+    onRequestedTagHandled?.(requestedTagId);
+  }, [index, onRequestedTagHandled, requestedTagId]);
+
+  const effectiveExcludedTagIds = useMemo(() => {
+    const excluded = new Set(excludedTagIds);
+    for (const tag of index.tagOptions) {
+      const value = ratings[tag.id];
+      const filtered = tagExcludedByTaste(value, tasteFilter, hideDislikedTags);
+      if (filtered) excluded.add(tag.id);
+    }
+    return [...excluded];
+  }, [excludedTagIds, hideDislikedTags, index.tagOptions, ratings, tasteFilter]);
+
   const filters = useMemo(
     () => ({
       seedTagIds,
-      excludedTagIds,
+      excludedTagIds: effectiveExcludedTagIds,
       earlierDepth,
       laterDepth,
       expansionMode,
@@ -814,7 +867,7 @@ export function EvolutionView({
     [
       earlierDepth,
       expansionMode,
-      excludedTagIds,
+      effectiveExcludedTagIds,
       includeAmbiguous,
       includeYearOnly,
       laterDepth,
@@ -824,7 +877,7 @@ export function EvolutionView({
   const traversalCacheKey = useMemo(
     () => JSON.stringify([
       seedTagIds,
-      excludedTagIds.slice().sort(),
+      effectiveExcludedTagIds.slice().sort(),
       earlierDepth,
       laterDepth,
       includeYearOnly,
@@ -832,7 +885,7 @@ export function EvolutionView({
     ]),
     [
       earlierDepth,
-      excludedTagIds,
+      effectiveExcludedTagIds,
       includeAmbiguous,
       includeYearOnly,
       laterDepth,
@@ -988,6 +1041,9 @@ export function EvolutionView({
     selectedTarget?.kind === "tag"
       ? visible.tagById.get(selectedTarget.id) ?? null
       : null;
+  const selectedInferredPreference = selectedTag
+    ? inferredByConceptId.get(selectedTag.tag.id) ?? null
+    : null;
   const selectedBundle =
     selectedTarget?.kind === "bundle"
       ? renderTrajectoryProjection.bundles.find((bundle) => bundle.id === selectedTarget.id) ?? null
@@ -1172,6 +1228,9 @@ export function EvolutionView({
     setExpansionMode(DEFAULT_EXPANSION_MODE);
     setIncludeYearOnly(DEFAULT_INCLUDE_YEAR_ONLY);
     setIncludeAmbiguous(DEFAULT_INCLUDE_AMBIGUOUS);
+    setTasteFilter("all");
+    setHideDislikedTags(false);
+    setShowInferredPreference(true);
     setSelection(null);
     hoverController.current?.closeNow();
     setFocusTarget(null);
@@ -1189,6 +1248,23 @@ export function EvolutionView({
     setFocusTarget(null);
     setExplicitExpandedTagIds([]);
     setIsolatedTagId(null);
+  }
+
+  function useMyTaste() {
+    const preferred = deterministicTasteSeedTags(
+      domain,
+      ratings,
+      inferredConceptTaste,
+      6,
+    ).filter((id) => index.tagById.has(id));
+    if (!preferred.length) return;
+    setExcludedTagIds((current) =>
+      current.filter((id) => !preferred.includes(id)),
+    );
+    setSeedTagIds(preferred);
+    // Inferred-positive seeds may be explicitly unrated, so the explicit
+    // rating filter must not immediately hide the deterministic seed set.
+    setTasteFilter("all");
   }
 
   function selectTarget(target: EvolutionInteractionTarget) {
@@ -1269,9 +1345,6 @@ export function EvolutionView({
     return null;
   };
   const sceneSummary = `${visible.tags.length.toLocaleString()} visible tags · ${baseTrajectoryProjection.groups.length.toLocaleString()} rendered routes (${baseTrajectoryProjection.bundles.length.toLocaleString()} bundles) · ${scene.stations.length.toLocaleString()} aggregate stops · ${visible.works.length.toLocaleString()} works · ${scene.explicitRelations.length.toLocaleString()} explicit relation paths`;
-  const selectedLabelPosition = selectedStation
-    ? selectedFocusLabelPosition(selectedStation, scene)
-    : null;
 
   return (
     <section
@@ -1287,31 +1360,36 @@ export function EvolutionView({
       <header className="metro-introduction">
         <div>
           <span className="metro-eyebrow">Evolution · historical continuity</span>
-          <h2>Tags form trajectories. Works become temporal stops.</h2>
+          <h2>Follow concepts through historical works.</h2>
           <p>
-            Single-work and aggregate stations share one sun-marker family. Line color
-            identifies a tag, line width represents assignment strength, and opacity
-            represents context depth. Structurally equivalent non-seed tags collapse
-            into bundles. Earlier and Later depth are independent budgets; Connected
-            context may change temporal direction while consuming both.
+            Choose genres, styles, movements, or themes. Hover a station for its
+            works; select it for evidence and drill-down.
           </p>
-          <small>
-            Ancestor and descendant roles depend on the path. Year-only and month-level
-            stops are positioned within their known range for clarity, not inferred
-            precision. Hover is a local preview; click or keyboard activation creates persistent
-            focus. Horizontal distance preserves order and layout clarity, not duration.
-          </small>
         </div>
-        <div className="metro-copy-legend" aria-label="Evolution symbol legend">
-          <span><i className="station exact" /> Single-work stop</span>
-          <span><i className="station aggregate" /> Aggregate stop + count</span>
-          <span><i className="station interchange" /> Interchange station</span>
-          <span><i className="station uncertain" /> Year-only / uncertain</span>
-          <span><i className="station selected" /> Selected station</span>
-          <span><i className="trajectory strength" /> Width = tag strength</span>
-          <span><i className="trajectory bundle" /> Equivalent-tag bundle</span>
-          <span><i className="relation" /> Explicit relation</span>
-        </div>
+        <details className="metro-about">
+          <summary>How to read this view</summary>
+          <p>
+            Color identifies a tag, line width shows assignment strength, and
+            opacity shows context depth. Equivalent non-seed trajectories may
+            share a bundle. Explicit work relations remain a separate arrow layer.
+          </p>
+          <p>
+            Earlier and Later are independent traversal budgets. Connected context
+            can change direction while consuming both. Year- and month-level dates
+            are placed within their known temporal region for layout clarity;
+            horizontal distance does not encode duration.
+          </p>
+          <div className="metro-copy-legend" aria-label="Evolution symbol legend">
+            <span><i className="station exact" /> Single-work stop</span>
+            <span><i className="station aggregate" /> Aggregate stop + count</span>
+            <span><i className="station interchange" /> Interchange station</span>
+            <span><i className="station uncertain" /> Year-only / uncertain</span>
+            <span><i className="station selected" /> Selected station</span>
+            <span><i className="trajectory strength" /> Width = tag strength</span>
+            <span><i className="trajectory bundle" /> Equivalent-tag bundle</span>
+            <span><i className="relation" /> Explicit relation</span>
+          </div>
+        </details>
       </header>
 
       <div className="metro-controls">
@@ -1402,6 +1480,50 @@ export function EvolutionView({
             />
             Ranged or ambiguous
           </label>
+        </fieldset>
+        <fieldset className="metro-taste-controls">
+          <legend>Local taste</legend>
+          <select
+            value={tasteFilter}
+            aria-label="Filter trajectories by explicit rating"
+            onChange={(event) =>
+              setTasteFilter(event.target.value as typeof tasteFilter)
+            }
+          >
+            <option value="all">All tags</option>
+            <option value="positive">Positive</option>
+            <option value="negative">Negative</option>
+            <option value="unrated">Unrated</option>
+          </select>
+          <label>
+            <input
+              type="checkbox"
+              checked={hideDislikedTags}
+              onChange={(event) => setHideDislikedTags(event.target.checked)}
+            />
+            Hide explicitly disliked tags
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={showInferredPreference}
+              onChange={(event) => setShowInferredPreference(event.target.checked)}
+            />
+            Show inferred preference
+          </label>
+          <button
+            type="button"
+            onClick={useMyTaste}
+            disabled={
+              !index.tagOptions.some(
+                (tag) =>
+                  ratings[tag.id] === 1 ||
+                  (inferredByConceptId.get(tag.id)?.score ?? 0) > 0,
+              )
+            }
+          >
+            Use my taste
+          </button>
         </fieldset>
         <div className="metro-control-actions">
           <button type="button" onClick={clearTags}>Clear tags</button>
@@ -1791,24 +1913,6 @@ export function EvolutionView({
                   })}
                 </g>
 
-                <g className="metro-label-layer" aria-hidden="true">
-                  {scene.workLabels.map((label) => (
-                    <text key={label.key} x={label.x} y={label.y} className="metro-work-label">
-                      {truncatedLabel(label.text, 32)}
-                    </text>
-                  ))}
-                  {selectedStation && selectedLabelPosition ? (
-                    <g transform={`translate(${selectedLabelPosition.x} ${selectedLabelPosition.y})`} className="metro-focus-label">
-                      <rect width={220} height={38} rx={5} />
-                      <text x={9} y={15} className="title">
-                        {selectedStation.entry.workCount > 1
-                          ? `${selectedStation.entry.workCount} works`
-                          : truncatedLabel(workLabel(index, selectedStation.entry.workIds[0]!), 31)}
-                      </text>
-                      <text x={9} y={30} className="meta">{selectedStation.entry.temporal.displayLabel} · {dateQualityLabel(selectedStation)}</text>
-                    </g>
-                  ) : null}
-                </g>
               </svg>
             </div>
           )}
@@ -1827,6 +1931,40 @@ export function EvolutionView({
               <span className="metro-details-kicker">Tag trajectory</span>
               <h3>{selectedTag.tag.label}</h3>
               <p>{humanize(selectedTag.tag.conceptType)} · {reachSummary(selectedTag)}</p>
+              <div className="metro-tag-rating">
+                <span>
+                  Your rating: {ratings[selectedTag.tag.id] === 1
+                    ? "+"
+                    : ratings[selectedTag.tag.id] === -1
+                      ? "−"
+                      : "Unrated"}
+                </span>
+                <EntityRatingButtons
+                  id={selectedTag.tag.id}
+                  label={selectedTag.tag.label}
+                  ratings={ratings}
+                  onRate={onRate}
+                />
+              </div>
+              {showInferredPreference && selectedInferredPreference ? (
+                <div className="metro-inferred-preference">
+                  <strong>
+                    Inferred preference: {selectedInferredPreference.score >= 0 ? "+" : ""}
+                    {selectedInferredPreference.score.toFixed(2)}
+                  </strong>
+                  <span>
+                    Derived from {selectedInferredPreference.evidence.length} rated work/agent
+                    {selectedInferredPreference.evidence.length === 1 ? "" : "s"}; it does not change your explicit rating.
+                  </span>
+                  <ul>
+                    {selectedInferredPreference.evidence.slice(0, 3).map((evidence) => (
+                      <li key={`${evidence.family}:${evidence.entityId}`}>
+                        {evidence.rating === 1 ? "+" : "−"} {evidence.label}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <dl>
                 <div><dt>Aggregate stops</dt><dd>{selectedTag.stationIds.length}</dd></div>
                 <div><dt>Contained works</dt><dd>{selectedTag.workIds.length}</dd></div>

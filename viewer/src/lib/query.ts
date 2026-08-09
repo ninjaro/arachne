@@ -1,4 +1,4 @@
-import type { ResearchItem, Work } from "./types";
+import type { Agent, ResearchItem, Work } from "./types";
 
 export type QueryMatcher = "text" | "word" | "regex";
 
@@ -23,6 +23,7 @@ const KNOWN_FIELDS = new Set([
   "person",
   "contributor",
   "role",
+  "type",
   "concept",
   "tag",
   "genre",
@@ -507,6 +508,82 @@ function scoreWorkTerm(work: Work, term: QueryTerm): number {
 
 export function scoreWorkQuery(work: Work, parsed: ParsedQuery): number {
   return parsed.terms.reduce((total, term) => total + scoreWorkTerm(work, term), 0);
+}
+
+export interface AgentQueryDocument {
+  agent: Agent;
+  roles: string[];
+  knownWorkLabels: string[];
+}
+
+function matchAgentTerm(document: AgentQueryDocument, term: QueryTerm): boolean {
+  const { agent, roles, knownWorkLabels } = document;
+  const contributorRole = term.field ? contributorRoleField(term.field) : null;
+  if (contributorRole) {
+    return roles.some((role) => role.toLocaleLowerCase() === contributorRole) &&
+      matchesValues(term, [agent.label, agent.id]);
+  }
+
+  switch (term.field) {
+    case null:
+      return matchesValues(term, [
+        agent.label,
+        agent.agentType,
+        agent.id,
+        ...roles,
+        ...knownWorkLabels,
+        ...agent.identifiers.flatMap((identifier) => [identifier.scheme, identifier.value]),
+      ]);
+    case "title":
+    case "agent":
+    case "person":
+    case "contributor":
+      return matchesValues(term, [agent.label]);
+    case "type":
+      return matchesValues(term, [agent.agentType]);
+    case "role":
+      return matchesValues(term, roles);
+    case "id":
+      return matchesValues(term, [
+        agent.id,
+        ...agent.identifiers.flatMap((identifier) => [identifier.scheme, identifier.value]),
+      ]);
+    case "work":
+      return matchesValues(term, knownWorkLabels);
+    default:
+      return false;
+  }
+}
+
+export function matchesAgentQuery(
+  document: AgentQueryDocument,
+  parsed: ParsedQuery,
+): boolean {
+  return parsed.terms.every((term) => {
+    const matched = matchAgentTerm(document, term);
+    return term.negated ? !matched : matched;
+  });
+}
+
+export function scoreAgentQuery(
+  document: AgentQueryDocument,
+  parsed: ParsedQuery,
+): number {
+  return parsed.terms.reduce((total, term) => {
+    if (term.negated || !matchAgentTerm(document, term)) return total;
+    if (["agent", "person", "contributor", "title"].includes(term.field ?? "")) {
+      return total + textScore(document.agent.label, term, 14, 10, 7);
+    }
+    if (term.field === "type" || term.field === "role") return total + 6;
+    if (term.field === "id") return total + 10;
+    if (term.field) return total + 3;
+    return total + Math.max(
+      textScore(document.agent.label, term, 12, 8, 5),
+      ...document.roles.map((role) => textScore(role, term, 5, 4, 3)),
+      ...document.knownWorkLabels.map((label) => textScore(label, term, 4, 3, 2)),
+      1,
+    );
+  }, 0);
 }
 
 function matchResearchTerm(item: ResearchItem, term: QueryTerm): boolean {

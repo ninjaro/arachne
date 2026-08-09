@@ -27,6 +27,9 @@ REQUIRED_CAPABILITIES = frozenset(
         "product-check-inbox",
         "product-rebuild-merge-hints",
         "product-export-merge-hints",
+        "product-research",
+        "product-entity",
+        "product-taste-index",
         "candidate-plan",
         "candidate-rebuild",
         "viewer-build",
@@ -248,6 +251,39 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
             "--output-control",
             str(arguments.output_control.resolve(strict=False)),
         ]
+    if command in {"product-research", "product-entity", "product-taste-index"}:
+        subcommand = command.removeprefix("product-")
+        result = [
+            "product",
+            subcommand,
+            *common,
+            "--product-snapshot",
+            str(arguments.product_snapshot.resolve(strict=True)),
+        ]
+        if command == "product-entity":
+            result.extend(("--id", arguments.id))
+        if arguments.output:
+            output = (
+                "-"
+                if str(arguments.output) == "-"
+                else str(arguments.output.resolve(strict=False))
+            )
+            result.extend(("--output", output))
+        if arguments.compact:
+            result.append("--compact")
+        if command == "product-research":
+            if arguments.merge_hints:
+                result.extend(
+                    ("--merge-hints", str(arguments.merge_hints.resolve(strict=True)))
+                )
+            if arguments.merge_hint_decisions:
+                result.extend(
+                    (
+                        "--merge-hint-decisions",
+                        str(arguments.merge_hint_decisions.resolve(strict=True)),
+                    )
+                )
+        return command, result
     if command == "viewer-build":
         result = [
             "viewer",
@@ -304,6 +340,21 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     candidate_plan.add_argument("--product-snapshot", type=Path, required=True)
     candidate_plan.add_argument("--output-artifact", type=Path, required=True)
     candidate_plan.add_argument("--output-control", type=Path, required=True)
+
+    for name in ("product-research", "product-taste-index"):
+        projection = subparsers.add_parser(name)
+        projection.add_argument("--product-snapshot", type=Path, required=True)
+        projection.add_argument("--output", type=Path)
+        projection.add_argument("--compact", action="store_true")
+        if name == "product-research":
+            projection.add_argument("--merge-hints", type=Path)
+            projection.add_argument("--merge-hint-decisions", type=Path)
+
+    entity = subparsers.add_parser("product-entity")
+    entity.add_argument("--product-snapshot", type=Path, required=True)
+    entity.add_argument("--id", required=True)
+    entity.add_argument("--output", type=Path)
+    entity.add_argument("--compact", action="store_true")
 
     viewer = subparsers.add_parser("viewer-build")
     viewer.add_argument("--product-snapshot", type=Path, required=True)

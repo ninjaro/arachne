@@ -71,6 +71,7 @@ target_compile_features(pheidippides_transport PUBLIC cxx_std_23)
 add_library(ariadne_engine STATIC
     src/ariadne/candidates.cpp
     src/ariadne/merge_hints.cpp
+    src/ariadne/product.cpp
     src/ariadne/viewer.cpp
 )
 target_include_directories(
@@ -184,6 +185,7 @@ if(BUILD_TESTS)
         tests/transport_contract_tests.cpp
         tests/coordinator_tests.cpp
         tests/ariadne_tests.cpp
+        tests/product_projection_tests.cpp
         tests/viewer_tests.cpp
     )
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/candidate_store_tests.cpp")
@@ -247,6 +249,16 @@ if(BUILD_TESTS)
             tests.test_wikidata_hpc_worker -v
     )
     add_test(
+        NAME wikidata_hpc_run_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_wikidata_hpc_run -v
+    )
+    add_test(
+        NAME local_product_snapshot_materializer_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_materialize_local_product_snapshot -v
+    )
+    add_test(
         NAME source_refresh_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_source_refresh -v
     )
@@ -261,11 +273,6 @@ if(BUILD_TESTS)
             tests.test_product_v6_migration -v
     )
     add_test(
-        NAME viewer_research_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_viewer_research -v
-    )
-    add_test(
         NAME operations_cli_tests
         COMMAND ${CMAKE_COMMAND} -E env
             ARACHNE_TEST_BINARY=$<TARGET_FILE:arachne_app>
@@ -274,9 +281,10 @@ if(BUILD_TESTS)
     set_tests_properties(
         actor_boundary_tests intake_adapter_tests workflow_yaml_tests
         publication_adapter_tests image_hint_staging_tests
-        wikidata_hpc_worker_tests source_refresh_tests
+        wikidata_hpc_worker_tests wikidata_hpc_run_tests
+        local_product_snapshot_materializer_tests source_refresh_tests
         product_v5_migration_tests product_v6_migration_tests
-        viewer_research_tests operations_cli_tests
+        operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 

@@ -1,17 +1,24 @@
-import { useMemo } from "react";
-import type { Domain, Ratings, Settings } from "../lib/types";
+import { useEffect, useMemo, useState } from "react";
+import type {
+  Domain,
+  EntityOpenContext,
+  Ratings,
+  Settings,
+} from "../lib/types";
 import type { FeatureIndex } from "../lib/features";
 import { factorPhrase } from "../lib/features";
 import { scoreRecommendations } from "../lib/recommendations";
-import { RatingButtons } from "../components/common";
+import { Pagination, RatingButtons } from "../components/common";
 import type { OpenHandler, RateHandler } from "../components/common";
 import { dateLabel, humanize } from "../lib/format";
+import type { TasteIndex } from "../lib/taste";
 
 export function RecommendationsView({
   domain,
   index,
   ratings,
   settings,
+  tasteIndex,
   onOpen,
   onRate,
 }: {
@@ -19,14 +26,42 @@ export function RecommendationsView({
   index: FeatureIndex;
   ratings: Ratings;
   settings: Settings;
+  tasteIndex: TasteIndex;
   onOpen: OpenHandler;
   onRate: RateHandler;
 }) {
   const likedCount = Object.values(ratings).filter((value) => value === 1).length;
   const scored = useMemo(
-    () => scoreRecommendations(domain, index, ratings, settings),
-    [domain, index, ratings, settings],
+    () => scoreRecommendations(domain, index, ratings, settings, tasteIndex),
+    [domain, index, ratings, settings, tasteIndex],
   );
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(settings.browse.defaultPageSize);
+  const pageCount = Math.max(1, Math.ceil(scored.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pageItems = scored.slice(
+    (safePage - 1) * pageSize,
+    safePage * pageSize,
+  );
+
+  useEffect(() => setPage(1), [ratings]);
+
+  function recommendationContext(
+    result: (typeof scored)[number],
+  ): EntityOpenContext {
+    return {
+      kind: "recommendation",
+      title: `Why this recommendation · ${result.score.toFixed(2)}`,
+      details: [
+        ...result.positive.map((factor) => `+ ${factorPhrase(factor)}`),
+        ...result.negative.map((factor) => `− ${factorPhrase(factor)}`),
+      ],
+    };
+  }
+
+  function openRecommendation(result: (typeof scored)[number]) {
+    onOpen(result.work.id, recommendationContext(result));
+  }
 
   if (!likedCount) {
     return (
@@ -49,8 +84,20 @@ export function RecommendationsView({
     <section>
       <div className="section-heading">
         <h2>Recommendations</h2>
-        <span>{scored.length.toLocaleString()} shown</span>
+        <span>{scored.length.toLocaleString()} experimental matches</span>
       </div>
+      <Pagination
+        page={safePage}
+        pageCount={pageCount}
+        total={scored.length}
+        pageSize={pageSize}
+        pageSizeOptions={settings.browse.pageSizeOptions}
+        onPage={setPage}
+        onPageSize={(value) => {
+          setPageSize(value);
+          setPage(1);
+        }}
+      />
       <div className="table-wrap">
         <table>
           <thead>
@@ -64,15 +111,15 @@ export function RecommendationsView({
             </tr>
           </thead>
           <tbody>
-            {scored.map((result) => (
+            {pageItems.map((result) => (
               <tr
                 key={result.work.id}
                 tabIndex={0}
-                onClick={() => onOpen(result.work.id)}
+                onClick={() => openRecommendation(result)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    onOpen(result.work.id);
+                    openRecommendation(result);
                   }
                 }}
               >
@@ -104,6 +151,18 @@ export function RecommendationsView({
           </tbody>
         </table>
       </div>
+      <Pagination
+        page={safePage}
+        pageCount={pageCount}
+        total={scored.length}
+        pageSize={pageSize}
+        pageSizeOptions={settings.browse.pageSizeOptions}
+        onPage={setPage}
+        onPageSize={(value) => {
+          setPageSize(value);
+          setPage(1);
+        }}
+      />
     </section>
   );
 }

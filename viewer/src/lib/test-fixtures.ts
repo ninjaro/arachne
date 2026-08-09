@@ -69,8 +69,10 @@ export function fixtureDomain(
   workRelations: WorkRelation[] = [],
 ): Domain {
   const conceptCounts = new Map<string, { id: string; label: string; count: number }>();
+  const conceptById = new Map<string, ConceptAssignment>();
   for (const work of works) {
     for (const concept of work.concepts) {
+      if (!conceptById.has(concept.id)) conceptById.set(concept.id, concept);
       const current = conceptCounts.get(concept.id);
       if (current) current.count += 1;
       else conceptCounts.set(concept.id, { id: concept.id, label: concept.label, count: 1 });
@@ -81,6 +83,7 @@ export function fixtureDomain(
     agentById: new Map(),
     works,
     workById: new Map(works.map((work) => [work.id, work])),
+    conceptById,
     workRelations,
     conceptOptions: [...conceptCounts.values()],
     mediumOptions: [{ value: "film", count: works.length }],

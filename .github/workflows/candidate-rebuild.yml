@@ -123,10 +123,8 @@ jobs:
         if: inputs.plan_mode == 'generate'
         continue-on-error: true
         run: |
-          python3 scripts/arachne_ops.py \
+          "${GITHUB_WORKSPACE}/build/arachne" candidate plan \
             --config "${RUNNER_TEMP}/arachne-config.json" \
-            --binary "${GITHUB_WORKSPACE}/build/arachne" \
-            candidate-plan \
             --external-graph "${EXTERNAL_GRAPH_PATH}" \
             --product-snapshot "${PRODUCT_SNAPSHOT_PATH}" \
             --output-artifact "${PLAN_ARTIFACT}" \
@@ -138,10 +136,8 @@ jobs:
         env:
           REBUILD_RUN_ID: ${{ inputs.run_id }}
         run: |
-          python3 scripts/arachne_ops.py \
+          "${GITHUB_WORKSPACE}/build/arachne" candidate rebuild \
             --config "${RUNNER_TEMP}/arachne-config.json" \
-            --binary "${GITHUB_WORKSPACE}/build/arachne" \
-            candidate-rebuild \
             --plan-control "${PLAN_PATH}" \
             --run-id "${REBUILD_RUN_ID}"
       - name: Stop after planning or rebuild failure

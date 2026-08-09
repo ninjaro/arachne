@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       image_hints_artifact:
-        description: Optional snapshot-bound Wikidata image-hints path inside the state repository
+        description: Optional reviewed image-hints path override; defaults to derived/wikidata-image-hints.json when present
         required: false
         type: string
   workflow_call:
@@ -24,6 +24,7 @@ on:
         required: false
         type: string
       image_hints_artifact:
+        description: Optional reviewed image-hints path override; defaults to derived/wikidata-image-hints.json when present
         required: false
         type: string
 
@@ -92,12 +93,19 @@ jobs:
             python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["CANDIDATE_SNAPSHOT_INPUT"]).resolve(strict=True); value.relative_to(root); print("CANDIDATE_SNAPSHOT_PATH=" + str(value))' >> "${GITHUB_ENV}"
           fi
       - name: Stage optional snapshot-bound image hints
-        if: inputs.image_hints_artifact != ''
         env:
           IMAGE_HINTS_INPUT: ${{ inputs.image_hints_artifact }}
         run: |
+          image_hints="${IMAGE_HINTS_INPUT}"
+          if [[ -z "${image_hints}" ]]; then
+            image_hints="derived/wikidata-image-hints.json"
+            if [[ ! -f "${GITHUB_WORKSPACE}/.arachne-state/${image_hints}" ]]; then
+              echo "No reviewed Wikidata image hints are available"
+              exit 0
+            fi
+          fi
           python3 viewer/scripts/stage_image_hints.py \
-            "${IMAGE_HINTS_INPUT}" \
+            "${image_hints}" \
             viewer/public/data/wikidata-image-hints.json \
             --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
             --product-snapshot-control "${PRODUCT_SNAPSHOT_PATH}"

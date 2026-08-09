@@ -46,11 +46,14 @@ HTTP without explicit development permission, malformed policies, and duplicate
 door or endpoint IDs fail before network work.
 
 Do not commit `arachne.local.json`, credentials, or local temporary state. For
-remote operations, commit a reviewed copy as `config/arachne.json` in the separate
-persistent-state repository. The workflow materializer replaces path fields with
-runner-local state paths while retaining reviewed scheduling, candidate, security,
-and publication policy. Initialize that state repository with the project's
-`.gitattributes` so canonical SQLite files are Git LFS objects.
+remote operations, use a reviewed checkout or worktree of
+`https://github.com/ninjaro/arachne.git` and place the reviewed copy at
+`config/arachne.json`. A `.arachne-state` checkout may isolate mutable state, but
+it is another checkout of this repository, not an unknown private repository.
+The workflow materializer replaces path fields with runner-local state paths
+while retaining reviewed scheduling, candidate, security, and publication
+policy. Keep the project's `.gitattributes` active so canonical SQLite files are
+Git LFS objects.
 
 The executable consumes the configuration directly. `scripts/arachne_ops.py` also
 uses it for fail-fast checks and passes it unchanged to the versioned CLI surface.

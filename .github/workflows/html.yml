@@ -54,6 +54,7 @@ jobs:
             clang \
             llvm \
             graphviz \
+            libcxxopts-dev \
             libcurl4-openssl-dev \
             libsqlite3-dev \
             libutf8proc-dev \
@@ -73,7 +74,7 @@ jobs:
             -DBUILD_TESTS=ON \
             -DBUILD_LEGACY_CLIENT=OFF \
             -DCOVERAGE=ON
-          cmake --build build-coverage --target core_tests --parallel
+          cmake --build build-coverage --target core_tests arachne_app --parallel
           ctest --test-dir build-coverage --output-on-failure
           llvm-profdata merge -sparse \
             "${RUNNER_TEMP}"/arachne-*.profraw \
@@ -88,6 +89,7 @@ jobs:
         working-directory: viewer
         env:
           ARACHNE_VIEWER_BASE: /${{ github.event.repository.name }}/viewer/
+          ARACHNE_BINARY: ../build-coverage/arachne
         run: |
           npm ci
           npm run data

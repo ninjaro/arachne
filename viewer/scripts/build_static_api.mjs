@@ -11,10 +11,11 @@ const baseUrl = normalizeBaseUrl(
 const defaultPageSize = 50;
 const viewNames = [
   "browse",
-  "recommendations",
   "evolution",
-  "islands",
+  "taste",
   "research",
+  "recommendations",
+  "islands",
 ];
 
 function normalizeBaseUrl(value) {
@@ -50,6 +51,7 @@ function linksForView(view) {
     ui: uiPath(view),
     catalog: `${baseUrl}data/catalog.json`,
     research: `${baseUrl}data/research.json`,
+    tasteIndex: `${baseUrl}data/taste-index.json`,
   };
 }
 
@@ -68,7 +70,7 @@ function viewDocument(view, catalog, research) {
       ...common,
       source: {
         href: `${baseUrl}data/catalog.json`,
-        itemPath: "works",
+        itemPaths: ["agents", "works"],
       },
       staticPagination: {
         pageSize: defaultPageSize,
@@ -96,6 +98,20 @@ function viewDocument(view, catalog, research) {
         href: `${baseUrl}data/research.json`,
         itemPath: "items",
         available: Boolean(research),
+      },
+    };
+  }
+
+  if (view === "taste") {
+    return {
+      ...common,
+      source: {
+        catalog: `${baseUrl}data/catalog.json`,
+        tasteIndex: `${baseUrl}data/taste-index.json`,
+      },
+      clientState: {
+        ratings: "versioned browser-local work, agent, and concept ratings",
+        remoteAccount: false,
       },
     };
   }
@@ -160,14 +176,27 @@ const template = await readFile(join(distDirectory, "index.html"), "utf8");
 const catalog = JSON.parse(
   await readFile(join(distDirectory, "data", "catalog.json"), "utf8"),
 );
-let research = null;
-try {
-  research = JSON.parse(
-    await readFile(join(distDirectory, "data", "research.json"), "utf8"),
-  );
-} catch (error) {
-  if (error?.code !== "ENOENT") throw error;
+const research = JSON.parse(
+  await readFile(join(distDirectory, "data", "research.json"), "utf8"),
+);
+const tasteIndex = JSON.parse(
+  await readFile(join(distDirectory, "data", "taste-index.json"), "utf8"),
+);
+
+function requireProductArtifact(artifact, type, contentHashField) {
+  if (
+    artifact?.artifact_type !== type ||
+    artifact?.format_version !== 1 ||
+    artifact?.product_snapshot?.snapshot_id !== catalog.productSnapshotId ||
+    (catalog.databaseSha256 &&
+      artifact?.product_snapshot?.[contentHashField] !== catalog.databaseSha256)
+  ) {
+    throw new Error(`${type} does not match the viewer catalog snapshot`);
+  }
 }
+
+requireProductArtifact(research, "product_research_report_v1", "sha256");
+requireProductArtifact(tasteIndex, "taste_index_v1", "content_sha256");
 
 const browseWorks = [...catalog.works].sort(
   (left, right) =>
@@ -195,15 +224,25 @@ const apiIndex = {
     catalog: {
       href: `${baseUrl}data/catalog.json`,
       mediaType: "application/json",
-      itemPath: "works",
-      count: catalog.works.length,
+      itemPaths: ["agents", "works"],
+      counts: {
+        agents: catalog.agents.length,
+        works: catalog.works.length,
+      },
+    },
+    tasteIndex: {
+      href: `${baseUrl}data/taste-index.json`,
+      mediaType: "application/json",
+      artifactType: "taste_index_v1",
+      featureCount: Object.keys(tasteIndex.features ?? {}).length,
+      entityCount: Object.keys(tasteIndex.entities ?? {}).length,
     },
     research: {
       href: `${baseUrl}data/research.json`,
       mediaType: "application/json",
       itemPath: "items",
-      available: Boolean(research),
-      count: research?.items?.length ?? 0,
+      available: true,
+      count: research.items.length,
     },
   },
   views: Object.fromEntries(

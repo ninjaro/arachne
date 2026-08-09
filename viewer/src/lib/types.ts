@@ -1,6 +1,23 @@
 export type EntityId = string;
 export type RatingValue = -1 | 1;
 export type Ratings = Record<EntityId, RatingValue>;
+export type RatingFamily = "work" | "agent" | "concept";
+
+export interface EntityOpenContext {
+  kind: "recommendation";
+  title: string;
+  details: string[];
+}
+
+export interface ExplicitRating {
+  family: RatingFamily;
+  value: RatingValue;
+}
+
+export interface LocalTasteProfile {
+  formatVersion: 2;
+  ratings: Record<EntityId, ExplicitRating>;
+}
 
 export interface ConceptAssignment {
   id: EntityId;
@@ -116,6 +133,7 @@ export interface Domain {
   agentById: Map<EntityId, Agent>;
   works: Work[];
   workById: Map<EntityId, Work>;
+  conceptById: Map<EntityId, ConceptAssignment>;
   workRelations: WorkRelation[];
   conceptOptions: Array<{ id: EntityId; label: string; count: number }>;
   mediumOptions: Array<{ value: string; count: number }>;
@@ -161,6 +179,12 @@ export interface ResearchSummary {
 }
 
 export interface ResearchData {
+  artifact_type: "product_research_report_v1";
+  format_version: 1;
+  product_snapshot: {
+    snapshot_id: string;
+    sha256: string;
+  };
   formatVersion: 1;
   productSnapshotId: string;
   summary: ResearchSummary;

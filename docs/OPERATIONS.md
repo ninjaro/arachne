@@ -1,8 +1,10 @@
 # Operations
 
-GitHub workflows and local commands invoke the same executable. General
-operations may use `scripts/arachne_ops.py`; product inbox commands are fixed,
-configuration-free executable commands.
+GitHub workflows and local commands invoke the same executable. Prefer grouped
+`build/arachne` commands wherever the binary owns the operation. The
+`scripts/arachne_ops.py` adapter remains for preflight, capability negotiation,
+and compatibility surfaces that add behavior beyond argument translation;
+product inbox commands remain fixed and configuration-free.
 
 ## Local setup
 
@@ -37,12 +39,29 @@ python3 scripts/arachne_ops.py capabilities
 | `product-apply-inbox` | `arachne product apply-inbox` |
 | `product-rebuild-merge-hints` | `arachne product rebuild-merge-hints` |
 | `product-export-merge-hints` | `arachne product export-merge-hints` |
+| `product-research` | `arachne product research --config CONFIG --product-snapshot CONTROL [--output FILE|-] [--compact]` |
+| `product-entity` | `arachne product entity --config CONFIG --product-snapshot CONTROL --id ID [--output FILE|-] [--compact]` |
+| `product-taste-index` | `arachne product taste-index --config CONFIG --product-snapshot CONTROL [--output FILE|-] [--compact]` |
 | `candidate-plan` | `arachne candidate plan --config CONFIG --external-graph JSON --product-snapshot PRODUCT_SNAPSHOT_CONTROL --output-artifact PATH --output-control PATH` |
 | `candidate-rebuild` | `arachne candidate rebuild --config CONFIG --plan-control FILE --run-id ID` |
 | `viewer-build` | `arachne viewer build --config CONFIG --product-snapshot CONTROL [--candidate-snapshot CONTROL]` |
 
 `--print-command` resolves and quotes argv without requiring a built binary. Actual
 execution always performs capability negotiation.
+
+Human-readable discovery is available independently of the machine capability
+contract:
+
+```sh
+build/arachne --help
+build/arachne help product
+build/arachne help product research
+build/arachne help fetch
+build/arachne help fetch plan
+build/arachne help candidate
+build/arachne help candidate plan
+build/arachne help candidate rebuild
+```
 
 ## Door registry and transport
 
@@ -150,6 +169,51 @@ On success it atomically writes `database/merge-hints-review.json` and removes
 the temporary database. See [Product inbox](PRODUCT_INBOX.md) for the closed
 batch format and complete derived-hint lifecycle.
 
+## Product inspection and viewer projections
+
+Research semantics live in the Ariadne product projection builder rather than
+separate Python and browser implementations. The report is readable JSON by
+default, compact with `--compact`, writes to stdout when `--output` is omitted or
+`-`, and is atomically replaceable when a file is named:
+
+```sh
+build/arachne product research \
+  --config config/arachne.local.json \
+  --product-snapshot graphs/product/active.json \
+  --output research.json
+```
+
+The command verifies the snapshot control and export hash, binds the report to
+the product content hash, and requires the merge-hint review to match both that
+product and the durable decisions artifact. It contains quality gaps, open
+ingest issues, and the reviewed merge hints consumed by the web Research view.
+For local viewer development, the same commands also accept the complete pair
+`--database database/art-islands.sqlite --product-export
+.arachne/tmp/viewer-product-local.jsonl`. `npm run data:catalog` creates that
+ignored working JSONL outside the viewer's public tree and without research
+semantics; the native command rejects it unless its embedded identity matches
+the current database bytes.
+
+Inspect one work or agent without opening SQLite or the viewer:
+
+```sh
+build/arachne product entity \
+  --config config/arachne.local.json \
+  --product-snapshot graphs/product/active.json \
+  --id agent-000001
+```
+
+The disposable entity projection includes its canonical subtype, names,
+external identifiers, credits, concepts, manifestations, measurements,
+financial facts, guide assertions, and linked evidence where applicable.
+
+`product taste-index` writes the same closed `taste_index_v1` artifact used by
+the browser. It precomputes sparse work vectors, bounded agent concept
+affinities, norms, global feature metadata, and weighted postings. `viewer
+build` always derives both product reports from its selected snapshot and passes
+them directly to the static site builder; stale copies in compiled assets are
+ignored.
+
 The canonical product database must be tracked through Git LFS. Before
 initializing a repository:
 
@@ -179,24 +243,54 @@ Candidate state is replaceable and may remain stale. Product integration does no
 trigger a mandatory candidate run. Large calculation graphs and HPC intermediates
 may be removed after final queue artifacts are produced.
 
+The native candidate commands can be composed directly; they preserve the same
+snapshot, contract, coverage, and policy verification used by CI:
+
+```sh
+build/arachne candidate plan \
+  --config run/arachne.json \
+  --external-graph run/results/wikidata-external-graph.json \
+  --product-snapshot graphs/product/active.json \
+  --output-artifact artifacts/candidate-plans/wikidata.json \
+  --output-control run/results/wikidata-candidate-plan.control.json
+
+build/arachne candidate rebuild \
+  --config run/arachne.json \
+  --plan-control run/results/wikidata-candidate-plan.control.json \
+  --run-id candidate-wikidata-20260809
+```
+
 ### Bulk source refresh
 
 `.github/workflows/source-refresh.yml` checks the reviewed
 `candidate_rebuild.sources.wikidata.refresh_days` cadence (60 days by default).
-It creates an official bulk plan, translates it through `fetch-plan-translate`,
-acquires the dump through the `wikidata/official-dumps` door, and runs:
+It creates an official bulk plan, translates it with `build/arachne fetch plan`,
+acquires the dump through the `wikidata/official-dumps` door, and invokes the
+native transport commands directly:
+
+```sh
+build/arachne fetch plan \
+  --config /scratch/arachne.json \
+  --plan /scratch/wikidata-fetch-plan.json \
+  --output-directory /scratch/wikidata-fetch-controls
+
+build/arachne fetch \
+  --config /scratch/arachne.json \
+  --request /scratch/wikidata-fetch-controls/wikidata-official-dump.json \
+  --output-control /scratch/wikidata-source.acquired.json
+```
+
+The offline worker then runs with the materialized operations config and one
+predictable result directory:
 
 ```sh
 python3 -u hpc/wikidata/build_external_graph.py \
-  --source-control /scratch/wikidata.acquired.json \
-  --artifact-store /state/artifacts \
+  --config /scratch/arachne.json \
+  --source-control /scratch/wikidata-source.acquired.json \
   --product-snapshot-control /state/graphs/product/active.json \
-  --graph-store /state/graphs \
-  --config hpc/wikidata/config.json \
-  --candidate-policy-config /state/config/arachne.json \
-  --output /scratch/external-graph.json \
-  --image-hints-output /scratch/wikidata-image-hints.json \
-  --work-directory /scratch/wikidata-work
+  --output-directory /scratch/wikidata-results \
+  --work-directory /scratch/wikidata-work \
+  --wikidata-config hpc/wikidata/config.json
 ```
 
 The worker has no network client. It verifies the receipt and product JSONL hash,
@@ -209,9 +303,13 @@ the product database. Its temporary report binds the candidate policy hash and
 both derived outputs to their verified inputs, and distinguishes transport
 verification from algorithm failure. After a
 successful candidate activation, the workflow verifies and removes the raw dump
-and disposable graph, records the refresh marker, and proposes the candidate
-snapshot and run manifest for review. `ARACHNE_HPC_RUNNER_LABEL` should name a
-runner with enough scratch storage and time for a complete dump.
+and disposable graph. Before removing the working image-hint output, it validates
+that artifact against the reviewed product snapshot and atomically stages it as
+`derived/wikidata-image-hints.json` inside persistent state. The resulting state
+proposal therefore carries the replaceable hints alongside the candidate
+snapshot and run manifest; no Actions-artifact download or manual repository copy
+is needed. `ARACHNE_HPC_RUNNER_LABEL` should name a runner with enough scratch
+storage and time for a complete dump.
 
 ## Remote state
 
@@ -222,10 +320,13 @@ Remote writes remain disabled until `ARACHNE_OPERATIONS_ENABLED` is exactly
 |---|---|---|
 | `ARACHNE_OPERATIONS_ENABLED` | variable | Explicit remote-write switch |
 
-Initialize the state repository with `.gitattributes` and a reviewed
-`config/arachne.json` copied from the example. Workflows materialize runner-local
-absolute paths while preserving its timezone, candidate and security
-policy. Every state checkout enables Git LFS. Globally serialized intake commits
+Use a reviewed state checkout or worktree of
+`https://github.com/ninjaro/arachne.git`, with the repository's `.gitattributes`
+and a `config/arachne.json` copied from the example. It may live at
+`.arachne-state` to isolate mutable operational state, but it is not an unknown
+or private second repository. Workflows materialize runner-local absolute paths
+while preserving its timezone, candidate, and security policy. Every state
+checkout enables Git LFS. Globally serialized intake commits
 only queue and ledger paths directly to the official base; configure branch rules
 to allow that bot identity. Product and candidate database changes go to review
 branches and never push the base directly.
@@ -235,10 +336,10 @@ branches and never push the base directly.
 | Workflow | Remote behavior | Local equivalent |
 |---|---|---|
 | `validation.yml` | Read-only contracts, scripts, unit/build tests | `scripts/run_checks.sh` |
-| `intake.yml` | Acquire one issue attachment, materialize and validate a strict product batch, then propose the inbox file | `issue_fetch_request.py`, `arachne_ops.py fetch`, `materialize_product_batch.py`, `build/arachne product check-inbox` |
+| `intake.yml` | Acquire one issue attachment, materialize and validate a strict product batch, then propose the inbox file | `issue_fetch_request.py`, `build/arachne fetch`, `materialize_product_batch.py`, `build/arachne product check-inbox` |
 | `product-integration.yml` | Validate and transactionally apply inbox batches, then explicitly rebuild and export the separate merge-hint projection | `build/arachne product check-inbox apply-inbox`, then `build/arachne product rebuild-merge-hints export-merge-hints` |
-| `candidate-rebuild.yml` | Ariadne plan or HPC handoff; Penelope rebuild | `arachne_ops.py candidate-plan/candidate-rebuild` |
-| `source-refresh.yml` | Cadence-gated bulk acquisition, streaming HPC graph, full candidate rebuild | `source_refresh_gate.py`, `fetch-plan-translate`, `hpc/wikidata/build_external_graph.py` |
+| `candidate-rebuild.yml` | Ariadne plan or HPC handoff; Penelope rebuild | `build/arachne candidate plan`, then `build/arachne candidate rebuild` |
+| `source-refresh.yml` | Cadence-gated bulk acquisition, streaming HPC graph, full candidate rebuild | `build/arachne fetch plan`, `build/arachne fetch`, `hpc/wikidata/build_external_graph.py`, and direct candidate commands |
 | `publication.yml` | Protected, verified immutable Pages artifact | `arachne_ops.py viewer-build`, then `resolve_site_bundle.py` |
 | `manual-dispatch.yml` | Audited cocoon decision, or owner/maintainer product/candidate dispatch | `cocoon-transition` and the same commands above |
 
@@ -257,15 +358,18 @@ byte length before uploading only the selected immutable directory. A failed
 build, verification, or deploy leaves the previous Pages site valid.
 
 Publication accepts an optional `image_hints_artifact` path relative to the
-reviewed state repository. The workflow resolves the path without permitting it
-to escape that checkout, then `viewer/scripts/stage_image_hints.py` requires its
+reviewed state repository. Without an override, it automatically uses the
+predictable `derived/wikidata-image-hints.json` proposed by source refresh when
+that file is present. The workflow resolves the selected path without permitting
+it to escape that checkout, then
+`viewer/scripts/stage_image_hints.py` requires its
 `wikidata_image_hints_v1.product_snapshot` identity to match the selected
 product snapshot control. Only then is the disposable file staged as
 `data/wikidata-image-hints.json` before the asset-only Vite build; the normal
 immutable site builder copies it and includes it in the bundle digest. A missing
-input is normal and produces a viewer without local image hints. A supplied but
-missing, malformed, or stale artifact fails publication rather than being
-silently relabelled or retained.
+default is normal and produces a viewer without local image hints. A supplied
+override that is missing, or any selected artifact that is malformed or stale,
+fails publication rather than being silently relabelled or retained.
 
 Back up the Git-LFS product SQLite and operational state. Candidate state and HPC
 intermediates are independently replaceable. Product idempotency depends only on

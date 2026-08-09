@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   Domain,
   ResearchData,
@@ -18,7 +18,7 @@ import {
 type KindFilter = ResearchKind | "all";
 type SeverityFilter = ResearchSeverity | "all";
 type ResearchSort = "severity" | "quality" | "similarity" | "title";
-type ResearchLayout = "list" | "grid";
+type ResearchGroup = "none" | "category" | "batch" | "kind";
 
 const PAGE_SIZES = [25, 50, 100];
 const SEVERITY_RANK: Record<ResearchSeverity, number> = {
@@ -32,24 +32,30 @@ function rawValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function copyText(value: string): void {
+  void globalThis.navigator?.clipboard?.writeText(value);
+}
+
+function entityExists(domain: Domain, id: string | undefined): id is string {
+  return Boolean(
+    id && (domain.workById.has(id) || domain.agentById.has(id)),
+  );
+}
+
 function ResearchCard({
   item,
   domain,
   onOpen,
+  onCompare,
 }: {
   item: ResearchItem;
   domain: Domain;
   onOpen: OpenHandler;
+  onCompare: (leftId: string, rightId: string) => void;
 }) {
-  const linkedWork = item.workId ? domain.workById.get(item.workId) : undefined;
-  const leftWork =
-    item.entityType === "work" && item.leftId
-      ? domain.workById.get(item.leftId)
-      : undefined;
-  const rightWork =
-    item.entityType === "work" && item.rightId
-      ? domain.workById.get(item.rightId)
-      : undefined;
+  const linkedId = entityExists(domain, item.workId) ? item.workId : undefined;
+  const leftId = entityExists(domain, item.leftId) ? item.leftId : undefined;
+  const rightId = entityExists(domain, item.rightId) ? item.rightId : undefined;
   const qualityWidth = Math.max(0, Math.min(100, item.score ?? 0));
   const similarityWidth = Math.max(
     0,
@@ -72,25 +78,42 @@ function ResearchCard({
           <h3>{item.title}</h3>
           <p>{item.message}</p>
         </div>
-        {linkedWork || leftWork || rightWork ? (
-          <div>
-            {linkedWork ? (
-              <button type="button" onClick={() => onOpen(linkedWork.id)}>
-                Open work
+        <div className="research-card-actions">
+            {linkedId ? (
+              <button type="button" onClick={() => onOpen(linkedId)}>
+                Open entity
               </button>
             ) : null}
-            {leftWork ? (
-              <button type="button" onClick={() => onOpen(leftWork.id)}>
-                Open left work
+            {leftId ? (
+              <button type="button" onClick={() => onOpen(leftId)}>
+                Open left
               </button>
             ) : null}
-            {rightWork ? (
-              <button type="button" onClick={() => onOpen(rightWork.id)}>
-                Open right work
+            {rightId ? (
+              <button type="button" onClick={() => onOpen(rightId)}>
+                Open right
               </button>
             ) : null}
+            {leftId && rightId ? (
+              <button type="button" onClick={() => onCompare(leftId, rightId)}>
+                Compare
+              </button>
+            ) : null}
+            {linkedId || leftId ? (
+              <button
+                type="button"
+                onClick={() => copyText(linkedId ?? leftId ?? "")}
+              >
+                Copy entity ID
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => copyText(JSON.stringify(item, null, 2))}
+            >
+              Copy item JSON
+            </button>
           </div>
-        ) : null}
       </header>
 
       {item.score !== undefined ? (
@@ -226,20 +249,98 @@ export function ResearchView({
   data,
   domain,
   onOpen,
+  onCompare,
 }: {
   data: ResearchData;
   domain: Domain;
   onOpen: OpenHandler;
+  onCompare: (leftId: string, rightId: string) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [kind, setKind] = useState<KindFilter>("all");
-  const [severity, setSeverity] = useState<SeverityFilter>("all");
-  const [category, setCategory] = useState("all");
+  const initialParams = useMemo(
+    () => new URLSearchParams(globalThis.location?.search ?? ""),
+    [],
+  );
+  const requestedKind = initialParams.get("kind");
+  const requestedSeverity = initialParams.get("severity");
+  const requestedGroup = initialParams.get("group");
+  const [query, setQuery] = useState(initialParams.get("q") ?? "");
+  const [kind, setKind] = useState<KindFilter>(
+    requestedKind === "quality_gap" ||
+      requestedKind === "ingest_issue" ||
+      requestedKind === "merge_hint"
+      ? requestedKind
+      : "all",
+  );
+  const [severity, setSeverity] = useState<SeverityFilter>(
+    requestedSeverity === "problem" ||
+      requestedSeverity === "weak" ||
+      requestedSeverity === "info"
+      ? requestedSeverity
+      : "all",
+  );
+  const [category, setCategory] = useState(initialParams.get("category") ?? "all");
   const [linkedOnly, setLinkedOnly] = useState(false);
   const [sort, setSort] = useState<ResearchSort>("severity");
-  const [layout, setLayout] = useState<ResearchLayout>("list");
+  const [group, setGroup] = useState<ResearchGroup>(
+    requestedGroup === "category" ||
+      requestedGroup === "batch" ||
+      requestedGroup === "kind"
+      ? requestedGroup
+      : "none",
+  );
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+
+  useEffect(() => {
+    const applyUrlFilters = () => {
+      const params = new URLSearchParams(globalThis.location.search);
+      const nextKind = params.get("kind");
+      const nextSeverity = params.get("severity");
+      const nextGroup = params.get("group");
+      setQuery(params.get("q") ?? "");
+      setKind(
+        nextKind === "quality_gap" ||
+          nextKind === "ingest_issue" ||
+          nextKind === "merge_hint"
+          ? nextKind
+          : "all",
+      );
+      setSeverity(
+        nextSeverity === "problem" ||
+          nextSeverity === "weak" ||
+          nextSeverity === "info"
+          ? nextSeverity
+          : "all",
+      );
+      setCategory(params.get("category") ?? "all");
+      setGroup(
+        nextGroup === "category" || nextGroup === "batch" || nextGroup === "kind"
+          ? nextGroup
+          : "none",
+      );
+      setPage(1);
+    };
+    globalThis.addEventListener("popstate", applyUrlFilters);
+    return () => globalThis.removeEventListener("popstate", applyUrlFilters);
+  }, []);
+
+  useEffect(() => {
+    const url = new URL(globalThis.location.href);
+    const setOptional = (name: string, value: string, empty: string) => {
+      if (value === empty) url.searchParams.delete(name);
+      else url.searchParams.set(name, value);
+    };
+    setOptional("q", query, "");
+    setOptional("kind", kind, "all");
+    setOptional("severity", severity, "all");
+    setOptional("category", category, "all");
+    setOptional("group", group, "none");
+    globalThis.history.replaceState(
+      null,
+      "",
+      `${url.pathname}${url.search}`,
+    );
+  }, [category, group, kind, query, severity]);
 
   const categories = useMemo(
     () => [...new Set(data.items.map((item) => item.category))].sort(),
@@ -253,12 +354,11 @@ export function ResearchView({
       if (kind !== "all" && item.kind !== kind) return false;
       if (severity !== "all" && item.severity !== severity) return false;
       if (category !== "all" && item.category !== category) return false;
-      const hasLinkedWork =
-        (item.workId !== undefined && domain.workById.has(item.workId)) ||
-        (item.entityType === "work" &&
-          ((item.leftId !== undefined && domain.workById.has(item.leftId)) ||
-            (item.rightId !== undefined && domain.workById.has(item.rightId))));
-      if (linkedOnly && !hasLinkedWork) return false;
+      const hasLinkedEntity =
+        entityExists(domain, item.workId) ||
+        entityExists(domain, item.leftId) ||
+        entityExists(domain, item.rightId);
+      if (linkedOnly && !hasLinkedEntity) return false;
       return matchesResearchQuery(item, parsedQuery);
     });
   }, [
@@ -268,6 +368,7 @@ export function ResearchView({
     severity,
     category,
     linkedOnly,
+    domain.agentById,
     domain.workById,
   ]);
 
@@ -278,6 +379,24 @@ export function ResearchView({
     (safePage - 1) * pageSize,
     safePage * pageSize,
   );
+  const groupedPageItems = useMemo(() => {
+    const groups = new Map<string, ResearchItem[]>();
+    for (const item of pageItems) {
+      const key = group === "category"
+        ? item.category
+        : group === "batch"
+          ? item.batchId ?? "No batch"
+          : group === "kind"
+            ? item.kind
+            : "Results";
+      const entries = groups.get(key);
+      if (entries) entries.push(item);
+      else groups.set(key, [item]);
+    }
+    return [...groups.entries()].sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+  }, [group, pageItems]);
 
   function resetPage() {
     setPage(1);
@@ -376,6 +495,19 @@ export function ResearchView({
           <option value="similarity">Highest similarity</option>
           <option value="title">Title</option>
         </select>
+        <select
+          value={group}
+          aria-label="Group research items"
+          onChange={(event) => {
+            setGroup(event.target.value as ResearchGroup);
+            resetPage();
+          }}
+        >
+          <option value="none">No grouping</option>
+          <option value="category">Group by category</option>
+          <option value="batch">Group by batch</option>
+          <option value="kind">Group by kind</option>
+        </select>
         <label className="research-checkbox">
           <input
             type="checkbox"
@@ -385,7 +517,7 @@ export function ResearchView({
               resetPage();
             }}
           />
-          Linked works only
+          Linked entities only
         </label>
         <button
           type="button"
@@ -396,6 +528,7 @@ export function ResearchView({
             setCategory("all");
             setLinkedOnly(false);
             setSort("severity");
+            setGroup("none");
             resetPage();
           }}
         >
@@ -423,34 +556,30 @@ export function ResearchView({
           Showing {pageItems.length.toLocaleString()} items on page {safePage} of{" "}
           {pageCount}; {visible.length.toLocaleString()} match the filters.
         </p>
-        <div
-          className="research-layout-toggle"
-          role="group"
-          aria-label="Research result layout"
-        >
-          <button
-            type="button"
-            className={layout === "list" ? "active" : ""}
-            aria-pressed={layout === "list"}
-            onClick={() => setLayout("list")}
-          >
-            List
-          </button>
-          <button
-            type="button"
-            className={layout === "grid" ? "active" : ""}
-            aria-pressed={layout === "grid"}
-            onClick={() => setLayout("grid")}
-          >
-            Grid
-          </button>
-        </div>
       </div>
 
       {pagination}
-      <div className={`research-list ${layout}`}>
-        {pageItems.map((item) => (
-          <ResearchCard item={item} domain={domain} onOpen={onOpen} key={item.id} />
+      <div className="research-list list">
+        {groupedPageItems.map(([groupLabel, items]) => (
+          <section className="research-group" key={groupLabel}>
+            {group !== "none" ? (
+              <h2>
+                {group === "kind" || group === "category"
+                  ? humanize(groupLabel)
+                  : groupLabel}
+                <span>{items.length.toLocaleString()}</span>
+              </h2>
+            ) : null}
+            {items.map((item) => (
+              <ResearchCard
+                item={item}
+                domain={domain}
+                onOpen={onOpen}
+                onCompare={onCompare}
+                key={item.id}
+              />
+            ))}
+          </section>
         ))}
       </div>
       {pagination}

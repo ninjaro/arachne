@@ -76,8 +76,24 @@ def validate_image(
         {"file", "kind", "property", "rank", "source", "wikidata_qid"},
     )
     filename = image.get("file")
-    if not isinstance(filename, str) or not 1 <= len(filename) <= 512:
-        raise StageError(f"{where}.file must contain 1 to 512 characters")
+    if (
+        not isinstance(filename, str)
+        or filename != filename.strip()
+        or not 1 <= len(filename) <= 512
+        or "://" in filename
+        or filename.casefold().startswith(("data:", "javascript:"))
+        or any(ord(character) < 32 or character == "\x7f" for character in filename)
+    ):
+        raise StageError(f"{where}.file must be a plain Wikimedia Commons filename")
+    try:
+        if len(filename.encode("utf-8")) > 1024:
+            raise StageError(
+                f"{where}.file must be a plain Wikimedia Commons filename"
+            )
+    except UnicodeEncodeError as cause:
+        raise StageError(
+            f"{where}.file must be a plain Wikimedia Commons filename"
+        ) from cause
     property_id = image.get("property")
     expected_kind = (
         IMAGE_PROPERTIES[family].get(property_id)

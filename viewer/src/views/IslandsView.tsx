@@ -6,29 +6,45 @@ import {
   buildIslandsGraph,
   layoutIslands,
 } from "../lib/islands";
-import type { OpenHandler, RateHandler } from "../components/common";
-import { RatingButtons } from "../components/common";
+import type { OpenHandler } from "../components/common";
 import { humanize } from "../lib/format";
+import type { TasteIndex } from "../lib/taste";
 
 export function IslandsView({
   domain,
   index,
   ratings,
   settings,
+  tasteIndex,
   onOpen,
-  onRate,
 }: {
   domain: Domain;
   index: FeatureIndex;
   ratings: Ratings;
   settings: Settings;
+  tasteIndex: TasteIndex;
   onOpen: OpenHandler;
-  onRate: RateHandler;
 }) {
-  const graph = useMemo(
-    () => buildIslandsGraph(domain, index, ratings, settings),
-    [domain, index, ratings, settings],
+  const completeGraph = useMemo(
+    () => buildIslandsGraph(domain, index, ratings, settings, tasteIndex),
+    [domain, index, ratings, settings, tasteIndex],
   );
+  const [isolatedIsland, setIsolatedIsland] = useState<number | null>(null);
+  const graph = useMemo(() => {
+    if (isolatedIsland === null) return completeGraph;
+    const component = completeGraph.components.find(
+      (candidate) => candidate.index === isolatedIsland,
+    );
+    if (!component) return completeGraph;
+    const ids = new Set(component.nodeIds);
+    return {
+      nodes: completeGraph.nodes.filter((node) => ids.has(node.id)),
+      edges: completeGraph.edges.filter(
+        (edge) => ids.has(edge.source) && ids.has(edge.target),
+      ),
+      components: [{ index: component.index, nodeIds: component.nodeIds }],
+    };
+  }, [completeGraph, isolatedIsland]);
   const layout = useMemo(() => layoutIslands(graph), [graph]);
   const [zoom, setZoom] = useState(1);
 
@@ -41,7 +57,6 @@ export function IslandsView({
     );
   }
 
-  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
   const ratedCount = graph.nodes.filter(
     (node) => node.state !== "recommended",
   ).length;
@@ -50,6 +65,24 @@ export function IslandsView({
   return (
     <section className="graph-view">
       <div className="graph-toolbar">
+        <label>
+          Island{" "}
+          <select
+            value={isolatedIsland ?? "all"}
+            onChange={(event) =>
+              setIsolatedIsland(
+                event.target.value === "all" ? null : Number(event.target.value),
+              )
+            }
+          >
+            <option value="all">All islands</option>
+            {completeGraph.components.map((component) => (
+              <option value={component.index} key={component.index}>
+                Island {component.index + 1} · {component.nodeIds.length} works
+              </option>
+            ))}
+          </select>
+        </label>
         <label>
           Zoom{" "}
           <input
@@ -182,11 +215,6 @@ export function IslandsView({
                           .join(" · ")}
                       </small>
                     </span>
-                    <RatingButtons
-                      work={work}
-                      ratings={ratings}
-                      onRate={onRate}
-                    />
                   </div>
                 </foreignObject>
               );
