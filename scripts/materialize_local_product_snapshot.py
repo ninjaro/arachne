@@ -126,6 +126,16 @@ def read_json(path: Path, description: str) -> dict[str, Any]:
     return document
 
 
+def valid_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
 def verify_record(
     record: Any,
     path: Path,
@@ -177,7 +187,7 @@ def verify_existing_snapshot(
         or control.get("run_id") != f"product-materialize-{database_hash[:16]}"
         or control.get("graph_version") != "canonical-schema-v6"
         or control.get("content_sha256") != database_hash
-        or not isinstance(control.get("activated_at"), str)
+        or not valid_timestamp(control.get("activated_at"))
         or control.get("extensions")
         != {
             "org.ninjaro.arachne.hpc": {

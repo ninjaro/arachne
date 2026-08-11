@@ -222,6 +222,24 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         self.assertIn("differs from deterministic materialization", second.stderr)
         self.assertFalse(second_control.exists())
 
+    def test_rejects_an_invalid_cached_activation_timestamp(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        control = json.loads(self.control.read_text(encoding="utf-8"))
+        database_artifact = self.graph_store / control["database"]["storage_ref"]
+        snapshot_control = database_artifact.parent / "snapshot-control.json"
+        cached = json.loads(snapshot_control.read_text(encoding="utf-8"))
+        cached["activated_at"] = "not-a-timestamp"
+        snapshot_control.write_text(
+            json.dumps(cached, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        second = self.invoke(control=self.root / "second-control.json")
+
+        self.assertEqual(second.returncode, 2)
+        self.assertIn("snapshot control is invalid", second.stderr)
+
     def test_rejects_symbolic_link_custody_boundaries(self) -> None:
         database_link = self.root / "database-link.sqlite"
         database_link.symlink_to(self.database)
