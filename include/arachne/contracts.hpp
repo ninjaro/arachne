@@ -10,6 +10,11 @@
 
 namespace arachnespace::contracts {
 
+inline constexpr std::string_view structural_analysis_contract
+    = "arachne_structural_analysis_v1";
+inline constexpr std::string_view structural_analysis_algorithm_version
+    = "ariadne-structural-hints-1.0.0";
+
 /** Supported active actor-boundary and product-inbox contracts. */
 enum class contract_name {
     arachne_batch,

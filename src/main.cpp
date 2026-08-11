@@ -1357,12 +1357,18 @@ struct product_task_result final {
         projection.at("candidates"),
         [](const json& value) { return value.value("selected", false); }
     ));
+    const auto observation_count
+        = projection.at("analysis").at("observations").size();
+    const auto priority_count
+        = projection.at("analysis").at("research_priorities").size();
     return {
         .document = {
             { "task", "rebuild-merge-hints" },
             { "status", "ok" },
             { "candidate_count", projection.at("candidates").size() },
             { "selected_count", selected },
+            { "structural_observation_count", observation_count },
+            { "research_priority_count", priority_count },
             { "product_sha256",
               projection.at("product_snapshot").at("sha256") },
         },
@@ -1388,6 +1394,10 @@ struct product_task_result final {
             { "task", "export-merge-hints" },
             { "status", "ok" },
             { "review_count", review.at("items").size() },
+            { "structural_observation_count",
+              review.at("analysis").at("observations").size() },
+            { "research_priority_count",
+              review.at("analysis").at("research_priorities").size() },
             { "artifact_path",
               destination.lexically_relative(repository_root())
                   .generic_string() },

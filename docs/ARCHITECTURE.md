@@ -57,7 +57,7 @@ falls back to stale bytes.
 | Operational state | Arachne | Queue/run coordination; permanent per-batch audit metadata is not required |
 | Product inbox | Penelope | Strict JSON files at repository `inbox/`; successful files are removed only after commit and rejected files move to `inbox/rejected/` |
 | Product SQLite | Penelope | `database/art-islands.sqlite`; schema v6 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, and ingest issues, with no disposable merge-hint state |
-| Merge-hint projection | Ariadne | `.arachne/tmp/merge-hints.sqlite` is disposable generation state; `database/merge-hints-review.json` is the small hash-bound review projection; `database/merge-hint-decisions.json` durably preserves ignored pairs |
+| Hint analysis | Ariadne | `.arachne/tmp/merge-hints.sqlite` holds disposable identity candidates and structural observations; `database/merge-hints-review.json` is the bounded hash-bound review projection; `database/merge-hint-decisions.json` durably preserves only ignored identity pairs |
 | Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
@@ -117,11 +117,21 @@ batch transaction never performs similarity calculations or hint maintenance.
 Merge hints are an explicit Ariadne projection. Rebuild opens a disposable
 SQLite database as writable `main`, attaches the canonical product database
 read-only, and reads canonical rows through the attached `product` schema. The
-temporary database contains only blocks, candidate support, scores, signals,
-and distribution statistics. Its metadata binds the generator version to the
+temporary database contains only identity blocks/candidates, normalized raw
+analytical observations, and lossless higher-level projection sections. Its
+metadata binds the generator version to the
 exact product schema version and SHA-256. Export refuses missing or stale state,
 writes the fixed review JSON, and removes the temporary database after success.
 No hint can perform a merge; identity changes still require an explicit batch.
+
+The same rebuild may emit generic structural observations, quality-scope
+comparisons, temporal sequences, and structural fingerprints. These remain a
+separate analytical subset: every record names its algorithm and metric,
+support, scope and parameters, entity families, and exact product snapshot.
+Directional measurements retain their direction. Cross-family proximity and
+trajectory signatures are never identity evidence, and computed containment,
+ancestry, bridges, clusters, or temporal order never become canonical
+relationships. Existing merge candidates remain the dedicated identity subset.
 
 ## Candidate graph and viewer
 

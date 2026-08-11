@@ -309,9 +309,10 @@ build/arachne product rebuild-merge-hints export-merge-hints
 Rebuild creates `.arachne/tmp/merge-hints.sqlite` as writable `main` and attaches
 `database/art-islands.sqlite` read-only as `product`. Canonical entities, names,
 identifiers, credits, works, concepts, assertions, and measurements are queried
-through `product.*`; they are not copied into the temporary database. Only
-blocks, memberships, supported candidate pairs, deterministic signals, scores,
-temporary indexes, and review-distribution statistics are stored there. No
+through `product.*`; they are not copied into the temporary database. Identity
+blocks and candidate signals remain dedicated tables. Generic observations are
+stored as queryable typed rows, while sequences, clusters, views, and other
+evolving analytical sections are retained losslessly by section. No
 cross-database foreign keys are required.
 
 The temporary metadata records the product schema version, exact product
@@ -349,3 +350,19 @@ fixed per-entity caps. The exported messages explain the positive reasons for
 selection and preserve machine-readable component signals. Hints are advisory:
 no score or signal performs a merge, and every identity change must arrive in a
 later explicit `arachne_batch_v2` batch.
+
+Structural hints are not merge candidates. They preserve independent bounded
+measurements such as overlap, directional containment, temporal displacement,
+resampling stability, sequence alignment, and cross-family fingerprints with
+their support, corpus-quality scope, parameters, algorithm version, and product
+SHA-256. Derived bridge, ancestry, trajectory, or cluster descriptions are
+advisory explanations of those measurements, not accepted product semantics.
+They cannot create a concept relation or any other inbox operation; a human must
+author and source every resulting canonical change in a normal batch.
+
+The disposable store metadata pins both the merge-hint generator and structural
+algorithm versions. Storage and export reject stale snapshots, unknown or
+family-mismatched canonical references in core analytical projections, orphaned
+rows, and non-finite observations. Canonical concept relations enter the input
+with explicit incoming/outgoing direction so directional relation features are
+not silently mirrored.

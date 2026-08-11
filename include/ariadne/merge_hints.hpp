@@ -19,7 +19,7 @@ inline constexpr std::string_view merge_hint_projection_contract
 inline constexpr std::string_view merge_hint_review_contract
     = "arachne_merge_hint_review_v1";
 inline constexpr std::string_view merge_hint_generator_version
-    = "ariadne-merge-hints-2.0.0";
+    = "ariadne-merge-hints-3.0.0";
 
 /**
  * Build the complete deterministic, disposable merge-hint projection.
@@ -27,9 +27,9 @@ inline constexpr std::string_view merge_hint_generator_version
  * The input is a `merge_hint_input_v1` JSON value. It contains product
  * snapshot identity plus canonical agent, work, and concept records already
  * read by the product-store actor. This algorithm does not open or mutate a
- * database. The returned `merge_hint_projection_v1` contains only derived
- * blocks, memberships, candidates, signals, distribution statistics, and
- * review selection state.
+ * database. The returned `merge_hint_projection_v1` keeps identity-oriented
+ * blocks, candidates, and review selection separate from its generic,
+ * snapshot-bound structural-analysis section.
  */
 class merge_hint_planner final {
 public:

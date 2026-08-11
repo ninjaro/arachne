@@ -1,4 +1,5 @@
 #include "ariadne/merge_hints.hpp"
+#include "ariadne/structural_hints.hpp"
 
 #include <utf8proc.h>
 
@@ -78,6 +79,7 @@ struct measurement_record final {
 struct assertion_record final {
     std::string work_id;
     std::string relation_type;
+    std::optional<int> centrality;
     std::set<std::string, std::less<>> evidence_ids;
     std::set<std::string, std::less<>> source_ids;
 };
@@ -100,6 +102,7 @@ struct entity_record final {
     std::string medium;
     std::optional<int> year_start;
     std::optional<int> year_end;
+    std::string date_precision;
     std::set<std::string, std::less<>> concept_ids;
     std::vector<measurement_record> measurements;
 
@@ -720,12 +723,20 @@ template <typename T>
 ) {
     require_only_fields(
         value,
-        { "work_id", "relation_type", "evidence_ids", "source_ids" },
+        { "work_id", "relation_type", "centrality", "evidence_ids",
+          "source_ids" },
         context
     );
+    const auto centrality = optional_integer<int>(
+        value, "centrality", context
+    );
+    if (centrality && (*centrality < 1 || *centrality > 100)) {
+        invalid(std::string(context) + ".centrality must be between 1 and 100");
+    }
     return {
         .work_id = required_string(value, "work_id", context),
         .relation_type = value.value("relation_type", ""),
+        .centrality = centrality,
         .evidence_ids = string_array(value, "evidence_ids", context),
         .source_ids = string_array(value, "source_ids", context),
     };
@@ -734,7 +745,19 @@ template <typename T>
 [[nodiscard]] neighbor_record parse_neighbor(
     const json& value, const std::string_view context
 ) {
-    require_only_fields(value, { "concept_id", "relation_type" }, context);
+    require_only_fields(
+        value, { "concept_id", "relation_type", "direction" }, context
+    );
+    if (const auto direction = value.find("direction");
+        direction != value.end()
+        && (!direction->is_string()
+            || (direction->get_ref<const std::string&>() != "outgoing"
+                && direction->get_ref<const std::string&>() != "incoming"))) {
+        invalid(
+            std::string(context)
+            + ".direction must be outgoing or incoming when present"
+        );
+    }
     return {
         .concept_id = required_string(value, "concept_id", context),
         .relation_type = required_string(value, "relation_type", context),
@@ -847,7 +870,7 @@ template <typename T>
     } else if (result.family == "work") {
         require_only_fields(
             *payload,
-            { "medium", "year_start", "year_end", "credits",
+            { "medium", "year_start", "year_end", "date_precision", "credits",
               "concept_ids", "measurements" },
             context + ".work"
         );
@@ -858,6 +881,13 @@ template <typename T>
         result.year_end = optional_integer<int>(
             *payload, "year_end", context + ".work"
         );
+        if (const auto precision = payload->find("date_precision");
+            precision != payload->end() && !precision->is_null()) {
+            if (!precision->is_string()) {
+                invalid(context + ".work.date_precision must be a string or null");
+            }
+            result.date_precision = precision->get<std::string>();
+        }
         result.concept_ids = string_array(
             *payload, "concept_ids", context + ".work"
         );
@@ -2523,7 +2553,7 @@ void validate_projection(const json& projection) {
     }
     for (const auto field : {
              "generator", "product_snapshot", "decisions_snapshot", "candidates",
-             "family_statistics", "selection" }) {
+             "family_statistics", "selection", "analysis" }) {
         if (!projection.contains(field)) {
             throw std::invalid_argument(
                 "merge hint projection is missing " + std::string(field)
@@ -2534,6 +2564,18 @@ void validate_projection(const json& projection) {
         || !projection.at("family_statistics").is_array()) {
         throw std::invalid_argument(
             "merge hint projection candidates/statistics must be arrays"
+        );
+    }
+    const auto& analysis = projection.at("analysis");
+    if (!analysis.is_object()
+        || analysis.value("contract", "") != structural_hint_contract
+        || analysis.value("version", 0) != 1
+        || analysis.value("algorithm_version", "")
+            != structural_hint_algorithm_version
+        || !analysis.contains("snapshot")
+        || analysis.at("snapshot") != projection.at("product_snapshot")) {
+        throw std::invalid_argument(
+            "merge hint projection has invalid structural analysis"
         );
     }
 }
@@ -2558,7 +2600,10 @@ void validate_projection(const json& projection) {
 } // namespace
 
 json merge_hint_planner::build(const json& input) {
-    return build_projection(parse_input(input));
+    auto parsed = parse_input(input);
+    json projection = build_projection(std::move(parsed));
+    projection["analysis"] = structural_hint_planner::build(input);
+    return projection;
 }
 
 json merge_hint_planner::export_review(const json& projection) {
@@ -2666,6 +2711,7 @@ json merge_hint_planner::export_review(const json& projection) {
           { { "selected", items.size() },
             { "selectedByType", std::move(selected_by_type) } } },
         { "items", std::move(items) },
+        { "analysis", projection.at("analysis") },
     };
 }
 

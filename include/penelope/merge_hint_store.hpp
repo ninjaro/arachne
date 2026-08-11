@@ -31,8 +31,9 @@ void store_merge_hint_projection(
 );
 
 /**
- * Validate freshness and return the selected projection rows, enriched with
- * current canonical labels for Ariadne's review-artifact formatter.
+ * Validate freshness and return selected identity rows, enriched with current
+ * canonical labels, plus the complete generic structural-analysis section for
+ * Ariadne's review-artifact formatter.
  */
 [[nodiscard]] nlohmann::json load_merge_hint_export(
     const std::filesystem::path& repository_root,

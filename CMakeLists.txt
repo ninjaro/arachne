@@ -71,6 +71,7 @@ target_compile_features(pheidippides_transport PUBLIC cxx_std_23)
 add_library(ariadne_engine STATIC
     src/ariadne/candidates.cpp
     src/ariadne/merge_hints.cpp
+    src/ariadne/structural_hints.cpp
     src/ariadne/product.cpp
     src/ariadne/viewer.cpp
 )
@@ -199,6 +200,9 @@ if(BUILD_TESTS)
     endif()
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_hint_store_tests.cpp")
         list(APPEND ARACHNE_CORE_TEST_SOURCES tests/merge_hint_store_tests.cpp)
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/structural_hints_tests.cpp")
+        list(APPEND ARACHNE_CORE_TEST_SOURCES tests/structural_hints_tests.cpp)
     endif()
 
     add_executable(core_tests ${ARACHNE_CORE_TEST_SOURCES})

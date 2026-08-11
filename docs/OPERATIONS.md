@@ -161,13 +161,36 @@ build/arachne product rebuild-merge-hints
 build/arachne product export-merge-hints
 ```
 
-Rebuild writes only `.arachne/tmp/merge-hints.sqlite` and leaves the canonical
+Rebuild writes only the disposable hint-store schema v2 at
+`.arachne/tmp/merge-hints.sqlite` and leaves the canonical
 database bytes unchanged. Export never rebuilds implicitly: it rejects missing
 temporary state, a generator-version mismatch, a product SHA-256 mismatch, or
 a changed `database/merge-hint-decisions.json` decision artifact.
 On success it atomically writes `database/merge-hints-review.json` and removes
 the temporary database. See [Product inbox](PRODUCT_INBOX.md) for the closed
 batch format and complete derived-hint lifecycle.
+
+The rebuild also derives generic structural observations and temporal sequence
+or fingerprint summaries from the same read-only product attachment. Their
+records retain metric direction, support, quality scope, parameters, algorithm
+version, and product hash. Rebuilding from identical inputs is deterministic;
+there is no mutable incremental analytical state. Identity candidates and
+durable ignored-pair decisions stay distinct from structural analysis, and no
+structural score is an instruction to merge or to write a canonical relation.
+
+`structural_hint_options` exposes deterministic pair shards, independently
+selectable bootstrap ranges, and bounds for concept pairs, sequences, ancestry,
+fingerprints, and clustering comparisons. A zero analytical bound requests the
+corresponding unbounded HPC calculation; in particular, a zero concept-pair
+bound evaluates every canonical concept pair, including pairs with no observed
+co-occurrence. Bounded pair quotas are selected globally before deterministic
+pair partitioning, so raw observations, trajectory signatures, and ancestry
+edge/comparison rows from shards are directly unionable into the corresponding
+single-process result. Per-entity sequence and fingerprint summaries are
+replicated. Aggregate views, research priorities, ancestry anomaly views, and
+clusterings are explicitly shard-local and must be recomputed in a final full
+projection after distributed measurements finish. The analysis manifest records
+these quota and merge semantics.
 
 ## Product inspection and viewer projections
 
