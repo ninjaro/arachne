@@ -12,8 +12,8 @@ Bots and operators use fixed paths relative to the repository root:
 inbox/
 inbox/rejected/
 database/art-islands.sqlite
-database/merge-hints-review.json
 database/merge-hint-decisions.json
+.arachne/merge-hints-review.json
 .arachne/tmp/merge-hints.sqlite
 build/arachne
 ```
@@ -40,8 +40,8 @@ the bytes through Pheidippides, places them at the fixed `inbox/` path, runs
 `check-inbox`, and proposes the validated file in a pull request. It never
 applies the database in the intake job. After that pull request is merged, the
 separately serialized product-integration workflow runs `check-inbox` followed
-by `apply-inbox`, then explicitly rebuilds and exports the disposable merge-hint
-projection. It proposes the product change and review JSON for review.
+by `apply-inbox`. It proposes only the canonical product change for review;
+heavy hint analysis is an opt-in local operation.
 
 Only plain UTF-8 JSON files are accepted. Each file contains exactly one batch
 object. ZIP files, archive members, sidecars, CSV, Markdown, hashes, run
@@ -300,7 +300,8 @@ The canonical product database has no merge-hint, block, or block-membership
 tables. Hint generation is deterministic, disposable Ariadne work and never
 runs as part of `apply-inbox`.
 
-Run the fixed tasks explicitly after product work:
+Run the fixed tasks explicitly when local identity or structural research is
+needed:
 
 ```sh
 build/arachne product rebuild-merge-hints export-merge-hints
@@ -319,8 +320,12 @@ The temporary metadata records the product schema version, exact product
 SHA-256, merge-hint generator/schema version, and the exact durable-decision
 artifact SHA-256. `export-merge-hints` refuses missing or stale state and never
 performs a hidden rebuild. A successful export atomically writes
-`database/merge-hints-review.json`, includes the product hash, and deletes the
-temporary database.
+`.arachne/merge-hints-review.json`, which contains only selected identity
+candidates and bounded review metadata. The structural `analysis` remains in
+the local SQLite store; export does not delete that store. The next explicit
+rebuild replaces stale disposable analysis cleanly. The old
+`database/merge-hints-review.json` compatibility path is ignored by Git and is
+not product data.
 
 Ignored human decisions survive disposable rebuilds in the fixed, versioned
 `database/merge-hint-decisions.json` artifact. Its closed form is:

@@ -38,6 +38,14 @@ import {
   trajectorySegmentWidth,
 } from "../lib/evolution-strength";
 import { buildEvolutionTrajectoryProjection } from "../lib/evolution-trajectory-projection";
+import {
+  DEFAULT_VISIBLE_TRAJECTORY_LIMIT,
+  MAX_VISIBLE_TRAJECTORY_LIMIT,
+  MIN_VISIBLE_TRAJECTORY_LIMIT,
+  VISIBLE_TRAJECTORY_LIMIT_STEP,
+  normalizeVisibleTrajectoryLimit,
+  selectVisibleEvolutionTrajectories,
+} from "../lib/evolution-trajectory-selection";
 import type { TagTrajectoryGroup } from "../lib/trajectory-bundles";
 import {
   BUNDLE_EQUIVALENCE_REASON,
@@ -797,7 +805,11 @@ export function EvolutionView({
   const [tooltipPosition, setTooltipPosition] = useState<TooltipPosition>({ left: 8, top: 8 });
   const [refinedWorkId, setRefinedWorkId] = useState<EntityId | null>(null);
   const [explicitExpandedTagIds, setExplicitExpandedTagIds] = useState<EntityId[]>([]);
+  const [pinnedTagIds, setPinnedTagIds] = useState<EntityId[]>([]);
   const [isolatedTagId, setIsolatedTagId] = useState<EntityId | null>(null);
+  const [visibleTrajectoryLimit, setVisibleTrajectoryLimit] = useState(
+    DEFAULT_VISIBLE_TRAJECTORY_LIMIT,
+  );
   const inferredConceptTaste = useMemo(
     () => inferConceptTaste(domain, ratings, tasteIndex),
     [domain, ratings, tasteIndex],
@@ -905,7 +917,33 @@ export function EvolutionView({
   }
   // Directional and connected projections occupy independent cache slots so
   // toggling modes can reuse the last result for unchanged budgets and seeds.
-  const visible = cachedTraversal.visible;
+  const eligibleVisible = cachedTraversal.visible;
+  const requiredTrajectoryTagIds = useMemo(() => {
+    const required = new Set<EntityId>([
+      ...seedTagIds,
+      ...pinnedTagIds,
+      ...explicitExpandedTagIds,
+    ]);
+    if (selection?.kind === "tag") required.add(selection.id);
+    if (isolatedTagId) required.add(isolatedTagId);
+    if (requestedTagId) required.add(requestedTagId);
+    return [...required].sort();
+  }, [
+    explicitExpandedTagIds,
+    isolatedTagId,
+    pinnedTagIds,
+    requestedTagId,
+    seedTagIds,
+    selection,
+  ]);
+  const trajectorySelection = useMemo(
+    () => selectVisibleEvolutionTrajectories(eligibleVisible, {
+      maximumVisible: visibleTrajectoryLimit,
+      requiredTagIds: requiredTrajectoryTagIds,
+    }),
+    [eligibleVisible, requiredTrajectoryTagIds, visibleTrajectoryLimit],
+  );
+  const visible = trajectorySelection.visible;
   const baseTrajectoryProjection = useMemo(
     () => buildEvolutionTrajectoryProjection(visible, {
       expandedTagIds: explicitExpandedTagIds,
@@ -1236,7 +1274,9 @@ export function EvolutionView({
     setFocusTarget(null);
     setRefinedWorkId(null);
     setExplicitExpandedTagIds([]);
+    setPinnedTagIds([]);
     setIsolatedTagId(null);
+    setVisibleTrajectoryLimit(DEFAULT_VISIBLE_TRAJECTORY_LIMIT);
     setZoom(1);
   }
 
@@ -1247,6 +1287,7 @@ export function EvolutionView({
     hoverController.current?.closeNow();
     setFocusTarget(null);
     setExplicitExpandedTagIds([]);
+    setPinnedTagIds([]);
     setIsolatedTagId(null);
   }
 
@@ -1344,7 +1385,7 @@ export function EvolutionView({
     if (presentation.hover?.temporalBucket?.id === bucketId) return "preview";
     return null;
   };
-  const sceneSummary = `${visible.tags.length.toLocaleString()} visible tags · ${baseTrajectoryProjection.groups.length.toLocaleString()} rendered routes (${baseTrajectoryProjection.bundles.length.toLocaleString()} bundles) · ${scene.stations.length.toLocaleString()} aggregate stops · ${visible.works.length.toLocaleString()} works · ${scene.explicitRelations.length.toLocaleString()} explicit relation paths`;
+  const sceneSummary = `${visible.tags.length.toLocaleString()} visible of ${trajectorySelection.eligibleCount.toLocaleString()} eligible trajectories · ${baseTrajectoryProjection.groups.length.toLocaleString()} rendered routes (${baseTrajectoryProjection.bundles.length.toLocaleString()} bundles) · ${scene.stations.length.toLocaleString()} aggregate stops · ${visible.works.length.toLocaleString()} works · ${scene.explicitRelations.length.toLocaleString()} explicit relation paths`;
 
   return (
     <section
@@ -1525,6 +1566,50 @@ export function EvolutionView({
             Use my taste
           </button>
         </fieldset>
+        <div className="metro-trajectory-limit">
+          <label htmlFor="metro-visible-trajectory-limit">
+            Visible trajectories <strong>{visibleTrajectoryLimit}</strong>
+          </label>
+          <div>
+            <button
+              type="button"
+              aria-label="Decrease visible trajectory limit"
+              disabled={visibleTrajectoryLimit <= MIN_VISIBLE_TRAJECTORY_LIMIT}
+              onClick={() => setVisibleTrajectoryLimit((current) =>
+                normalizeVisibleTrajectoryLimit(
+                  current - VISIBLE_TRAJECTORY_LIMIT_STEP,
+                )
+              )}
+            >−</button>
+            <input
+              id="metro-visible-trajectory-limit"
+              type="number"
+              min={MIN_VISIBLE_TRAJECTORY_LIMIT}
+              max={MAX_VISIBLE_TRAJECTORY_LIMIT}
+              step={VISIBLE_TRAJECTORY_LIMIT_STEP}
+              value={visibleTrajectoryLimit}
+              onChange={(event) => setVisibleTrajectoryLimit(
+                normalizeVisibleTrajectoryLimit(Number(event.target.value)),
+              )}
+            />
+            <button
+              type="button"
+              aria-label="Increase visible trajectory limit"
+              disabled={visibleTrajectoryLimit >= MAX_VISIBLE_TRAJECTORY_LIMIT}
+              onClick={() => setVisibleTrajectoryLimit((current) =>
+                normalizeVisibleTrajectoryLimit(
+                  current + VISIBLE_TRAJECTORY_LIMIT_STEP,
+                )
+              )}
+            >+</button>
+          </div>
+          <small>
+            {trajectorySelection.hiddenCount.toLocaleString()} eligible hidden
+            {trajectorySelection.protectedBeyondLimitCount
+              ? ` · ${trajectorySelection.protectedBeyondLimitCount.toLocaleString()} protected beyond limit`
+              : ""}
+          </small>
+        </div>
         <div className="metro-control-actions">
           <button type="button" onClick={clearTags}>Clear tags</button>
           <button type="button" onClick={resetView}>Reset view</button>
@@ -1544,6 +1629,9 @@ export function EvolutionView({
 
       <div className="metro-summary">
         <span>{sceneSummary}</span>
+        <span role="status">
+          Limit {visibleTrajectoryLimit.toLocaleString()} · {trajectorySelection.hiddenCount.toLocaleString()} eligible {trajectorySelection.hiddenCount === 1 ? "trajectory" : "trajectories"} hidden
+        </span>
         <span>{expansionMode === "directional" ? "Directional" : "Connected"} context: ← earlier {earlierDepth} · later {laterDepth} →</span>
         {expansionMode === "connected" ? (
           <span>{visible.contextTraversalStates.length.toLocaleString()} non-dominated context states · {visible.temporalTagStops.length.toLocaleString()} temporal tag stops</span>
@@ -2001,6 +2089,18 @@ export function EvolutionView({
               </ul>
               <div className="metro-details-actions">
                 {!selectedTag.seed ? <button type="button" onClick={() => addSeed(selectedTag.tag.id)}>Add as seed</button> : null}
+                <button
+                  type="button"
+                  onClick={() => setPinnedTagIds((current) =>
+                    current.includes(selectedTag.tag.id)
+                      ? current.filter((tagId) => tagId !== selectedTag.tag.id)
+                      : [...current, selectedTag.tag.id].sort()
+                  )}
+                >
+                  {pinnedTagIds.includes(selectedTag.tag.id)
+                    ? "Unpin trajectory"
+                    : "Pin trajectory"}
+                </button>
                 <button type="button" onClick={() => {
                   focusDetailsAfterUpdate.current = true;
                   addExclusion(selectedTag.tag.id);

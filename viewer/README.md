@@ -43,26 +43,26 @@ the native commands require its embedded database identity to match the current
 SQLite bytes before applying any research or taste semantics. The export stays
 outside `public/` and cannot become part of a browser or static-site build.
 
-The data command reads four explicit inputs:
+The static `npm run data` workflow reads only the canonical
+`../database/art-islands.sqlite` bytes and the generic, identity-bound working
+JSONL exported from those bytes. It writes the generated, ignored files
+`public/data/catalog.json`, `public/data/research.json`, and
+`public/data/taste-index.json`. Its research projection contains canonical
+ingest and quality information only. Merge-hint review is an explicit optional
+input to a separately invoked local `product research` report; when supplied,
+its decisions and snapshot identities must match. Raw structural observations,
+clusters, trajectories, and other disposable analysis remain in the local hint
+store and never ship in static viewer data.
 
-- `../database/art-islands.sqlite`, the schema-v6 product database;
-- the generic local JSONL produced from those exact SQLite bytes;
-- `../database/merge-hints-review.json`, the disposable bounded hint
-  projection; and
-- `../database/merge-hint-decisions.json`, the durable ignored-pair decisions.
-
-It writes the generated, ignored files `public/data/catalog.json`,
-`public/data/research.json`, and `public/data/taste-index.json`. The native
-`product research` command is the only research-semantics implementation: it
-combines quality gaps, ingest issues, and merge hints into a readable,
-snapshot-bound physical JSON report. The npm workflow uses its compact output
-for static delivery; direct CLI output remains readable by default. `product
+The native `product research` command remains the only research-semantics
+implementation. The npm workflow uses its compact canonical-only output for
+static delivery; direct CLI output remains readable by default. `product
 taste-index` precomputes sparse
 work vectors, agent-to-concept affinities, norms, feature metadata, and postings
 so React does not scan the full catalog to derive global weights. The review's
 source identity must match both the product snapshot and the exact decision
-artifact. A missing or stale review, decision, snapshot, or export is an error
-rather than a fallback.
+artifact whenever that optional local input is requested; it is not a static
+build prerequisite.
 
 Both projections can also be generated or inspected directly over SSH:
 
@@ -199,6 +199,18 @@ dates remain explicitly ambiguous and are never silently ordered. Only the
 earliest accepted value places a station—end dates, manifestations, reissues, and
 later refinements never extend its geometry. The database schema and ingest
 pipeline are intentionally unchanged by the viewer implementation.
+
+Evolution applies its adjustable visible-trajectory limit only after the date,
+tag, taste, and traversal filters have produced an eligible scene. The default
+ranking is disposable viewer state that compares support, assignment
+centrality, rarity-adjusted support, temporal continuity, and structural
+incidence; it uses neither external popularity nor a persistent preference
+profile and never writes ranking values into product data. Seeds, selected
+trajectories, session-pinned trajectories, explicit bundle expansions, and
+eligible externally requested trajectories remain visible beyond the ordinary
+limit. The selector models trajectory family separately from identity so future
+agent trajectories can participate without changing canonical agent or concept
+semantics.
 
 ## JSON-first static API
 

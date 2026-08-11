@@ -11,7 +11,6 @@ on:
       - 'tests/**/*.py'
       - 'scripts/**/*.py'
       - 'viewer/**'
-      - 'database/merge-hints-review.json'
       - 'database/merge-hint-decisions.json'
       - 'hpc/**/*.py'
       - 'hpc/**/*.json'

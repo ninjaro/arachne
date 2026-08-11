@@ -57,7 +57,7 @@ falls back to stale bytes.
 | Operational state | Arachne | Queue/run coordination; permanent per-batch audit metadata is not required |
 | Product inbox | Penelope | Strict JSON files at repository `inbox/`; successful files are removed only after commit and rejected files move to `inbox/rejected/` |
 | Product SQLite | Penelope | `database/art-islands.sqlite`; schema v6 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, and ingest issues, with no disposable merge-hint state |
-| Hint analysis | Ariadne | `.arachne/tmp/merge-hints.sqlite` holds disposable identity candidates and structural observations; `database/merge-hints-review.json` is the bounded hash-bound review projection; `database/merge-hint-decisions.json` durably preserves only ignored identity pairs |
+| Hint analysis | Ariadne | `.arachne/tmp/merge-hints.sqlite` is the primary local, queryable store for disposable identity candidates and structural observations; `.arachne/merge-hints-review.json` is an ignored, bounded identity-only review projection; `database/merge-hint-decisions.json` durably preserves only human decisions |
 | Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
@@ -121,8 +121,9 @@ temporary database contains only identity blocks/candidates, normalized raw
 analytical observations, and lossless higher-level projection sections. Its
 metadata binds the generator version to the
 exact product schema version and SHA-256. Export refuses missing or stale state,
-writes the fixed review JSON, and removes the temporary database after success.
-No hint can perform a merge; identity changes still require an explicit batch.
+writes a bounded local identity-review JSON without the structural sections,
+and retains the queryable SQLite analysis after success. No hint can perform a
+merge; identity changes still require an explicit batch.
 
 The same rebuild may emit generic structural observations, quality-scope
 comparisons, temporal sequences, and structural fingerprints. These remain a
@@ -175,7 +176,10 @@ snapshot control. Viewer publication invokes those same builders, excludes any
 stale catalog/research/taste files from compiled assets, and injects fresh
 snapshot-bound artifacts before the immutable bundle is content-addressed.
 Quality-gap scoring and global feature weighting therefore have no separate
-Python or React implementation.
+Python or React implementation. Static publication derives research data from
+the canonical product snapshot alone. A local research build may explicitly
+add a snapshot-bound identity review together with its matching durable
+decisions; neither surface consumes structural observations implicitly.
 
 ## Remote state and concurrency
 

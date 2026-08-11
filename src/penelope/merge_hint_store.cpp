@@ -27,7 +27,7 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 constexpr int product_schema_version = 6;
-constexpr int hint_store_schema_version = 2;
+constexpr int hint_store_schema_version = 3;
 constexpr std::uintmax_t maximum_decisions_bytes = 8U * 1024U * 1024U;
 
 [[nodiscard]] constexpr int sqlite_open_nofollow_flag() noexcept {
@@ -336,7 +336,7 @@ void initialize_store(
     hints.execute(
         "PRAGMA main.foreign_keys=ON;"
         "PRAGMA main.journal_mode=DELETE;"
-        "PRAGMA main.user_version=2;"
+        "PRAGMA main.user_version=3;"
         "CREATE TABLE metadata("
         " key TEXT PRIMARY KEY, value TEXT NOT NULL"
         ") STRICT;"
@@ -433,6 +433,12 @@ void initialize_store(
         "analytical_observations(algorithm,metric,scope,value DESC,id);"
         "CREATE INDEX analytical_observations_pair_idx ON "
         "analytical_observations(left_family,left_id,right_family,right_id,id);"
+        "CREATE INDEX analytical_observations_channel_pair_idx ON "
+        "analytical_observations("
+        " left_id,json_extract(extra_json,'$.left_channel'),"
+        " right_id,json_extract(extra_json,'$.right_channel'),metric,scope,id)"
+        " WHERE json_type(extra_json,'$.left_channel')='text'"
+        " AND json_type(extra_json,'$.right_channel')='text';"
         "CREATE TABLE analysis_projections("
         " section TEXT PRIMARY KEY CHECK("
         "  length(section)>0 AND section<>'observations'),"
@@ -451,7 +457,7 @@ void initialize_store(
     };
     insert_metadata("product_schema_version", "6");
     insert_metadata("product_sha256", product_sha256);
-    insert_metadata("hint_store_schema_version", "2");
+    insert_metadata("hint_store_schema_version", "3");
     insert_metadata("generator_version", generator_version);
     insert_metadata(
         "structural_algorithm_version",
@@ -488,7 +494,7 @@ void require_current_store(
         );
     }
     if (metadata_value(hints.native(), "product_schema_version") != "6"
-        || metadata_value(hints.native(), "hint_store_schema_version") != "2") {
+        || metadata_value(hints.native(), "hint_store_schema_version") != "3") {
         throw merge_hint_store_error(
             "disposable merge-hint metadata uses an unsupported version"
         );
@@ -743,9 +749,10 @@ void require_current_store(
         json common {
             { "role", credits.text(2) },
             { "importance", credits.text(3) },
-            { "credited_as", credits.is_null(4) ? json(nullptr)
-                                                  : json(credits.text(4)) },
         };
+        if (!credits.is_null(4)) {
+            common["credited_as"] = credits.text(4);
+        }
         if (work != indices.end()) {
             json value = common;
             value["agent_id"] = credits.text(1);
@@ -786,7 +793,8 @@ void require_current_store(
     std::map<std::int64_t, assertion_location> assertion_locations;
     statement assertions(
         hints.native(),
-        "SELECT id,work_id,concept_id,relation_type,centrality"
+        "SELECT id,work_id,concept_id,relation_type,centrality,confidence,"
+        "historical_role"
         " FROM product.work_concepts ORDER BY concept_id,work_id,id"
     );
     while (assertions.step()) {
@@ -801,13 +809,21 @@ void require_current_store(
             auto& values
                 = entities[concept_entity->second]["concept"]["assertions"];
             const std::size_t index = values.size();
-            values.push_back(
-                { { "work_id", assertions.text(1) },
-                  { "relation_type", assertions.text(3) },
-                  { "centrality", assertions.integer(4) },
-                  { "evidence_ids", json::array() },
-                  { "source_ids", json::array() } }
-            );
+            json value {
+                { "work_id", assertions.text(1) },
+                { "relation_type", assertions.text(3) },
+                { "centrality", assertions.integer(4) },
+                { "evidence_ids", json::array() },
+                { "source_ids", json::array() },
+                { "evidence", json::array() },
+            };
+            if (!assertions.is_null(5)) {
+                value["confidence"] = assertions.real(5);
+            }
+            if (!assertions.is_null(6)) {
+                value["historical_role"] = assertions.text(6);
+            }
+            values.push_back(std::move(value));
             assertion_locations.emplace(
                 assertions.integer(0),
                 assertion_location { concept_entity->second, index }
@@ -818,7 +834,7 @@ void require_current_store(
     std::set<std::tuple<std::int64_t, std::int64_t, std::int64_t>> provenance;
     statement evidence(
         hints.native(),
-        "SELECT wce.assertion_id,wce.evidence_id,e.source_id"
+        "SELECT wce.assertion_id,wce.evidence_id,e.source_id,e.stance"
         " FROM product.work_concept_evidence wce"
         " JOIN product.evidence e ON e.id=wce.evidence_id"
         " ORDER BY wce.assertion_id,wce.evidence_id,e.source_id"
@@ -841,6 +857,11 @@ void require_current_store(
             std::to_string(evidence.integer(1))
         );
         const std::string source_id = std::to_string(evidence.integer(2));
+        assertion["evidence"].push_back(
+            { { "evidence_id", std::to_string(evidence.integer(1)) },
+              { "source_id", source_id },
+              { "stance", evidence.text(3) } }
+        );
         const bool source_seen = std::ranges::any_of(
             assertion["source_ids"], [&](const json& value) {
                 return value.is_string()
@@ -1662,13 +1683,30 @@ void validate_analysis_for_storage(const json& projection) {
         }
         const auto& left = required_string(value, "left_id", context);
         const auto& right = required_string(value, "right_id", context);
+        const auto& left_family
+            = required_string(value, "left_family", context);
+        const auto& right_family
+            = required_string(value, "right_family", context);
+        require_family(left_family, context);
+        require_family(right_family, context);
         if (left == right) {
-            invalid_projection(context + " must compare distinct entities");
+            const auto left_channel = value.find("left_channel");
+            const auto right_channel = value.find("right_channel");
+            const bool valid_channels = left_family == "concept"
+                && right_family == "concept"
+                && left_channel != value.end() && left_channel->is_string()
+                && !left_channel->get_ref<const std::string&>().empty()
+                && right_channel != value.end() && right_channel->is_string()
+                && !right_channel->get_ref<const std::string&>().empty()
+                && *left_channel != *right_channel;
+            if (!valid_channels) {
+                invalid_projection(
+                    context
+                    + " may compare one concept only across two distinct "
+                      "analytical channels"
+                );
+            }
         }
-        require_family(required_string(value, "left_family", context), context);
-        require_family(
-            required_string(value, "right_family", context), context
-        );
         static_cast<void>(required_string(value, "algorithm", context));
         static_cast<void>(required_string(value, "metric", context));
         static_cast<void>(required_finite_number(value, "value", context));
@@ -1845,6 +1883,21 @@ void require_derived_consistency(sqlite3* const sql) {
         "merge-hint state references an unknown or mismatched canonical entity"
     );
     require_zero(
+        "SELECT count(*) FROM main.analysis_projections p,"
+        " json_each(p.payload_json) f"
+        " LEFT JOIN product.entities e"
+        " ON e.id=json_extract(f.value,'$.entity_id')"
+        " WHERE p.section='structural_fingerprints' AND (e.id IS NULL OR NOT("
+        "  (json_extract(f.value,'$.family')='agent'"
+        "   AND e.entity_type IN('person','organization','group'))"
+        "  OR (json_extract(f.value,'$.family')='work'"
+        "   AND e.entity_type='work')"
+        "  OR (json_extract(f.value,'$.family')='concept'"
+        "   AND e.entity_type='concept')))",
+        "structural fingerprints reference an unknown or mismatched "
+        "canonical entity"
+    );
+    require_zero(
         "SELECT count(*) FROM main.blocks b"
         " WHERE b.member_count<>(SELECT count(*)"
         " FROM main.block_memberships m WHERE m.block_id=b.id)",
@@ -1938,7 +1991,7 @@ fs::path merge_hint_store_path(const fs::path& repository_root) {
 }
 
 fs::path merge_hint_review_path(const fs::path& repository_root) {
-    return repository_root / "database" / "merge-hints-review.json";
+    return repository_root / ".arachne" / "merge-hints-review.json";
 }
 
 fs::path merge_hint_decisions_path(const fs::path& repository_root) {
@@ -2298,7 +2351,6 @@ json load_merge_hint_export(
         { "memberships", json::array() },
         { "candidates", json::array() },
         { "family_statistics", json::array() },
-        { "analysis", json::object() },
         { "selection",
           { { "method", "strong-union-otsu-fuzzy-v1" },
             { "selected", 0 },
@@ -2367,47 +2419,6 @@ json load_merge_hint_export(
         projection["selection"]["selected_by_family"][statistics.text(0)]
             = statistics.integer(4);
     }
-    statement analysis_projections(
-        hints.native(),
-        "SELECT section,payload_json FROM analysis_projections ORDER BY section"
-    );
-    while (analysis_projections.step()) {
-        projection["analysis"][analysis_projections.text(0)]
-            = json::parse(analysis_projections.text(1));
-    }
-    projection["analysis"]["observations"] = json::array();
-    statement observations(
-        hints.native(),
-        "SELECT left_id,right_id,left_family,right_family,algorithm,metric,"
-        "value,value_scale,support_size,scope,corpus_json,parameters_json,"
-        "product_snapshot_json,algorithm_version,explanation,details_json,"
-        "extra_json FROM analytical_observations ORDER BY id"
-    );
-    while (observations.step()) {
-        json value = json::parse(observations.text(16));
-        value["left_id"] = observations.text(0);
-        value["right_id"] = observations.text(1);
-        value["left_family"] = observations.text(2);
-        value["right_family"] = observations.text(3);
-        value["algorithm"] = observations.text(4);
-        value["metric"] = observations.text(5);
-        value["value"] = observations.is_integer(6)
-            ? json(observations.integer(6))
-            : json(observations.real(6));
-        value["value_scale"] = observations.text(7);
-        value["support_size"] = observations.integer(8);
-        value["scope"] = observations.text(9);
-        value["corpus"] = json::parse(observations.text(10));
-        value["parameters"] = json::parse(observations.text(11));
-        value["product_snapshot"] = json::parse(observations.text(12));
-        value["algorithm_version"] = observations.text(13);
-        value["explanation"] = observations.text(14);
-        value["details"] = json::parse(observations.text(15));
-        projection["analysis"]["observations"].push_back(std::move(value));
-    }
-    validate_analysis_entity_references(
-        hints.native(), projection.at("analysis")
-    );
     if (crypto::sha256_file(product)
         != projection["product_snapshot"]["sha256"].get<std::string>()) {
         throw merge_hint_store_error(

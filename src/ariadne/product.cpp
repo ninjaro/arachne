@@ -550,17 +550,14 @@ namespace {
 
 } // namespace
 
-ordered_json product_projection_builder::research_report(
-    const json& product_export, const json& merge_hint_review,
-    const json& merge_hint_decisions, std::string decisions_sha256,
+namespace {
+
+ordered_json build_research_report(
+    const json& product_export, ordered_json hints,
     std::string product_snapshot_id, std::string product_sha256
 ) {
     require_snapshot_identity(product_snapshot_id, product_sha256);
     ordered_json items = issue_items(product_export);
-    ordered_json hints = merge_hint_items(
-        merge_hint_review, merge_hint_decisions, decisions_sha256,
-        product_sha256
-    );
     for (auto& hint : hints) {
         items.push_back(std::move(hint));
     }
@@ -613,6 +610,33 @@ ordered_json product_projection_builder::research_report(
         { "summary", research_summary(items) },
         { "items", std::move(items) },
     };
+}
+
+} // namespace
+
+ordered_json product_projection_builder::research_report(
+    const json& product_export, std::string product_snapshot_id,
+    std::string product_sha256
+) {
+    return build_research_report(
+        product_export, ordered_json::array(), std::move(product_snapshot_id),
+        std::move(product_sha256)
+    );
+}
+
+ordered_json product_projection_builder::research_report(
+    const json& product_export, const json& merge_hint_review,
+    const json& merge_hint_decisions, std::string decisions_sha256,
+    std::string product_snapshot_id, std::string product_sha256
+) {
+    ordered_json hints = merge_hint_items(
+        merge_hint_review, merge_hint_decisions, decisions_sha256,
+        product_sha256
+    );
+    return build_research_report(
+        product_export, std::move(hints), std::move(product_snapshot_id),
+        std::move(product_sha256)
+    );
 }
 
 ordered_json product_projection_builder::entity(

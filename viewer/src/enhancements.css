@@ -1131,6 +1131,7 @@
     minmax(9rem, 0.55fr)
     minmax(11rem, 0.65fr)
     minmax(12rem, 0.7fr)
+    minmax(10rem, 0.55fr)
     auto;
   align-items: stretch;
   gap: 0.55rem;
@@ -1142,6 +1143,7 @@
 .metro-expansion-mode,
 .metro-date-controls,
 .metro-taste-controls,
+.metro-trajectory-limit,
 .metro-control-actions {
   min-width: 0;
   padding: 0.6rem;
@@ -1165,6 +1167,39 @@
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.025em;
+}
+
+.metro-trajectory-limit > label {
+  display: block;
+  margin-bottom: 0.38rem;
+  color: #aeb8ba;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.025em;
+}
+
+.metro-trajectory-limit strong {
+  color: #e7d397;
+}
+
+.metro-trajectory-limit > div {
+  display: grid;
+  grid-template-columns: auto minmax(3.5rem, 1fr) auto;
+  gap: 0.3rem;
+}
+
+.metro-trajectory-limit button,
+.metro-trajectory-limit input {
+  min-width: 0;
+  padding: 0.3rem 0.42rem;
+  text-align: center;
+}
+
+.metro-trajectory-limit small {
+  display: block;
+  margin-top: 0.35rem;
+  color: #778386;
+  font-size: 0.66rem;
 }
 
 .metro-expansion-mode label,
@@ -2197,7 +2232,7 @@
   font-size: 0.72rem;
 }
 
-@media (max-width: 1380px) {
+@media (max-width: 1650px) {
   .metro-controls {
     grid-template-columns: repeat(2, minmax(18rem, 1fr)) repeat(2, minmax(12rem, 0.65fr));
   }

@@ -34,6 +34,8 @@ struct structural_hint_options final {
     std::size_t ancestry_comparison_limit = 384;
     std::size_t fingerprint_limit = 1'024;
     std::size_t fingerprint_pair_limit = 256;
+    /** Cross-medium channel pairs after cheap structural candidate ranking. */
+    std::size_t cross_media_pair_limit = 512;
     std::size_t cluster_disagreement_pair_limit = 200'000;
 };
 

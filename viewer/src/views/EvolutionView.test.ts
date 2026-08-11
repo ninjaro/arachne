@@ -61,6 +61,10 @@ describe("Evolution view temporal and directional controls", () => {
     expect(markup).toContain("Later depth");
     expect(markup).toContain("Expansion mode");
     expect(markup).toContain("Connected context");
+    expect(markup).toContain("Visible trajectories");
+    expect(markup).toContain("Decrease visible trajectory limit");
+    expect(markup).toContain("Increase visible trajectory limit");
+    expect(markup).toContain("eligible trajectories hidden");
     expect(markup).toContain('class="metro-details"');
     expect(markup).toContain('tabindex="-1"');
     expect(markup).toContain("Year-only dates");

@@ -41,9 +41,6 @@ jobs:
       - name: Validate and apply strict inbox batches
         run: build/arachne product check-inbox apply-inbox
 
-      - name: Rebuild and export disposable merge hints
-        run: build/arachne product rebuild-merge-hints export-merge-hints
-
       - name: Propose the database change for review
         env:
           GH_TOKEN: ${{ github.token }}

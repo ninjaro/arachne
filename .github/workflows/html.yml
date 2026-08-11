@@ -11,8 +11,6 @@ on:
       - 'scripts/patch_doxygen_pages.py'
       - 'viewer/**'
       - 'database/art-islands.sqlite'
-      - 'database/merge-hints-review.json'
-      - 'database/merge-hint-decisions.json'
       - 'docs/**'
       - 'readme.md'
       - 'Doxyfile'

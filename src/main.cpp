@@ -1088,7 +1088,8 @@ candidate_configuration_from(const configuration& config) {
     if (sources.empty()) {
         throw cli_error("candidate_rebuild.sources must not be empty");
     }
-    const json& source = sources.begin().value();
+    const auto source_iterator = sources.cbegin();
+    const json& source = source_iterator.value();
     if (!source.is_object()) {
         throw cli_error("candidate source configuration must be an object");
     }
@@ -1388,19 +1389,19 @@ struct product_task_result final {
         destination, arachnespace::contracts::canonical_json(review) + "\n",
         true
     );
-    arachne::penelope::discard_merge_hint_store(repository_root());
     return {
         .document = {
             { "task", "export-merge-hints" },
             { "status", "ok" },
             { "review_count", review.at("items").size() },
-            { "structural_observation_count",
-              review.at("analysis").at("observations").size() },
-            { "research_priority_count",
-              review.at("analysis").at("research_priorities").size() },
             { "artifact_path",
               destination.lexically_relative(repository_root())
                   .generic_string() },
+            { "structural_store_path",
+              arachne::penelope::merge_hint_store_path(repository_root())
+                  .lexically_relative(repository_root())
+                  .generic_string() },
+            { "structural_store_retained", true },
             { "product_sha256",
               review.at("source").at("productSha256") },
         },
@@ -1569,28 +1570,42 @@ void write_product_projection(
     std::cerr << "Wrote " << description << ": " << destination << '\n';
 }
 
-int command_product_research(const options& arguments) {
-    product_projection_input input = load_product_projection_input(arguments);
+[[nodiscard]] ordered_json build_product_research_report(
+    const json& product, const std::string& snapshot_id,
+    const std::string& product_sha256, const options& arguments
+) {
     const auto review_option = arguments.optional("--merge-hints");
     const auto decisions_option = arguments.optional("--merge-hint-decisions");
-    const fs::path review_path = review_option
-        ? command_path(*review_option)
-        : repository_root() / "database" / "merge-hints-review.json";
-    const fs::path decisions_path = decisions_option
-        ? command_path(*decisions_option)
-        : repository_root() / "database" / "merge-hint-decisions.json";
+    if (review_option.has_value() != decisions_option.has_value()) {
+        throw cli_error(
+            "--merge-hints and --merge-hint-decisions must be supplied together"
+        );
+    }
+    if (!review_option) {
+        return arachne::ariadne::product_projection_builder::research_report(
+            product, snapshot_id, product_sha256
+        );
+    }
+    const fs::path review_path = command_path(*review_option);
+    const fs::path decisions_path = command_path(*decisions_option);
     const json review = read_json(
         review_path, maximum_control_bytes, "merge-hint review artifact"
     );
     const json decisions = read_json(
         decisions_path, maximum_control_bytes, "merge-hint decisions artifact"
     );
-    const ordered_json report
-        = arachne::ariadne::product_projection_builder::research_report(
-            input.tables, review, decisions,
-            arachne::crypto::sha256_file(decisions_path),
-            std::move(input.snapshot_id), std::move(input.product_sha256)
-        );
+    return arachne::ariadne::product_projection_builder::research_report(
+        product, review, decisions,
+        arachne::crypto::sha256_file(decisions_path), snapshot_id,
+        product_sha256
+    );
+}
+
+int command_product_research(const options& arguments) {
+    product_projection_input input = load_product_projection_input(arguments);
+    const ordered_json report = build_product_research_report(
+        input.tables, input.snapshot_id, input.product_sha256, arguments
+    );
     write_product_projection(report, arguments, "product research report");
     return 0;
 }
@@ -2327,27 +2342,13 @@ int command_viewer_build(const options& arguments) {
     const ordered_json catalog = arachne::ariadne::viewer_builder::catalog(
         product, product_snapshot.control.at("snapshot_id").get<std::string>()
     );
-    const fs::path merge_review_path
-        = repository_root() / "database" / "merge-hints-review.json";
-    const fs::path merge_decisions_path
-        = repository_root() / "database" / "merge-hint-decisions.json";
-    const json merge_review = read_json(
-        merge_review_path, maximum_control_bytes, "merge-hint review artifact"
-    );
-    const json merge_decisions = read_json(
-        merge_decisions_path, maximum_control_bytes,
-        "merge-hint decisions artifact"
-    );
     const std::string product_snapshot_id
         = product_snapshot.control.at("snapshot_id").get<std::string>();
     const std::string product_sha256
         = product_snapshot.control.at("content_sha256").get<std::string>();
-    const ordered_json research_report
-        = arachne::ariadne::product_projection_builder::research_report(
-            product, merge_review, merge_decisions,
-            arachne::crypto::sha256_file(merge_decisions_path),
-            product_snapshot_id, product_sha256
-        );
+    const ordered_json research_report = build_product_research_report(
+        product, product_snapshot_id, product_sha256, arguments
+    );
     const ordered_json taste_index
         = arachne::ariadne::product_projection_builder::taste_index(
             product, product_snapshot_id, product_sha256
@@ -2475,8 +2476,8 @@ Local development input:
 Optional options:
   --output FILE|-               Output file, or stdout (default: stdout)
   --compact                     Emit compact JSON instead of readable JSON
-  --merge-hints FILE            Review artifact (default: database/merge-hints-review.json)
-  --merge-hint-decisions FILE   Decision artifact (default: database/merge-hint-decisions.json)
+  --merge-hints FILE            Optional local identity-review artifact
+  --merge-hint-decisions FILE   Matching decisions; required with --merge-hints
 
 Example:
   build/arachne product research --config config/arachne.json --product-snapshot graphs/product/active.json --output research.json
@@ -2782,7 +2783,8 @@ int dispatch(const std::vector<std::string>& arguments) {
         && arguments[2] == "build") {
         return command_viewer_build(options(
             arguments, 3U,
-            { "--config", "--product-snapshot", "--candidate-snapshot" }
+            { "--config", "--product-snapshot", "--candidate-snapshot",
+              "--merge-hints", "--merge-hint-decisions" }
         ));
     }
     throw cli_error("unknown operations command; run 'arachne help'");

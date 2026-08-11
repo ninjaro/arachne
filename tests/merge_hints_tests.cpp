@@ -439,6 +439,7 @@ TEST(AriadneMergeHints, ReviewExportUsesLabelsReasonsAndSnapshotIdentity) {
         = arachne::ariadne::merge_hint_planner::export_review(projection);
 
     EXPECT_EQ(review.at("artifactType"), "arachne_merge_hint_review_v1");
+    EXPECT_FALSE(review.contains("analysis"));
     EXPECT_EQ(review.at("source").at("productSha256"), std::string(64, 'a'));
     ASSERT_EQ(review.at("items").size(), 1U);
     const auto& item = review.at("items").front();

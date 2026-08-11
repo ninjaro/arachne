@@ -38,8 +38,9 @@ public:
     );
 
     /**
-     * Format the selected candidates in a validated projection as the fixed
-     * viewer/reviewer artifact. This operation never rebuilds missing state.
+     * Format selected identity candidates as a bounded local review artifact.
+     * Structural observations are intentionally not embedded. This operation
+     * never rebuilds missing state.
      */
     [[nodiscard]] static nlohmann::json export_review(
         const nlohmann::json& projection

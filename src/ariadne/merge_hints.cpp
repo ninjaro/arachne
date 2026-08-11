@@ -724,7 +724,7 @@ template <typename T>
     require_only_fields(
         value,
         { "work_id", "relation_type", "centrality", "evidence_ids",
-          "source_ids" },
+          "source_ids", "confidence", "historical_role", "evidence" },
         context
     );
     const auto centrality = optional_integer<int>(
@@ -732,6 +732,52 @@ template <typename T>
     );
     if (centrality && (*centrality < 1 || *centrality > 100)) {
         invalid(std::string(context) + ".centrality must be between 1 and 100");
+    }
+    if (const auto confidence = value.find("confidence");
+        confidence != value.end() && !confidence->is_null()
+        && (!confidence->is_number()
+            || confidence->get<double>() < 0.0
+            || confidence->get<double>() > 1.0)) {
+        invalid(
+            std::string(context)
+            + ".confidence must be null or a number between 0 and 1"
+        );
+    }
+    if (const auto role = value.find("historical_role");
+        role != value.end() && !role->is_null()
+        && (!role->is_string()
+            || role->get_ref<const std::string&>().empty())) {
+        invalid(
+            std::string(context)
+            + ".historical_role must be null or a non-empty string"
+        );
+    }
+    if (const auto evidence = value.find("evidence");
+        evidence != value.end()) {
+        if (!evidence->is_array()) {
+            invalid(std::string(context) + ".evidence must be an array");
+        }
+        for (std::size_t index = 0; index < evidence->size(); ++index) {
+            const json& reference = evidence->at(index);
+            const std::string evidence_context = std::string(context)
+                + ".evidence[" + std::to_string(index) + "]";
+            require_only_fields(
+                reference, { "evidence_id", "source_id", "stance" },
+                evidence_context
+            );
+            static_cast<void>(required_string(
+                reference, "evidence_id", evidence_context
+            ));
+            static_cast<void>(required_string(
+                reference, "source_id", evidence_context
+            ));
+            const std::string stance
+                = required_string(reference, "stance", evidence_context);
+            if (stance != "supports" && stance != "contradicts"
+                && stance != "contextualizes") {
+                invalid(evidence_context + ".stance is invalid");
+            }
+        }
     }
     return {
         .work_id = required_string(value, "work_id", context),
@@ -2553,7 +2599,7 @@ void validate_projection(const json& projection) {
     }
     for (const auto field : {
              "generator", "product_snapshot", "decisions_snapshot", "candidates",
-             "family_statistics", "selection", "analysis" }) {
+             "family_statistics", "selection" }) {
         if (!projection.contains(field)) {
             throw std::invalid_argument(
                 "merge hint projection is missing " + std::string(field)
@@ -2564,18 +2610,6 @@ void validate_projection(const json& projection) {
         || !projection.at("family_statistics").is_array()) {
         throw std::invalid_argument(
             "merge hint projection candidates/statistics must be arrays"
-        );
-    }
-    const auto& analysis = projection.at("analysis");
-    if (!analysis.is_object()
-        || analysis.value("contract", "") != structural_hint_contract
-        || analysis.value("version", 0) != 1
-        || analysis.value("algorithm_version", "")
-            != structural_hint_algorithm_version
-        || !analysis.contains("snapshot")
-        || analysis.at("snapshot") != projection.at("product_snapshot")) {
-        throw std::invalid_argument(
-            "merge hint projection has invalid structural analysis"
         );
     }
 }
@@ -2711,7 +2745,6 @@ json merge_hint_planner::export_review(const json& projection) {
           { { "selected", items.size() },
             { "selectedByType", std::move(selected_by_type) } } },
         { "items", std::move(items) },
-        { "analysis", projection.at("analysis") },
     };
 }
 

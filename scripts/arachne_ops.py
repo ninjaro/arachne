@@ -272,6 +272,10 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
         if arguments.compact:
             result.append("--compact")
         if command == "product-research":
+            if bool(arguments.merge_hints) != bool(arguments.merge_hint_decisions):
+                raise OperationsError(
+                    "--merge-hints and --merge-hint-decisions must be supplied together"
+                )
             if arguments.merge_hints:
                 result.extend(
                     ("--merge-hints", str(arguments.merge_hints.resolve(strict=True)))
@@ -297,6 +301,20 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
                 (
                     "--candidate-snapshot",
                     str(arguments.candidate_snapshot.resolve(strict=True)),
+                )
+            )
+        if bool(arguments.merge_hints) != bool(arguments.merge_hint_decisions):
+            raise OperationsError(
+                "--merge-hints and --merge-hint-decisions must be supplied together"
+            )
+        if arguments.merge_hints:
+            result.extend(
+                ("--merge-hints", str(arguments.merge_hints.resolve(strict=True)))
+            )
+            result.extend(
+                (
+                    "--merge-hint-decisions",
+                    str(arguments.merge_hint_decisions.resolve(strict=True)),
                 )
             )
         return command, result
@@ -359,6 +377,8 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     viewer = subparsers.add_parser("viewer-build")
     viewer.add_argument("--product-snapshot", type=Path, required=True)
     viewer.add_argument("--candidate-snapshot", type=Path)
+    viewer.add_argument("--merge-hints", type=Path)
+    viewer.add_argument("--merge-hint-decisions", type=Path)
 
 
 def parser() -> argparse.ArgumentParser:

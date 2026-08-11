@@ -143,6 +143,13 @@ json hints() {
 } // namespace
 
 TEST(ProductProjection, ResearchOwnsQualityIssuesAndMergeHintSemantics) {
+    const auto canonical
+        = arachne::ariadne::product_projection_builder::research_report(
+            product(), "product-test", product_hash
+        );
+    EXPECT_EQ(canonical.at("summary").at("total"), 2);
+    EXPECT_EQ(canonical.at("summary").at("mergeHints"), 0);
+
     const auto report
         = arachne::ariadne::product_projection_builder::research_report(
             product(), hints(), decisions(), decisions_hash, "product-test",

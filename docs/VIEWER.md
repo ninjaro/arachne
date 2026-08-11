@@ -1,27 +1,27 @@
 # Arachne Viewer {#arachne_viewer}
 
-The static viewer is built from the canonical product database, the explicit
-bounded `database/merge-hints-review.json` projection, and the durable
-`database/merge-hint-decisions.json` ignored-pair decisions. The review
-artifact's source identity binds it to both inputs: `productSha256` must match
-the exact database bytes used for the viewer catalog, while `decisionsSha256`
-and `ignoredPairCount` must match the exact decision-file bytes and its current
-pair count. Viewer data generation rejects a missing or stale review or decision
-artifact and never falls back to merge-hint tables in the product database.
+The static viewer is built from the canonical product database and does not
+depend on local merge or structural analysis. A local viewer may explicitly
+add the bounded `.arachne/merge-hints-review.json` identity projection together
+with `database/merge-hint-decisions.json`. In that mode `productSha256` must
+match the exact product bytes, while `decisionsSha256` and `ignoredPairCount`
+must match the exact decision-file bytes and pair count. Supplying only one of
+the two artifacts is rejected.
 
 The viewer is deployed as a standalone site rather than embedded in the
 Doxygen frame.
 
 <a href="../../viewer/" target="_top">Open the Arachne viewer</a>
 
-Generated browser data and temporary hint SQLite state are disposable. The
-canonical SQLite database remains the product source of truth, while the
-hash-bound review JSON is the viewer's only source of merge-hint content. The
-decision JSON is durable human-review state used to prove that the exported
-hints were built against the current ignored-pair choices.
+Generated browser data and local hint SQLite state are disposable. The
+canonical SQLite database remains the product source of truth. The ignored
+review contains identity candidates only; structural observations and
+projections remain queryable in `.arachne/tmp/merge-hints.sqlite`. The decision
+JSON is durable human-review state used to prove that an explicitly included
+review was built against the current ignored-pair choices.
 
-The review data keeps identity-oriented merge candidates visibly separate from
-generic structural observations. Structural views may expose directional
+Identity review and generic structural observations are separate consumer
+surfaces. Structural views may expose directional
 containment, temporal and stability measurements, quality-scope comparisons,
 sequences, trajectories, or cross-family fingerprints, but must retain their
 support and snapshot/algorithm provenance. Labels such as bridge, cluster, or

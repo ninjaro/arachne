@@ -31,16 +31,16 @@ void store_merge_hint_projection(
 );
 
 /**
- * Validate freshness and return selected identity rows, enriched with current
- * canonical labels, plus the complete generic structural-analysis section for
- * Ariadne's review-artifact formatter.
+ * Validate freshness and return only the selected identity rows, enriched with
+ * current canonical labels, plus their bounded review metadata. Structural
+ * observations remain queryable in the disposable SQLite store.
  */
 [[nodiscard]] nlohmann::json load_merge_hint_export(
     const std::filesystem::path& repository_root,
     std::string_view expected_generator_version
 );
 
-/** Remove the disposable database and SQLite sidecars after a successful export. */
+/** Explicitly remove the disposable database and its SQLite sidecars. */
 void discard_merge_hint_store(
     const std::filesystem::path& repository_root
 );

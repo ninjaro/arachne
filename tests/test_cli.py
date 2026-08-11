@@ -481,6 +481,32 @@ class OperationsCliTests(unittest.TestCase):
 
     def test_product_research_entity_and_taste_index_are_snapshot_bound_json(self) -> None:
         control, review, decisions = self.product_snapshot()
+        canonical = self.run_cli(
+            "product",
+            "research",
+            "--config",
+            str(self.config_path),
+            "--product-snapshot",
+            str(control),
+            "--compact",
+        )
+        self.assertEqual(canonical.returncode, 0, canonical.stderr)
+        canonical_report = self.document(canonical)
+        self.assertEqual(canonical_report["summary"]["mergeHints"], 0)
+
+        incomplete_hints = self.run_cli(
+            "product",
+            "research",
+            "--config",
+            str(self.config_path),
+            "--product-snapshot",
+            str(control),
+            "--merge-hints",
+            str(review),
+        )
+        self.assertNotEqual(incomplete_hints.returncode, 0)
+        self.assertIn("must be supplied together", incomplete_hints.stderr)
+
         research_path = self.root / "research.json"
         research = self.run_cli(
             "product",
@@ -503,6 +529,7 @@ class OperationsCliTests(unittest.TestCase):
         self.assertEqual(report["product_snapshot"]["snapshot_id"], "product-cli-test")
         self.assertEqual(report["summary"]["ingestIssues"], 1)
         self.assertEqual(report["summary"]["qualityGaps"], 1)
+        self.assertEqual(report["summary"]["mergeHints"], 0)
 
         entity = self.run_cli(
             "product",

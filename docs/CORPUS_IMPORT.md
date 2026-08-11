@@ -13,6 +13,12 @@ Current product changes use one format and a fixed ordered task queue:
 
 ```sh
 build/arachne product check-inbox apply-inbox
+```
+
+Canonical inbox application does not run heavy local analysis. When identity
+or structural research is wanted, opt in separately:
+
+```sh
 build/arachne product rebuild-merge-hints export-merge-hints
 ```
 
@@ -22,4 +28,4 @@ root; they do not accept path options.
 
 See [Product inbox](PRODUCT_INBOX.md) for the current batch shape, create and
 update semantics, explicit merges, rejected-batch issues, idempotency, and the
-separate derived merge-hint lifecycle.
+separate local derived merge-hint lifecycle.

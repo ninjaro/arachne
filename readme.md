@@ -93,9 +93,10 @@ eligible batches but never updates merge hints. After product work, an operator
 must explicitly rebuild the disposable Ariadne hint store and then export its
 bounded review artifact. Export does not rebuild implicitly: it rejects stale
 product, generator, or durable-decision identity, atomically replaces
-`database/merge-hints-review.json`, and removes the temporary hint store after
-success. Tasks can be supplied in one command and execute strictly in the order
-written.
+`.arachne/merge-hints-review.json`, and retains the queryable structural hint
+store for local research. The review is identity-only, local, and ignored by
+Git; `database/merge-hint-decisions.json` remains tracked human state. Tasks can
+be supplied in one command and execute strictly in the order written.
 
 Remote writes are disabled by default. A production deployment needs protected
 branches, Git LFS for the canonical SQLite database, and a least-privilege token.

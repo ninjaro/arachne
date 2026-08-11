@@ -39,7 +39,7 @@ python3 scripts/arachne_ops.py capabilities
 | `product-apply-inbox` | `arachne product apply-inbox` |
 | `product-rebuild-merge-hints` | `arachne product rebuild-merge-hints` |
 | `product-export-merge-hints` | `arachne product export-merge-hints` |
-| `product-research` | `arachne product research --config CONFIG --product-snapshot CONTROL [--output FILE|-] [--compact]` |
+| `product-research` | `arachne product research --config CONFIG --product-snapshot CONTROL [--merge-hints FILE --merge-hint-decisions FILE] [--output FILE|-] [--compact]` |
 | `product-entity` | `arachne product entity --config CONFIG --product-snapshot CONTROL --id ID [--output FILE|-] [--compact]` |
 | `product-taste-index` | `arachne product taste-index --config CONFIG --product-snapshot CONTROL [--output FILE|-] [--compact]` |
 | `candidate-plan` | `arachne candidate plan --config CONFIG --external-graph JSON --product-snapshot PRODUCT_SNAPSHOT_CONTROL --output-artifact PATH --output-control PATH` |
@@ -120,8 +120,8 @@ The product paths are part of the repository contract:
 ```text
 inbox/
 database/art-islands.sqlite
-database/merge-hints-review.json
 database/merge-hint-decisions.json
+.arachne/merge-hints-review.json
 .arachne/tmp/merge-hints.sqlite
 build/arachne
 ```
@@ -142,8 +142,7 @@ Names after `product` form a fixed ordered task queue. They are not paths or
 arbitrary positional values, and product tasks accept no path or policy flags:
 
 ```sh
-build/arachne product check-inbox apply-inbox \
-  rebuild-merge-hints export-merge-hints
+build/arachne product check-inbox apply-inbox
 ```
 
 Tasks execute strictly in the written order and stop on failure. `check-inbox`
@@ -161,14 +160,18 @@ build/arachne product rebuild-merge-hints
 build/arachne product export-merge-hints
 ```
 
-Rebuild writes only the disposable hint-store schema v2 at
+Rebuild writes only the disposable hint-store schema v3 at
 `.arachne/tmp/merge-hints.sqlite` and leaves the canonical
 database bytes unchanged. Export never rebuilds implicitly: it rejects missing
 temporary state, a generator-version mismatch, a product SHA-256 mismatch, or
 a changed `database/merge-hint-decisions.json` decision artifact.
-On success it atomically writes `database/merge-hints-review.json` and removes
-the temporary database. See [Product inbox](PRODUCT_INBOX.md) for the closed
-batch format and complete derived-hint lifecycle.
+On success it atomically writes the ignored local identity review
+`.arachne/merge-hints-review.json`. It does not embed structural analysis and
+does not remove `.arachne/tmp/merge-hints.sqlite`; raw measurements and
+higher-level projections remain independently queryable there. The next
+explicit rebuild replaces the disposable store. See
+[Product inbox](PRODUCT_INBOX.md) for the closed batch format and complete
+derived-hint lifecycle.
 
 The rebuild also derives generic structural observations and temporal sequence
 or fingerprint summaries from the same read-only product attachment. Their
@@ -206,10 +209,26 @@ build/arachne product research \
   --output research.json
 ```
 
-The command verifies the snapshot control and export hash, binds the report to
-the product content hash, and requires the merge-hint review to match both that
-product and the durable decisions artifact. It contains quality gaps, open
-ingest issues, and the reviewed merge hints consumed by the web Research view.
+The command verifies the snapshot control and export hash and binds the report
+to the product content hash. By default it reads only canonical ingest and
+quality information; it does not look for a merge review or structural store.
+To add identity hints to a local report, supply both explicit inputs:
+
+```sh
+build/arachne product research \
+  --config config/arachne.local.json \
+  --product-snapshot graphs/product/active.json \
+  --merge-hints .arachne/merge-hints-review.json \
+  --merge-hint-decisions database/merge-hint-decisions.json \
+  --output research-with-hints.json
+```
+
+The paired mode verifies the review's product snapshot and exact decision-file
+hash. Decisions are neither required nor read when no review is supplied.
+Structural observations are never copied into `product_research_report_v1`.
+The same paired flags are accepted by `arachne viewer build` for an explicitly
+local research viewer. Normal static viewer and Pages builds omit them and are
+therefore independent of local hint artifacts.
 For local viewer development, the same commands also accept the complete pair
 `--database database/art-islands.sqlite --product-export
 .arachne/tmp/viewer-product-local.jsonl`. `npm run data:catalog` creates that
@@ -360,7 +379,7 @@ branches and never push the base directly.
 |---|---|---|
 | `validation.yml` | Read-only contracts, scripts, unit/build tests | `scripts/run_checks.sh` |
 | `intake.yml` | Acquire one issue attachment, materialize and validate a strict product batch, then propose the inbox file | `issue_fetch_request.py`, `build/arachne fetch`, `materialize_product_batch.py`, `build/arachne product check-inbox` |
-| `product-integration.yml` | Validate and transactionally apply inbox batches, then explicitly rebuild and export the separate merge-hint projection | `build/arachne product check-inbox apply-inbox`, then `build/arachne product rebuild-merge-hints export-merge-hints` |
+| `product-integration.yml` | Validate and transactionally apply inbox batches; local hint analysis is deliberately not run in CI | `build/arachne product check-inbox apply-inbox` |
 | `candidate-rebuild.yml` | Ariadne plan or HPC handoff; Penelope rebuild | `build/arachne candidate plan`, then `build/arachne candidate rebuild` |
 | `source-refresh.yml` | Cadence-gated bulk acquisition, streaming HPC graph, full candidate rebuild | `build/arachne fetch plan`, `build/arachne fetch`, `hpc/wikidata/build_external_graph.py`, and direct candidate commands |
 | `publication.yml` | Protected, verified immutable Pages artifact | `arachne_ops.py viewer-build`, then `resolve_site_bundle.py` |
