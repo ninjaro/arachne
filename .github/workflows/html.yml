@@ -31,10 +31,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          lfs: true
-      - uses: actions/configure-pages@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - uses: MarkusJx/googletest-installer@28c5d4102d9d57b46254be19a940bf038a9c850a
       - uses: ssciwr/doxygen-install@501e53b879da7648ab392ee226f5b90e42148449
         with:
@@ -82,7 +80,15 @@ jobs:
             -format=html \
             -output-dir=cov \
             -ignore-filename-regex='/(tests|build-coverage|usr)/'
-
+      - name: Upload results to Codecov
+        if: ${{ hashFiles('build/coverage.info') != '' }}
+        uses: codecov/codecov-action@9b6d1f84bde660b0f784003009b1f0aa4663cdeb
+        continue-on-error: true
+        with:
+          files: build/coverage.info
+          fail_ci_if_error: false
+          use_oidc: true
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Build static viewer
         working-directory: viewer
         env:
@@ -110,7 +116,7 @@ jobs:
         run: python3 scripts/patch_doxygen_pages.py doc
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: doc
 
@@ -123,4 +129,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
