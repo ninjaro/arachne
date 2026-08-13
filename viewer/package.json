@@ -1,0 +1,31 @@
+{
+  "name": "arachne-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "data:catalog": "python3 scripts/build_catalog.py ../database/art-islands.sqlite public/data/catalog.json --product-export ../.arachne/tmp/viewer-product-local.jsonl",
+    "data:projections": "${ARACHNE_BINARY:-../build/arachne} product research --database database/art-islands.sqlite --product-export .arachne/tmp/viewer-product-local.jsonl --output viewer/public/data/research.json --compact && ${ARACHNE_BINARY:-../build/arachne} product taste-index --database database/art-islands.sqlite --product-export .arachne/tmp/viewer-product-local.jsonl --output viewer/public/data/taste-index.json --compact",
+    "data": "npm run data:catalog && npm run data:projections",
+    "stage:image-hints": "python3 scripts/stage_image_hints.py",
+    "dev": "vite",
+    "build:assets": "tsc --noEmit && vite build",
+    "build": "npm run build:assets && node scripts/build_static_api.mjs",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:static": "node scripts/test_static_api.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.3.6"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.24",
+    "@types/react-dom": "^18.3.7",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

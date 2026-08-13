@@ -1,0 +1,9 @@
+/*! \page coverage Code Coverage Report
+
+The coverage report is deployed as a standalone site rather than embedded in
+the Doxygen frame.
+
+\htmlonly
+<p><a href="../../cov/" target="_top">Open the coverage report</a></p>
+\endhtmlonly
+*/

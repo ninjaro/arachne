@@ -1,0 +1,67 @@
+name: Repository validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install workflow syntax validator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y yamllint
+
+      - name: Validate repository contracts and operations surface
+        run: |
+          python3 scripts/validate_repository.py
+          yamllint .github/workflows .github/ISSUE_TEMPLATE/arachne-batch.yml
+
+      - name: Validate canonical product database
+        run: python3 scripts/check_product_database_clean.py
+
+      - name: Validate Python and shell syntax
+        run: |
+          python3 -m compileall -q scripts tests hpc
+          bash -n scripts/build.sh scripts/run_checks.sh hpc/wikidata/*.sbatch
+
+      - name: Run hermetic Python tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libgtest-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev \
+            yamllint
+      - name: Run local-equivalent checks
+        env:
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/run_checks.sh
+
+      - name: Validate fixed product inbox
+        run: build/arachne product check-inbox

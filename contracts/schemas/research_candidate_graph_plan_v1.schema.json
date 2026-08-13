@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/research_candidate_graph_plan_v1.schema.json",
+  "title": "Complete research-candidate graph materialization plan v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "plan_id",
+    "source_snapshot",
+    "product_snapshot",
+    "algorithm_version",
+    "configuration",
+    "plan_artifact",
+    "summary",
+    "created_at"
+  ],
+  "properties": {
+    "contract": {
+      "const": "research_candidate_graph_plan_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "plan_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "source_snapshot": {
+      "type": "object",
+      "required": [
+        "snapshot_id",
+        "storage_ref",
+        "sha256"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "$ref": "common_v1.schema.json#/$defs/stable_id"
+        },
+        "storage_ref": {
+          "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+        },
+        "sha256": {
+          "$ref": "common_v1.schema.json#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "product_snapshot": {
+      "type": "object",
+      "required": [
+        "snapshot_id",
+        "sha256"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "$ref": "common_v1.schema.json#/$defs/stable_id"
+        },
+        "sha256": {
+          "$ref": "common_v1.schema.json#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "algorithm_version": {
+      "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+    },
+    "configuration": {
+      "type": "object",
+      "required": [
+        "sha256",
+        "values"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "common_v1.schema.json#/$defs/sha256"
+        },
+        "values": {
+          "type": "object",
+          "required": [
+            "candidate_pool_size",
+            "final_target",
+            "group_count"
+          ],
+          "properties": {
+            "candidate_pool_size": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "final_target": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "group_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "gray_bonus_basis_points": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "quality_weight": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "grey_node_policy": {
+              "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+            },
+            "tie_breaker": {
+              "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "plan_artifact": {
+      "$ref": "common_v1.schema.json#/$defs/artifact"
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "candidate_count",
+        "edge_count",
+        "group_count"
+      ],
+      "properties": {
+        "candidate_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edge_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "group_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common_v1.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

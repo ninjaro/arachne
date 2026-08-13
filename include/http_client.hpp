@@ -28,6 +28,7 @@
 #include "utils.hpp"
 
 #include <chrono>
+#include <mutex>
 
 namespace corespace {
 /**
@@ -84,10 +85,60 @@ public:
      *
      * @param url    Absolute or base URL.
      * @param params Optional list of query parameters to append.
+     * @param accept Optional Accept header value to override the default;
+     *               empty string uses the client's configured accept header.
+     * @param timeout_sec Optional per-request timeout in seconds; if negative
+     *                    the client's default timeout is used.
      * @return http_response on success (2xx).
      * @throws std::runtime_error on terminal failure as described above.
      */
-    http_response get(std::string_view url, const parameter_list& params = {});
+    http_response
+    get(std::string_view url, const parameter_list& params = {},
+        std::string_view accept = {}, int timeout_sec = -1);
+    /**
+     * @brief Perform an HTTP POST with form-encoded body.
+     *
+     * Builds a URL from @p url and @p query, serializes @p form as
+     * application/x-www-form-urlencoded and posts it. Retry behaviour and
+     * metrics follow the same semantics as get().
+     *
+     * @param url         Endpoint URL.
+     * @param form        Form key/value pairs to serialize in the body.
+     * @param query       Optional query parameters appended to the URL.
+     * @param accept      Optional Accept header override.
+     * @param timeout_sec Optional per-request timeout in seconds; negative to
+     * use default.
+     * @return http_response on success (2xx).
+     * @throws std::runtime_error on terminal failure.
+     */
+    http_response post_form(
+        std::string_view url, const parameter_list& form,
+        const parameter_list& query = {}, std::string_view accept = {},
+        int timeout_sec = -1
+    );
+    /**
+     * @brief Perform an HTTP POST with a raw body.
+     *
+     * Builds a URL from @p url and @p query and posts the raw @p body with
+     * Content-Type set to @p content_type. Retry behaviour and metrics follow
+     * the same semantics as get().
+     *
+     * @param url          Endpoint URL.
+     * @param body         Raw request body to send.
+     * @param content_type Content-Type header value for the body.
+     * @param query        Optional query parameters appended to the URL.
+     * @param accept       Optional Accept header override.
+     * @param timeout_sec  Optional per-request timeout in seconds; negative to
+     * use default.
+     * @return http_response on success (2xx).
+     * @throws std::runtime_error on terminal failure.
+     */
+    http_response post_raw(
+        std::string_view url, std::string_view body,
+        std::string_view content_type, const parameter_list& query = {},
+        std::string_view accept = {}, int timeout_sec = -1
+    );
+
     /**
      * @brief Access aggregated network metrics.
      * @return Const reference to the metrics snapshot.
@@ -119,10 +170,41 @@ private:
      *
      * @param url_handle Prepared `CURLU` handle (owned by caller).
      * @param elapsed    Out: time spent in `curl_easy_perform`.
+     * @param accept     Optional Accept header override; empty means use client
+     * default.
+     * @param timeout_sec Optional per-request timeout in seconds; negative to
+     * use client default.
      * @return Populated `http_response` (may carry a libcurl error).
      */
-    http_response
-    request(CURLU* url_handle, std::chrono::milliseconds& elapsed) const;
+    http_response request_get(
+        CURLU* url_handle, std::chrono::milliseconds& elapsed,
+        std::string_view accept = {}, int timeout_sec = -1
+    ) const;
+
+    /**
+     * @brief Execute a single HTTP POST with given body and content type.
+     *
+     * Sets temporary headers (Content-Type and Accept), posts the body,
+     * measures elapsed time in @p elapsed, reads status and headers, and
+     * records any libcurl error message.
+     *
+     * @param url_handle Prepared `CURLU` handle (owned by caller).
+     * @param elapsed    Out: time spent in `curl_easy_perform`.
+     * @param content_type Content-Type header value.
+     * @param body        Body bytes to send.
+     * @param accept      Optional Accept header override; empty means use
+     * client default.
+     * @param timeout_sec Optional per-request timeout in seconds; negative to
+     * use client default.
+     * @return Populated `http_response` (may carry a libcurl error).
+     */
+    http_response request_post(
+        CURLU* url_handle, std::chrono::milliseconds& elapsed,
+        std::string_view content_type, std::string_view body,
+        std::string_view accept = {}, int timeout_sec = -1
+    ) const;
+    std::string build_form_body(const parameter_list& form) const;
+
     /**
      * @brief Refresh the header multimap from the last transfer.
      *
@@ -199,6 +281,7 @@ private:
 
     const network_options opt {}; ///< Fixed options installed at construction.
     network_metrics metrics; ///< Aggregated metrics (atomic counters).
+    mutable std::mutex mu;
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl {
         nullptr, &curl_easy_cleanup
     }; ///< Reused easy handle (not thread-safe).

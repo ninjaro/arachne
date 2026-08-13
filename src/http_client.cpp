@@ -32,6 +32,12 @@ namespace corespace {
 namespace {
     std::once_flag global_curl;
 
+    /**
+     * @brief Initialize libcurl globally once per process.
+     *
+     * Called via std::call_once to perform curl_global_init and throw
+     * std::runtime_error on failure.
+     */
     void curl_inited() {
         if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
             throw std::runtime_error("curl_global_init failed");
@@ -65,13 +71,16 @@ http_client::http_client() {
 
 const network_metrics& http_client::metrics_info() const { return metrics; }
 
-http_response
-http_client::get(const std::string_view url, const parameter_list& params) {
+http_response http_client::get(
+    const std::string_view url, const parameter_list& params,
+    const std::string_view accept, const int timeout_sec
+) {
+    std::lock_guard lk(mu);
     const auto url_handle = build_url(url, params);
-
     for (int attempt = 1;; ++attempt) {
         std::chrono::milliseconds elapsed { 0l };
-        http_response response = request(url_handle.get(), elapsed);
+        http_response response
+            = request_get(url_handle.get(), elapsed, accept, timeout_sec);
 
         update_metrics(response, elapsed);
 
@@ -88,6 +97,78 @@ http_client::get(const std::string_view url, const parameter_list& params) {
             continue;
         }
 
+        if (!net_ok) {
+            throw std::runtime_error("curl error: " + response.error_message);
+        }
+        throw std::runtime_error(
+            "http error: " + std::to_string(response.status_code)
+        );
+    }
+}
+
+http_response http_client::post_form(
+    const std::string_view url, const parameter_list& form,
+    const parameter_list& query, const std::string_view accept,
+    const int timeout_sec
+) {
+    std::lock_guard lk(mu);
+    const auto url_handle = build_url(url, query);
+    const std::string body = build_form_body(form);
+    for (int attempt = 1;; ++attempt) {
+        std::chrono::milliseconds elapsed { 0l };
+        http_response response = request_post(
+            url_handle.get(), elapsed, "application/x-www-form-urlencoded",
+            body, accept, timeout_sec
+        );
+        update_metrics(response, elapsed);
+        const bool net_ok = (response.error_code == CURLE_OK);
+        if (status_good(response)) {
+            return response;
+        }
+        if (attempt <= opt.max_retries && status_retry(response, net_ok)) {
+            ++metrics.retries;
+            long long sleep_ms = next_delay(attempt);
+            apply_server_retry_hint(sleep_ms);
+            metrics.sleep_ms += sleep_ms;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            continue;
+        }
+        if (!net_ok) {
+            throw std::runtime_error("curl error: " + response.error_message);
+        }
+        throw std::runtime_error(
+            "http error: " + std::to_string(response.status_code)
+        );
+    }
+}
+
+http_response http_client::post_raw(
+    const std::string_view url, const std::string_view body,
+    const std::string_view content_type, const parameter_list& query,
+    const std::string_view accept, const int timeout_sec
+) {
+    std::lock_guard lk(mu);
+    const auto url_handle = build_url(url, query);
+    const std::string body_copy(body);
+    for (int attempt = 1;; ++attempt) {
+        std::chrono::milliseconds elapsed { 0l };
+        http_response response = request_post(
+            url_handle.get(), elapsed, content_type, body_copy, accept,
+            timeout_sec
+        );
+        update_metrics(response, elapsed);
+        const bool net_ok = (response.error_code == CURLE_OK);
+        if (status_good(response)) {
+            return response;
+        }
+        if (attempt <= opt.max_retries && status_retry(response, net_ok)) {
+            ++metrics.retries;
+            long long sleep_ms = next_delay(attempt);
+            apply_server_retry_hint(sleep_ms);
+            metrics.sleep_ms += sleep_ms;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            continue;
+        }
         if (!net_ok) {
             throw std::runtime_error("curl error: " + response.error_message);
         }
@@ -125,14 +206,28 @@ http_client::curl_url_ptr http_client::build_url(
     return url_handle;
 }
 
-http_response http_client::request(
-    CURLU* const url_handle, std::chrono::milliseconds& elapsed
+http_response http_client::request_get(
+    CURLU* const url_handle, std::chrono::milliseconds& elapsed,
+    const std::string_view accept, const int timeout_sec
 ) const {
     using namespace std::chrono;
 
     http_response response;
 
+    curl_slist* tmp_headers = nullptr;
+    if (!accept.empty()) {
+        const std::string h = "Accept: " + std::string(accept);
+        tmp_headers = curl_slist_append(nullptr, h.c_str());
+        curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, tmp_headers);
+    } else {
+        curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, header_list.get());
+    }
+
     curl_easy_setopt(curl.get(), CURLOPT_HTTPGET, 1L);
+    const long timeout_ms = (timeout_sec >= 0)
+        ? std::max(0L, timeout_sec * 1000L)
+        : opt.timeout_ms;
+    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl.get(), CURLOPT_CURLU, url_handle);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response.text);
@@ -152,7 +247,89 @@ http_response http_client::request(
         response.error_message = curl_easy_strerror(response.error_code);
     }
 
+    if (tmp_headers) {
+        curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, header_list.get());
+        curl_slist_free_all(tmp_headers);
+    }
+
     return response;
+}
+
+http_response http_client::request_post(
+    CURLU* url_handle, std::chrono::milliseconds& elapsed,
+    const std::string_view content_type, const std::string_view body,
+    const std::string_view accept, const int timeout_sec
+) const {
+    using namespace std::chrono;
+    http_response response;
+    curl_slist* tmp_headers = nullptr;
+
+    const std::string ct = "Content-Type: " + std::string(content_type);
+    tmp_headers = curl_slist_append(tmp_headers, ct.c_str());
+    const std::string acc = "Accept: "
+        + std::string(accept.empty() ? opt.accept : std::string(accept));
+    tmp_headers = curl_slist_append(tmp_headers, acc.c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, tmp_headers);
+
+    curl_easy_setopt(curl.get(), CURLOPT_CURLU, url_handle);
+    const long timeout_ms = (timeout_sec >= 0)
+        ? std::max(0L, timeout_sec * 1000L)
+        : opt.timeout_ms;
+    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, timeout_ms);
+    curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.data());
+    curl_easy_setopt(
+        curl.get(), CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size())
+    );
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response.text);
+    const auto t0 = steady_clock::now();
+    response.error_code = curl_easy_perform(curl.get());
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, nullptr);
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE, 0L);
+    curl_easy_setopt(curl.get(), CURLOPT_POST, 0L);
+    curl_easy_setopt(curl.get(), CURLOPT_CURLU, nullptr);
+    const auto t1 = steady_clock::now();
+    elapsed = duration_cast<milliseconds>(t1 - t0);
+    curl_easy_getinfo(
+        curl.get(), CURLINFO_RESPONSE_CODE, &response.status_code
+    );
+    update_headers(response);
+    if (response.error_code != CURLE_OK) {
+        response.error_message = curl_easy_strerror(response.error_code);
+    }
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, header_list.get());
+    if (tmp_headers) {
+        curl_slist_free_all(tmp_headers);
+    }
+    return response;
+}
+
+std::string http_client::build_form_body(const parameter_list& form) const {
+    std::string body;
+    bool first = true;
+    for (const auto& [key, value] : form) {
+        char* ekey = curl_easy_escape(
+            curl.get(), key.c_str(), static_cast<int>(key.size())
+        );
+        char* evalue = curl_easy_escape(
+            curl.get(), value.data(), static_cast<int>(value.size())
+        );
+        if (!first) {
+            body.push_back('&');
+        }
+        body.append(ekey ? ekey : "");
+        body.push_back('=');
+        body.append(evalue ? evalue : "");
+        if (ekey) {
+            curl_free(ekey);
+        }
+        if (evalue) {
+            curl_free(evalue);
+        }
+        first = false;
+    }
+    return body;
 }
 
 void http_client::update_headers(http_response& response) const {
@@ -191,8 +368,8 @@ bool http_client::status_retry(
 }
 
 long long http_client::next_delay(const int attempt) const {
-    const int base = opt.retry_base_ms * (1 << (attempt - 1));
-    std::uniform_int_distribution d(0, base);
+    const long long base = opt.retry_base_ms * (1 << (attempt - 1));
+    std::uniform_int_distribution<long long> d(0, base);
     return std::min(base + d(rng()), opt.retry_max_ms);
 }
 

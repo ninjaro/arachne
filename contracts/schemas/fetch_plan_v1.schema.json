@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/fetch_plan_v1.schema.json",
+  "title": "Declarative external-data fetch plan v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "format_version",
+    "plan_id",
+    "source",
+    "requests",
+    "created_at"
+  ],
+  "properties": {
+    "contract": {
+      "const": "fetch_plan_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "plan_id": {
+      "$ref": "common_v1.schema.json#/$defs/stable_id"
+    },
+    "source": {
+      "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+    },
+    "requests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "locator",
+          "purpose"
+        ],
+        "properties": {
+          "request_id": {
+            "$ref": "common_v1.schema.json#/$defs/stable_id"
+          },
+          "locator": {
+            "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+          },
+          "purpose": {
+            "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+            }
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+            }
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "archives": {
+            "type": "array",
+            "items": {
+              "$ref": "common_v1.schema.json#/$defs/non_empty_string"
+            }
+          },
+          "follow_up": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common_v1.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

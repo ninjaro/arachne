@@ -1,0 +1,37 @@
+{
+  "contract": "research_candidate_graph_snapshot_v1",
+  "format_version": 1,
+  "snapshot_id": "candidate-20260718-01",
+  "run_id": "candidate-run-20260718-01",
+  "graph_version": "2026.07.18.1",
+  "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "database": {
+    "storage_ref": "snapshots/candidate/candidate-20260718-01.sqlite3",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "byte_length": 5242880,
+    "media_type": "application/vnd.sqlite3"
+  },
+  "exports": [
+    {
+      "kind": "candidate-jsonl",
+      "artifact": {
+        "storage_ref": "exports/candidate/candidate-20260718-01.jsonl",
+        "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "byte_length": 900000,
+        "media_type": "application/x-ndjson"
+      }
+    }
+  ],
+  "plan_id": "candidate-plan-20260718-01",
+  "source_snapshot_id": "wikidata-20260718",
+  "activated_at": "2026-07-18T05:00:00Z",
+  "structural_validation": {
+    "passed": true,
+    "report": {
+      "storage_ref": "reports/candidate-run-20260718-01.json",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "byte_length": 6144,
+      "media_type": "application/json"
+    }
+  }
+}

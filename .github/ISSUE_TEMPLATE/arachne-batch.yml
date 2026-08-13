@@ -1,0 +1,36 @@
+name: Arachne product batches
+description: Submit one or more strict arachne_batch_v2 JSON files for review.
+title: "[Arachne batch] "
+labels:
+  - arachne-batch
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Attach one or more plain UTF-8 `.json` files. Every file must contain
+        exactly one root object whose format is `arachne_batch_v2`. ZIPs,
+        sidecars, legacy batch types, and arbitrary metadata are not accepted.
+        Use the issue title for a short description; no local command-line setup
+        is required.
+
+        The number of files is not fixed. Per-file and total byte budgets still
+        apply, and the complete submission is handled atomically: one invalid or
+        unavailable attachment prevents the review pull request.
+
+        The current contributor group is trusted, but mechanical receipt still
+        does not certify factual or semantic correctness. You remain responsible
+        for research, identity decisions, sources, quotations, weights, and
+        confidence.
+
+        Receipt does not mean database integration succeeded. Every batch is
+        checked before application, and rejected operations remain available for
+        correction. Do not attach secrets or private source archives.
+
+  - type: textarea
+    id: batch_files
+    attributes:
+      label: Batch files
+      description: Drag all arachne_batch_v2 `.json` files into this field.
+      placeholder: Drag one or more batch files here; GitHub will insert attachment links.
+    validations:
+      required: true

@@ -1,0 +1,201 @@
+name: Wikidata bulk source refresh
+
+on:
+  schedule:
+    - cron: "41 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Ignore the configured refresh cadence
+        required: false
+        type: boolean
+        default: false
+      dump_url:
+        description: Reviewed official Wikidata entity-dump URL
+        required: false
+        type: string
+        default: https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.bz2
+      product_snapshot_control:
+        description: Product snapshot control path inside the state repository
+        required: false
+        type: string
+        default: graphs/product/active.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-graph-write
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: vars.ARACHNE_OPERATIONS_ENABLED == 'true'
+    runs-on: ${{ vars.ARACHNE_HPC_RUNNER_LABEL || vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require persistent-state settings
+        env:
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+        run: |
+          test -n "${STATE_REPOSITORY}"
+          test -n "${STATE_BASE_BRANCH}"
+          test -n "${STATE_TOKEN}"
+      - name: Checkout protected persistent state
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          path: .arachne-state
+          lfs: true
+      - name: Evaluate configured source cadence
+        id: cadence
+        env:
+          FORCE_REFRESH: ${{ inputs.force || false }}
+        run: |
+          arguments=()
+          if [[ "${FORCE_REFRESH}" == "true" ]]; then
+            arguments+=(--force)
+          fi
+          python3 scripts/source_refresh_gate.py gate \
+            --config "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
+            --marker "${GITHUB_WORKSPACE}/.arachne-state/operations/source-refresh/wikidata.json" \
+            --github-output "${GITHUB_OUTPUT}" \
+            "${arguments[@]}"
+      - name: Install application dependencies
+        if: steps.cadence.outputs.due == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            lbzip2 \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
+      - name: Build Arachne operations binary
+        if: steps.cadence.outputs.due == 'true'
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/build.sh
+      - name: Materialize config and reviewed product snapshot
+        if: steps.cadence.outputs.due == 'true'
+        env:
+          PRODUCT_CONTROL_INPUT: ${{ inputs.product_snapshot_control || 'graphs/product/active.json' }}
+        run: |
+          python3 scripts/materialize_ci_config.py \
+            --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --runner-temp "${RUNNER_TEMP}" \
+            --output "${RUNNER_TEMP}/arachne-config.json"
+          python3 -c 'import json,os; p=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json"))["paths"]; print("ARACHNE_ARTIFACTS=" + p["artifact_store"])' >> "${GITHUB_ENV}"
+          python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["PRODUCT_CONTROL_INPUT"]).resolve(strict=True); value.relative_to(root); print("PRODUCT_CONTROL=" + str(value))' >> "${GITHUB_ENV}"
+          echo "REFRESH_ID=wikidata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
+          echo "FETCH_PLAN=${RUNNER_TEMP}/wikidata-fetch-plan.json" >> "${GITHUB_ENV}"
+          echo "FETCH_CONTROLS=${RUNNER_TEMP}/wikidata-fetch-controls" >> "${GITHUB_ENV}"
+          echo "FETCH_REQUEST=${RUNNER_TEMP}/wikidata-fetch-controls/wikidata-official-dump.json" >> "${GITHUB_ENV}"
+          echo "SOURCE_CONTROL=${RUNNER_TEMP}/wikidata-source.acquired.json" >> "${GITHUB_ENV}"
+          echo "RESULT_DIRECTORY=${RUNNER_TEMP}/wikidata-results" >> "${GITHUB_ENV}"
+          echo "EXTERNAL_GRAPH=${RUNNER_TEMP}/wikidata-results/wikidata-external-graph.json" >> "${GITHUB_ENV}"
+          echo "IMAGE_HINTS=${RUNNER_TEMP}/wikidata-results/wikidata-image-hints.json" >> "${GITHUB_ENV}"
+          echo "HPC_REPORT=${RUNNER_TEMP}/wikidata-results/wikidata-hpc-report.json" >> "${GITHUB_ENV}"
+      - name: Declare and translate official bulk acquisition
+        if: steps.cadence.outputs.due == 'true'
+        env:
+          DUMP_URL: ${{ inputs.dump_url || 'https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.bz2' }}
+        run: |
+          python3 scripts/wikidata_bulk_fetch_plan.py \
+            --url "${DUMP_URL}" \
+            --plan-id "${REFRESH_ID}" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --output "${FETCH_PLAN}"
+          "${GITHUB_WORKSPACE}/build/arachne" fetch plan \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --plan "${FETCH_PLAN}" \
+            --output-directory "${FETCH_CONTROLS}"
+      - name: Acquire raw dump through Pheidippides
+        id: acquire
+        if: steps.cadence.outputs.due == 'true'
+        continue-on-error: true
+        run: |
+          "${GITHUB_WORKSPACE}/build/arachne" fetch \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --request "${FETCH_REQUEST}" \
+            --output-control "${SOURCE_CONTROL}"
+      - name: Stream source graph and recompute candidate snapshot
+        id: rebuild
+        if: steps.acquire.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python3 -u hpc/wikidata/build_external_graph.py \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --source-control "${SOURCE_CONTROL}" \
+            --product-snapshot-control "${PRODUCT_CONTROL}" \
+            --output-directory "${RESULT_DIRECTORY}" \
+            --work-directory "${RUNNER_TEMP}/wikidata-work" \
+            --wikidata-config hpc/wikidata/config.json \
+            --decompress-threads "$(nproc)"
+          mkdir -p "${ARACHNE_ARTIFACTS}/candidate-plans"
+          "${GITHUB_WORKSPACE}/build/arachne" candidate plan \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --external-graph "${EXTERNAL_GRAPH}" \
+            --product-snapshot "${PRODUCT_CONTROL}" \
+            --output-artifact "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.json" \
+            --output-control "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.control.json"
+          "${GITHUB_WORKSPACE}/build/arachne" candidate rebuild \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --plan-control "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.control.json" \
+            --run-id "candidate-${REFRESH_ID}"
+      - name: Preserve source and algorithm diagnostics
+        if: steps.cadence.outputs.due == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wikidata-refresh-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SOURCE_CONTROL }}
+            ${{ env.HPC_REPORT }}
+            ${{ env.IMAGE_HINTS }}
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Stop after fresh acquisition or rebuild failure
+        if: >-
+          steps.cadence.outputs.due == 'true' &&
+          (steps.acquire.outcome != 'success' || steps.rebuild.outcome != 'success')
+        run: exit 1
+      - name: Stage reviewed image hints and remove disposable source bytes
+        if: steps.cadence.outputs.due == 'true'
+        run: |
+          python3 -c 'import json,os; d=json.load(open(os.environ["SOURCE_CONTROL"])); print("SOURCE_ID=" + d["artifact_id"]); print("SOURCE_SHA=" + d["artifact"]["sha256"])' >> "${GITHUB_ENV}"
+          python3 viewer/scripts/stage_image_hints.py \
+            "${IMAGE_HINTS}" \
+            "${GITHUB_WORKSPACE}/.arachne-state/derived/wikidata-image-hints.json" \
+            --product-snapshot-control "${PRODUCT_CONTROL}"
+          python3 scripts/discard_acquired_artifact.py \
+            --fetch-request "${FETCH_REQUEST}" \
+            --acquired-control "${SOURCE_CONTROL}" \
+            --config "${RUNNER_TEMP}/arachne-config.json"
+          rm -f "${EXTERNAL_GRAPH}"
+          rm -f "${IMAGE_HINTS}"
+      - name: Persist source cadence and propose reviewed candidate state
+        if: steps.cadence.outputs.due == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+        run: |
+          python3 scripts/source_refresh_gate.py record \
+            --marker "${GITHUB_WORKSPACE}/.arachne-state/operations/source-refresh/wikidata.json" \
+            --snapshot-id "${SOURCE_ID}" \
+            --source-sha256 "${SOURCE_SHA}" \
+            --completed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python3 scripts/propose_state_change.py \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --repository "${STATE_REPOSITORY}" \
+            --base "${STATE_BASE_BRANCH}" \
+            --branch "arachne/wikidata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --title "Arachne Wikidata bulk candidate refresh" \
+            --body "Full bulk-first candidate recomputation from ${SOURCE_ID}. Review transport evidence, HPC report, plan, run manifest, derived image hints, and structural validation before merge."

@@ -1,0 +1,223 @@
+{
+  "format_version": 1,
+  "project_timezone": "Europe/Berlin",
+  "paths": {
+    "legacy_inbox": null,
+    "queue": ".arachne/queue",
+    "remainders": ".arachne/remainders",
+    "ledger": ".arachne/operational-ledger.sqlite3",
+    "graph_store": ".arachne/graphs",
+    "artifact_store": ".arachne/artifacts",
+    "lock_root": ".arachne/locks",
+    "viewer_templates": "viewer",
+    "site_output": ".arachne/site",
+    "legacy_inbox_baseline": ".arachne/legacy-inbox-baseline.json"
+  },
+  "product_integration": {
+    "local_hour": 3,
+    "queued_batch_threshold": 15,
+    "lock_stale_seconds": 21600
+  },
+  "candidate_rebuild": {
+    "sources": {
+      "wikidata": {
+        "refresh_days": 60,
+        "candidate_pool_size": 3000,
+        "final_target": 1500,
+        "group_count": 4,
+        "gray_bonus_basis_points": 2000,
+        "quality_weight": 0.65
+      }
+    },
+    "lock_stale_seconds": 21600
+  },
+  "transport": {
+    "format_version": 1,
+    "defaults": {
+      "timeouts": {
+        "total_ms": 60000,
+        "connect_ms": 10000,
+        "read_ms": 30000,
+        "write_ms": 30000,
+        "pool_ms": 10000
+      },
+      "retry": {
+        "maximum_attempts": 3,
+        "initial_delay_ms": 250,
+        "maximum_delay_ms": 10000,
+        "total_delay_budget_ms": 30000,
+        "respect_retry_after": true
+      },
+      "admission": {
+        "maximum_concurrency": 4,
+        "minimum_interval_ms": 0
+      },
+      "cache": {
+        "ttl_seconds": 3600
+      },
+      "maximum_artifact_bytes": 67108864,
+      "redirect_policy": {
+        "follow": false,
+        "maximum_redirects": 0,
+        "allow_https_to_http": false
+      }
+    },
+    "doors": [
+      {
+        "door_id": "github-attachments",
+        "defaults": {
+          "maximum_artifact_bytes": 67108864,
+          "redirect_policy": {
+            "follow": true,
+            "maximum_redirects": 3,
+            "allow_https_to_http": false,
+            "allowed_hosts": [
+              "github.com",
+              "user-images.githubusercontent.com",
+              "objects.githubusercontent.com",
+              "github-production-user-asset-6210df.s3.amazonaws.com"
+            ]
+          }
+        },
+        "endpoints": [
+          {
+            "endpoint_id": "github",
+            "protocol": "http_file",
+            "base_url": "https://github.com/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": false,
+            "resumable_download": false,
+            "write_enabled": false
+          },
+          {
+            "endpoint_id": "user-images",
+            "protocol": "http_file",
+            "base_url": "https://user-images.githubusercontent.com/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": false,
+            "resumable_download": false,
+            "write_enabled": false
+          },
+          {
+            "endpoint_id": "objects",
+            "protocol": "http_file",
+            "base_url": "https://objects.githubusercontent.com/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": false,
+            "resumable_download": false,
+            "write_enabled": false
+          },
+          {
+            "endpoint_id": "user-assets",
+            "protocol": "http_file",
+            "base_url": "https://github-production-user-asset-6210df.s3.amazonaws.com/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": false,
+            "resumable_download": false,
+            "write_enabled": false
+          }
+        ]
+      },
+      {
+        "door_id": "wikidata",
+        "defaults": {
+          "admission": {
+            "maximum_concurrency": 2,
+            "minimum_interval_ms": 1000
+          },
+          "maximum_artifact_bytes": 536870912000
+        },
+        "endpoints": [
+          {
+            "endpoint_id": "official-dumps",
+            "protocol": "http_file",
+            "base_url": "https://dumps.wikimedia.org/wikidatawiki/entities/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": true,
+            "resumable_download": true,
+            "write_enabled": false,
+            "policy": {
+              "timeouts": {
+                "total_ms": 86400000,
+                "connect_ms": 30000,
+                "read_ms": 900000,
+                "write_ms": 30000,
+                "pool_ms": 60000
+              },
+              "retry": {
+                "maximum_attempts": 5,
+                "initial_delay_ms": 1000,
+                "maximum_delay_ms": 60000,
+                "total_delay_budget_ms": 300000,
+                "respect_retry_after": true
+              }
+            }
+          },
+          {
+            "endpoint_id": "entity-api",
+            "protocol": "rest",
+            "base_url": "https://www.wikidata.org/w/api.php",
+            "allowed_methods": [
+              "POST"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": false,
+            "resumable_download": false,
+            "write_enabled": false,
+            "policy": {
+              "maximum_artifact_bytes": 16777216
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "security": {
+    "submission_max_bytes": 67108864,
+    "attachment_timeout_ms": 60000,
+    "attachment_maximum_attempts": 3,
+    "archive_max_files": 1000,
+    "archive_max_total_bytes": 536870912,
+    "archive_max_file_bytes": 134217728,
+    "archive_max_compression_ratio": 200,
+    "attachment_allowed_hosts": [
+      "github.com",
+      "user-images.githubusercontent.com",
+      "objects.githubusercontent.com",
+      "github-production-user-asset-6210df.s3.amazonaws.com"
+    ],
+    "maximum_redirects": 3,
+    "allow_https_to_http": false
+  },
+  "publication": {
+    "require_reviewed_change": true,
+    "pages_artifact_name": "arachne-viewer-site"
+  }
+}

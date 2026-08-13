@@ -1,0 +1,149 @@
+name: Arachne maintainer dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to dispatch through the reviewed workflow
+        required: true
+        type: choice
+        options:
+          - cocoon-decision
+          - product-integration
+          - candidate-rebuild
+      envelope_id:
+        description: Cocoon ID for an explicit approval or rejection
+        required: false
+        type: string
+      cocoon_decision:
+        description: Human decision for the selected cocoon
+        required: false
+        type: choice
+        options:
+          - accepted
+          - rejected
+        default: accepted
+      decision_reason:
+        description: Auditable reason for the cocoon decision
+        required: false
+        type: string
+      plan_mode:
+        description: Candidate plan mode
+        required: false
+        type: choice
+        options:
+          - prebuilt
+          - generate
+        default: prebuilt
+      run_id:
+        description: Candidate rebuild run ID
+        required: false
+        type: string
+      plan_control:
+        description: Prebuilt candidate plan control in the state repository
+        required: false
+        type: string
+      external_graph:
+        description: External graph JSON for generated planning
+        required: false
+        type: string
+      product_snapshot_control:
+        description: Product snapshot control for generated planning
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cocoon-decision:
+    if: inputs.operation == 'cocoon-decision'
+    runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
+    concurrency:
+      group: intake-state-write
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require decision and persistent-state settings
+        env:
+          ENVELOPE_ID: ${{ inputs.envelope_id }}
+          DECISION_REASON: ${{ inputs.decision_reason }}
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+        run: |
+          test -n "${ENVELOPE_ID}"
+          test -n "${DECISION_REASON}"
+          test -n "${STATE_REPOSITORY}"
+          test -n "${STATE_BASE_BRANCH}"
+          test -n "${STATE_TOKEN}"
+      - name: Checkout protected persistent state
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          path: .arachne-state
+          lfs: true
+      - name: Install application dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
+      - name: Build Arachne operations binary
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/build.sh
+      - name: Record explicit human decision
+        env:
+          ENVELOPE_ID: ${{ inputs.envelope_id }}
+          COCOON_DECISION: ${{ inputs.cocoon_decision }}
+          DECISION_REASON: ${{ inputs.decision_reason }}
+          DECISION_ACTOR: github:${{ github.actor }}
+        run: |
+          python3 scripts/materialize_ci_config.py \
+            --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --runner-temp "${RUNNER_TEMP}" \
+            --output "${RUNNER_TEMP}/arachne-config.json"
+          python3 scripts/arachne_ops.py \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --binary "${GITHUB_WORKSPACE}/build/arachne" \
+            cocoon-transition \
+            --envelope-id "${ENVELOPE_ID}" \
+            --to "${COCOON_DECISION}" \
+            --actor-ref "${DECISION_ACTOR}" \
+            --reason "${DECISION_REASON}"
+      - name: Publish serialized approval state
+        env:
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          ENVELOPE_ID: ${{ inputs.envelope_id }}
+          COCOON_DECISION: ${{ inputs.cocoon_decision }}
+        run: |
+          python3 scripts/publish_intake_state.py \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --queue "${GITHUB_WORKSPACE}/.arachne-state/queue" \
+            --ledger "${GITHUB_WORKSPACE}/.arachne-state/operations/ledger.sqlite3" \
+            --base "${STATE_BASE_BRANCH}" \
+            --title "Arachne ${COCOON_DECISION} ${ENVELOPE_ID}"
+
+  product-integration:
+    if: inputs.operation == 'product-integration'
+    uses: ./.github/workflows/product-integration.yml
+    secrets: inherit
+
+  candidate-rebuild:
+    if: inputs.operation == 'candidate-rebuild'
+    uses: ./.github/workflows/candidate-rebuild.yml
+    with:
+      plan_mode: ${{ inputs.plan_mode }}
+      plan_control: ${{ inputs.plan_control }}
+      external_graph: ${{ inputs.external_graph }}
+      product_snapshot_control: ${{ inputs.product_snapshot_control }}
+      run_id: ${{ inputs.run_id }}
+    secrets: inherit

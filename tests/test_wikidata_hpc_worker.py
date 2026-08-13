@@ -1,0 +1,620 @@
+from __future__ import annotations
+
+import bz2
+import hashlib
+import json
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKER = ROOT / "hpc" / "wikidata" / "build_external_graph.py"
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def item_claim(qid: str) -> dict[str, object]:
+    return {
+        "rank": "normal",
+        "mainsnak": {
+            "snaktype": "value",
+            "datavalue": {"value": {"entity-type": "item", "id": qid}},
+        },
+    }
+
+
+def time_claim(value: str) -> dict[str, object]:
+    return {
+        "rank": "normal",
+        "mainsnak": {
+            "snaktype": "value",
+            "datavalue": {"value": {"time": value}},
+        },
+    }
+
+
+def media_claim(
+    filename: str,
+    *,
+    rank: str = "normal",
+    datatype: str = "commonsMedia",
+) -> dict[str, object]:
+    return {
+        "rank": rank,
+        "mainsnak": {
+            "snaktype": "value",
+            "datatype": datatype,
+            "datavalue": {"value": filename, "type": "string"},
+        },
+    }
+
+
+class WikidataHpcWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="arachne-hpc-test-")
+        self.root = Path(self.temporary.name)
+        self.artifacts = self.root / "artifacts"
+        self.graphs = self.root / "graphs"
+        self.controls = self.root / "controls"
+        self.work = self.root / "work"
+        for path in (self.artifacts, self.graphs, self.controls, self.work):
+            path.mkdir()
+
+        entities = [
+            {
+                "id": "Q1001",
+                "labels": {"en": {"value": "Creative subclass"}},
+                "claims": {"P279": [item_claim("Q1000")]},
+            },
+            {
+                "id": "Q1",
+                "labels": {"en": {"value": "Covered work"}},
+                "claims": {
+                    "P31": [item_claim("Q1001")],
+                    "P170": [item_claim("Q10")],
+                    "P3383": [
+                        media_claim("Normal poster.jpg"),
+                        media_claim("Preferred poster.jpg", rank="preferred"),
+                        media_claim("Deprecated poster.jpg", rank="deprecated"),
+                    ],
+                    "P18": [
+                        media_claim("Representative work.jpg"),
+                        media_claim("https://invalid.example/work.jpg"),
+                        media_claim("Not Commons.jpg", datatype="string"),
+                        media_claim("\ud800invalid.jpg"),
+                        *[
+                            media_claim(f"Z overflow {index:02d}.jpg")
+                            for index in range(20)
+                        ],
+                    ],
+                },
+            },
+            {
+                "id": "Q2",
+                "labels": {"en": {"value": "Uncovered work"}},
+                "claims": {
+                    "P31": [item_claim("Q1000")],
+                    "P170": [item_claim("Q10"), item_claim("Q11")],
+                },
+            },
+            {
+                "id": "Q4",
+                "labels": {"en": {"value": "Frontier work"}},
+                "claims": {
+                    "P31": [item_claim("Q1000")],
+                    "P170": [item_claim("Q11")],
+                },
+            },
+            {
+                "id": "Q3",
+                "labels": {"en": {"value": "Orphan work"}},
+                "claims": {"P31": [item_claim("Q1000")]},
+            },
+            {
+                "id": "Q10",
+                "labels": {"en": {"value": "Example creator"}},
+                "claims": {
+                    "P27": [item_claim("Q183")],
+                    "P106": [item_claim("Q1028181")],
+                    "P569": [time_claim("+1900-01-01T00:00:00Z")],
+                    "P18": [media_claim("Example portrait.jpg")],
+                    "P154": [
+                        media_claim("Example logo.svg", rank="preferred")
+                    ],
+                },
+            },
+            {
+                "id": "Q11",
+                "labels": {"en": {"value": "Frontier creator"}},
+                "claims": {"P27": [item_claim("Q30")]},
+            },
+        ]
+        dump_bytes = b"[\n" + b",\n".join(
+            json.dumps(entity, separators=(",", ":")).encode("utf-8")
+            for entity in entities
+        ) + b"\n]\n"
+        self.dump = self.artifacts / "bulk" / "tiny.json.bz2"
+        self.dump.parent.mkdir()
+        self.dump.write_bytes(bz2.compress(dump_bytes))
+
+        self.source_control = self.controls / "source.json"
+        self.source_control.write_text(
+            json.dumps(
+                {
+                    "contract": "acquired_artifact_v1",
+                    "format_version": 1,
+                    "artifact_id": "wikidata-tiny-snapshot",
+                    "request_id": "wikidata-tiny-request",
+                    "door_id": "wikidata",
+                    "operation": "bulk_snapshot",
+                    "source_locator": "https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.bz2",
+                    "transport": {
+                        "status": "delivered",
+                        "attempts": 1,
+                        "delivery_mode": "fetched",
+                    },
+                    "artifact": {
+                        "storage_ref": "bulk/tiny.json.bz2",
+                        "sha256": digest(self.dump),
+                        "byte_length": self.dump.stat().st_size,
+                    },
+                    "response_metadata": {
+                        "status_code": 200,
+                        "effective_url": "https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.bz2",
+                        "headers": [
+                            {
+                                "name": "Content-Type",
+                                "value": "application/octet-stream",
+                            }
+                        ],
+                        "redirect_chain": [],
+                        "started_at": "2026-07-20T03:00:00Z",
+                        "completed_at": "2026-07-20T03:01:00Z",
+                    },
+                    "acquired_at": "2026-07-20T03:01:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        export_bytes = "\n".join(
+            json.dumps(value, separators=(",", ":"))
+            for value in (
+                {"table": "works", "row": {"entity_id": "product-work-1"}},
+                {"table": "agents", "row": {"entity_id": "product-agent-1"}},
+                {"table": "agents", "row": {"entity_id": "product-agent-2"}},
+                {
+                    "table": "external_ids",
+                    "row": {
+                        "entity_id": "product-work-1",
+                        "scheme": "wikidata",
+                        "value": "Q1",
+                    },
+                },
+                {
+                    "table": "external_ids",
+                    "row": {
+                        "entity_id": "product-agent-1",
+                        "scheme": "wikidata",
+                        "value": "Q10",
+                    },
+                },
+                {
+                    "table": "external_ids",
+                    "row": {
+                        "entity_id": "product-agent-2",
+                        "scheme": "wikidata",
+                        "value": "Q11",
+                    },
+                },
+            )
+        ) + "\n"
+        self.product_export = self.graphs / "product" / "exports" / "tiny.jsonl"
+        self.product_export.parent.mkdir(parents=True)
+        self.product_export.write_text(export_bytes, encoding="utf-8")
+        self.product_database = self.graphs / "product" / "tiny.sqlite3"
+        self.product_database.write_bytes(b"test product database evidence")
+        self.validation_report = (
+            self.graphs / "product" / "reports" / "tiny.json"
+        )
+        self.validation_report.parent.mkdir(parents=True)
+        self.validation_report.write_text(
+            '{"passed":true}\n', encoding="utf-8"
+        )
+        self.product_control = self.controls / "product.json"
+        self.product_control.write_text(
+            json.dumps(
+                {
+                    "contract": "product_graph_snapshot_v1",
+                    "format_version": 1,
+                    "snapshot_id": "product-tiny-snapshot",
+                    "run_id": "product-tiny-run",
+                    "graph_version": "test-1",
+                    "content_sha256": digest(self.product_database),
+                    "database": {
+                        "storage_ref": "product/tiny.sqlite3",
+                        "sha256": digest(self.product_database),
+                        "byte_length": self.product_database.stat().st_size,
+                    },
+                    "exports": [
+                        {
+                            "kind": "product-jsonl",
+                            "artifact": {
+                                "storage_ref": "product/exports/tiny.jsonl",
+                                "sha256": digest(self.product_export),
+                                "byte_length": self.product_export.stat().st_size,
+                            },
+                        }
+                    ],
+                    "cocoon_ids": ["env_test"],
+                    "activated_at": "2026-07-20T02:59:00Z",
+                    "structural_validation": {
+                        "passed": True,
+                        "report": {
+                            "storage_ref": "product/reports/tiny.json",
+                            "sha256": digest(self.validation_report),
+                            "byte_length": self.validation_report.stat().st_size,
+                        },
+                    },
+                    "extensions": {"org.ninjaro.penelope": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.wikidata_config = self.root / "worker-config.json"
+        self.wikidata_config.write_text(
+            json.dumps(
+                {
+                    "format_version": 1,
+                    "languages": ["en"],
+                    "work_root_qids": ["Q1000"],
+                    "agent_properties": ["P170"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.candidate_policy = self.root / "candidate-policy.json"
+        self.candidate_policy.write_text(
+            json.dumps(
+                {
+                    "format_version": 1,
+                    "paths": {
+                        "artifact_store": str(self.artifacts),
+                        "graph_store": str(self.graphs),
+                    },
+                    "candidate_rebuild": {
+                        "sources": {
+                            "wikidata": {
+                                "candidate_pool_size": 4,
+                                "gray_bonus_basis_points": 2000,
+                            }
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.results = self.root / "results"
+        self.output = self.results / "wikidata-external-graph.json"
+        self.image_hints_output = self.results / "wikidata-image-hints.json"
+        self.report = self.results / "wikidata-hpc-report.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def run_worker(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(WORKER),
+                "--config",
+                str(self.candidate_policy),
+                "--source-control",
+                str(self.source_control),
+                "--product-snapshot-control",
+                str(self.product_control),
+                "--output-directory",
+                str(self.results),
+                "--work-directory",
+                str(self.work),
+                "--wikidata-config",
+                str(self.wikidata_config),
+                *extra,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def test_streams_dump_and_binds_source_and_product_coverage(self) -> None:
+        result = self.run_worker()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        graph = json.loads(self.output.read_text(encoding="utf-8"))
+        self.assertEqual(graph["artifact_type"], "external_candidate_source_graph_v1")
+        self.assertEqual(graph["source_snapshot"]["sha256"], digest(self.dump))
+        works = {item["id"]: item for item in graph["works"]}
+        self.assertTrue(works["Q1"]["covered"])
+        self.assertFalse(works["Q2"]["covered"])
+        self.assertFalse(works["Q4"]["covered"])
+        self.assertNotIn("Q3", works)
+        self.assertEqual(
+            {item["id"] for item in graph["agents"]}, {"Q10", "Q11"}
+        )
+        creator = next(item for item in graph["agents"] if item["id"] == "Q10")
+        self.assertEqual(creator["label"], "Example creator")
+        self.assertEqual(creator["profile"]["countries"], ["Q183"])
+        self.assertEqual(creator["profile"]["activity_year"], 1925)
+        self.assertEqual(len(graph["edges"]), 4)
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "verified")
+        self.assertEqual(report["algorithm"]["status"], "succeeded")
+        self.assertEqual(report["algorithm"]["covered_product_qids"], 1)
+        self.assertEqual(
+            report["algorithm"]["statistics"]["ranked_pool_agents"], 2
+        )
+        self.assertEqual(
+            report["algorithm"]["statistics"]["product_image_targets"], 3
+        )
+        self.assertEqual(
+            report["algorithm"]["statistics"]["wikidata_image_claims"], 20
+        )
+        self.assertEqual(report["image_hints_output"]["entity_count"], 2)
+        self.assertEqual(report["image_hints_output"]["image_count"], 5)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_emits_bounded_ranked_work_and_agent_commons_hints(self) -> None:
+        result = self.run_worker()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        document = json.loads(self.image_hints_output.read_text(encoding="utf-8"))
+        self.assertEqual(document["artifact_type"], "wikidata_image_hints_v1")
+        self.assertEqual(document["format_version"], 1)
+        self.assertEqual(document["source_snapshot"]["sha256"], digest(self.dump))
+        self.assertEqual(
+            document["product_snapshot"],
+            {
+                "snapshot_id": "product-tiny-snapshot",
+                "content_sha256": digest(self.product_database),
+                "export_sha256": digest(self.product_export),
+            },
+        )
+        entities = {
+            (entity["family"], entity["entity_id"]): entity["images"]
+            for entity in document["entities"]
+        }
+        self.assertEqual(
+            entities[("work", "product-work-1")],
+            [
+                {
+                    "file": "Preferred poster.jpg",
+                    "kind": "work_poster",
+                    "property": "P3383",
+                    "rank": "preferred",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q1",
+                },
+                {
+                    "file": "Normal poster.jpg",
+                    "kind": "work_poster",
+                    "property": "P3383",
+                    "rank": "normal",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q1",
+                },
+                {
+                    "file": "Representative work.jpg",
+                    "kind": "work_image",
+                    "property": "P18",
+                    "rank": "normal",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q1",
+                },
+            ],
+        )
+        self.assertEqual(
+            entities[("agent", "product-agent-1")],
+            [
+                {
+                    "file": "Example logo.svg",
+                    "kind": "agent_logo",
+                    "property": "P154",
+                    "rank": "preferred",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q10",
+                },
+                {
+                    "file": "Example portrait.jpg",
+                    "kind": "agent_portrait",
+                    "property": "P18",
+                    "rank": "normal",
+                    "source": "wikimedia_commons",
+                    "wikidata_qid": "Q10",
+                },
+            ],
+        )
+        self.assertNotIn(("agent", "product-agent-2"), entities)
+
+        first_bytes = self.image_hints_output.read_bytes()
+        self.image_hints_output.unlink()
+        self.output.unlink()
+        self.report.unlink()
+        second = self.run_worker()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.image_hints_output.read_bytes(), first_bytes)
+
+    def test_image_targets_do_not_broaden_covered_qids(self) -> None:
+        result = self.run_worker("--keep-work-db")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        databases = list(self.work.glob("*.sqlite3"))
+        self.assertEqual(len(databases), 1)
+        with sqlite3.connect(databases[0]) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT id FROM covered_qids ORDER BY id"
+                ).fetchall(),
+                [("Q1",)],
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT entity_id,family,qid FROM product_image_targets "
+                    "ORDER BY entity_id,family,qid"
+                ).fetchall(),
+                [
+                    ("product-agent-1", "agent", "Q10"),
+                    ("product-agent-2", "agent", "Q11"),
+                    ("product-work-1", "work", "Q1"),
+                ],
+            )
+
+    def test_report_write_failure_retains_work_database_for_recovery(self) -> None:
+        self.report.mkdir(parents=True)
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.output.is_file())
+        self.assertTrue(self.image_hints_output.is_file())
+        databases = list(self.work.glob("*.sqlite3"))
+        self.assertEqual(len(databases), 1)
+        with sqlite3.connect(databases[0]) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT id FROM covered_qids ORDER BY id"
+                ).fetchall(),
+                [("Q1",)],
+            )
+
+    def test_algorithm_failure_retains_work_database_for_recovery(self) -> None:
+        self.dump.write_bytes(bz2.compress(b"not a Wikidata JSON array\n"))
+        control = json.loads(self.source_control.read_text(encoding="utf-8"))
+        control["artifact"]["sha256"] = digest(self.dump)
+        control["artifact"]["byte_length"] = self.dump.stat().st_size
+        self.source_control.write_text(json.dumps(control), encoding="utf-8")
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.report.is_file())
+        self.assertEqual(
+            json.loads(self.report.read_text(encoding="utf-8"))["status"],
+            "failed",
+        )
+        databases = list(self.work.glob("*.sqlite3"))
+        self.assertEqual(len(databases), 1)
+        with sqlite3.connect(databases[0]) as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA integrity_check").fetchone()[0],
+                "ok",
+            )
+
+    def test_tampered_source_fails_before_algorithm_or_output(self) -> None:
+        control = json.loads(self.source_control.read_text(encoding="utf-8"))
+        control["artifact"]["sha256"] = "0" * 64
+        self.source_control.write_text(json.dumps(control), encoding="utf-8")
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.image_hints_output.exists())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "failed")
+        self.assertEqual(report["algorithm"]["status"], "not_started")
+
+    def test_tampered_product_snapshot_fails_without_derived_outputs(self) -> None:
+        control = json.loads(self.product_control.read_text(encoding="utf-8"))
+        control["content_sha256"] = "0" * 64
+        self.product_control.write_text(json.dumps(control), encoding="utf-8")
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.image_hints_output.exists())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "verified")
+        self.assertEqual(report["algorithm"]["status"], "failed")
+
+    def test_incomplete_or_stale_source_receipt_fails_closed(self) -> None:
+        control = json.loads(self.source_control.read_text(encoding="utf-8"))
+        control["transport"]["delivery_mode"] = "cache_validated"
+        control["semantic_confidence"] = 1.0
+        self.source_control.write_text(json.dumps(control), encoding="utf-8")
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "failed")
+        self.assertEqual(report["algorithm"]["status"], "not_started")
+
+    def test_unknown_worker_configuration_version_fails_closed(self) -> None:
+        configuration = json.loads(
+            self.wikidata_config.read_text(encoding="utf-8")
+        )
+        configuration["format_version"] = 2
+        self.wikidata_config.write_text(
+            json.dumps(configuration), encoding="utf-8"
+        )
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "verified")
+        self.assertEqual(report["algorithm"]["status"], "failed")
+
+    def test_unbounded_decompress_threads_fail_before_transport(self) -> None:
+        result = self.run_worker("--decompress-threads", "0")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "failed")
+        self.assertEqual(report["algorithm"]["status"], "not_started")
+
+    def test_unbounded_candidate_policy_fails_closed(self) -> None:
+        configuration = json.loads(
+            self.candidate_policy.read_text(encoding="utf-8")
+        )
+        configuration["candidate_rebuild"]["sources"]["wikidata"][
+            "candidate_pool_size"
+        ] = 100_001
+        self.candidate_policy.write_text(
+            json.dumps(configuration), encoding="utf-8"
+        )
+
+        result = self.run_worker()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(report["transport"]["status"], "verified")
+        self.assertEqual(report["algorithm"]["status"], "failed")
+
+    def test_compression_is_detected_from_verified_bytes_not_filename(self) -> None:
+        renamed = self.dump.with_suffix(".payload")
+        self.dump.rename(renamed)
+        control = json.loads(self.source_control.read_text(encoding="utf-8"))
+        control["artifact"]["storage_ref"] = "bulk/tiny.json.payload"
+        self.source_control.write_text(json.dumps(control), encoding="utf-8")
+
+        result = self.run_worker()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.output.is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()

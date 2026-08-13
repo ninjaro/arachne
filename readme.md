@@ -1,83 +1,142 @@
-![yelling Logo](assets/og-arachne.svg)
+![Arachne logo](assets/og-arachne.svg)
 
-[![codecov](https://codecov.io/gh/ninjaro/arachne/graph/badge.svg?token=TRWFFRPDMO)](https://codecov.io/gh/ninjaro/arachne)
-[![Codacy Badge](https://app.codacy.com/project/badge/Grade/bfbea7685e154a2ab670d75ffe4f3509)](https://app.codacy.com/gh/ninjaro/arachne/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![license](https://img.shields.io/github/license/ninjaro/arachne?color=e6e6e6)](https://github.com/ninjaro/arachne/blob/master/license)  
 [![Checks](https://github.com/ninjaro/arachne/actions/workflows/tests.yml/badge.svg)](https://github.com/ninjaro/arachne/actions/workflows/tests.yml)
-[![Deploy](https://github.com/ninjaro/arachne/actions/workflows/html.yml/badge.svg)](https://github.com/ninjaro/arachne/actions/workflows/html.yml)
-[![version](https://img.shields.io/github/v/release/ninjaro/arachne?include_prereleases)](https://github.com/ninjaro/arachne/releases/latest)
+[![License](https://img.shields.io/github/license/ninjaro/arachne)](license)
 
-## OFFICIAL PROCLAMATION, HEARD FROM HERE TO OLYMPUS
+# Arachne
 
-ATHENA IS A PRETENDER. She knots even basic Wikidata entities and calls it craft.  
-Say NO to false idols and borrowed crowns. We won't bend over backwards at looms  
-for the one whose crowning glory is a win over Zeus's moistest brother.
+Arachne is a repository-driven pipeline for Art Lineages research. It applies
+strict human-authored product batches transactionally, coordinates candidate
+graph builds, and generates a static viewer without a continuously running
+server.
 
-NO GOLDEN APPLE FOR ATHENA - ONLY CARRION FOR SUCH A HYENA!
+The central trust rule is simple: miners remain responsible for factual and
+semantic correctness. Arachne checks mechanical properties and provenance; it
+does not certify truth or silently rewrite research.
 
-### Signatories:
+## Actors and graph domains
 
-* **Arachne** - the perpetual stitcher of Wikidata entities; the most creative,
-  best queenpin in the whole world (including Hades), with a wicked spider-sense for the project.
-  *She wrote that herself.* Also a little bit kinky - she writes fanfics about Zeus's sexual escapades.
-* **Penelope** - insists this is only a temporary job until her husband returns from the voyage
-  (though everyone's sure he's long dead); a hobby to soothe her anxiety and longing for her beloved.
-  She is a conscientious worker and stitches the entities with elegance, but some knots *magically* come undone
-  overnight and the entities slip away. She doesn't argue; she just gets to work again.
-* **"*Kitty*" Ariadne** - the flightiest of the weavers, more mascot than manager. She handles the thread like a
-  conjurer, but the moment you look away the little ball sails into the back of your head, yarn veining every doorway
-  down the corridor, the whole office buried in with thick red string - and under the scarlet snowdrifts she looks up
-  with the biggest, wettest eyes and purrs an apology: totally an accident.
-* **Pheidippides** - our gofer, errand runner. Mr. Nice Guy: point him to Hades and he's already sprinting.
-  Prone to drop dead at the finish line...
+- **Arachne** is the only external API and owns intake, cocoons, status,
+  scheduling, and orchestration.
+- **Pheidippides** transports bytes and records transport evidence. Delivery does
+  not imply correctness, completeness, or trust.
+- **Ariadne** owns candidate algorithms, query planning, projections, layouts, and
+  the static viewer.
+- **Penelope** owns graph schemas, transactions, materialization, snapshots, and
+  low-level exports.
 
-## Setup and Installation
+The durable product graph contains only accepted human-mined research. The
+research-candidate graph is replaceable, untrusted soft guidance derived from
+external data. Neither Pheidippides nor Ariadne writes a graph database directly.
 
-### Requirements
+## Repository map
 
-* **C++23** compiler - required standard for building the project
-* **cxxopts** - command-line argument parsing used by the CLI tools
-* **GTest** - Google Test framework used for unit testing
-* **lcov** - generates coverage summaries from the unit test run
-* **doxygen** and **graphviz** - build the API reference documentation and diagrams
-* **CURL** - HTTP client library for communicating with external services
-* **nlohmann_json** - JSON serialization/deserialization for data exchange
-* **sqlite3** - embedded database engine for persisting local data
+| Path | Purpose |
+|---|---|
+| `contracts/` | Versioned JSON Schemas, examples, artifact formats and validator |
+| `src/arachne/` | Intake, cocoon and coordinator implementation |
+| `src/pheidippides/` | Domain-blind transport |
+| `src/ariadne/` | Candidate planning, projections and viewer build logic |
+| `src/penelope/` | SQLite graph stores, staging, activation and exports |
+| `viewer/` | Static Ariadne viewer assets |
+| `hpc/wikidata/` | Bulk-first streaming Wikidata source-graph worker |
+| `scripts/` | Local/CI adapters, one-way schema conversion, and repository checks |
+| `.github/workflows/` | Validation, intake, graph operations and verified immutable publication |
 
-### Building the Application
+## Build and test
 
-1. Build with CMake in Release mode:
-    ```bash
-    $ cmake -DBUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release -B build -S .
-    $ cmake --build build
-    ```
-2. Run the Application:
-    ```bash
-    $ arachne [options]
-    ```
+Requirements are CMake 3.28+, a C++23 compiler, libcurl, SQLite, utf8proc,
+nlohmann-json, GoogleTest for test builds, and `yamllint` for workflow checks.
+On Debian/Ubuntu, install `libcurl4-openssl-dev`, `libsqlite3-dev`,
+`libutf8proc-dev`, `nlohmann-json3-dev`, `libgtest-dev`, and `yamllint`.
 
-## Documentation and Contributing
+Run the same checks used by the validation workflow:
 
-To build and run tests, enable debug mode, or generate coverage reports:
+```sh
+scripts/run_checks.sh
+```
 
-1. **Build with Debug and Coverage:**
-   ```bash
-   $ cmake -B build CMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DCOVERAGE=ON
-   ```
-2. **Generate Coverage Report and HTML:**
-   ```bash
-   $ cmake --build build --target coverage
-   ```
+Or build only the application:
 
-For detailed documentation, see the [Documentation](https://ninjaro.github.io/arachne/) and for the latest
-coverage report, see [Coverage](https://ninjaro.github.io/arachne/cov/).
+```sh
+ARACHNE_BUILD_TYPE=Release ARACHNE_BUILD_TESTS=OFF scripts/build.sh
+```
 
-## Security Policy
+The build produces `build/arachne`. Network tests and the deprecated 1.x client
+are disabled by the local scripts unless explicitly requested.
 
-Please report any security issues using GitHub's private vulnerability reporting
-or by emailing [yaroslav.riabtsev@rwth-aachen.de](mailto:yaroslav.riabtsev@rwth-aachen.de).
-See the [security policy](.github/SECURITY.md) for full details.
+## Operations
 
-## License
+Copy the conservative example configuration, create the temporary working paths,
+and run read-only preflight checks:
 
-This project is open-source and available under the MIT License.
+```sh
+cp config/arachne.example.json config/arachne.local.json
+mkdir -p .arachne/queue .arachne/remainders
+python3 scripts/arachne_ops.py preflight
+python3 scripts/arachne_ops.py capabilities
+```
+
+The local adapter negotiates the advertised capabilities it uses for actor
+operations. Product-database work deliberately bypasses configurable adapters
+and exposes four explicit tasks:
+
+```sh
+build/arachne product check-inbox
+build/arachne product apply-inbox
+build/arachne product rebuild-merge-hints
+build/arachne product export-merge-hints
+```
+
+`check-inbox` is a read-only preflight. `apply-inbox` transactionally applies
+eligible batches but never updates merge hints. When local hint research is
+needed, an operator explicitly rebuilds the disposable Ariadne hint store and
+then exports its bounded review artifact. Export does not rebuild implicitly:
+it rejects stale product, generator, or durable-decision identity, atomically
+replaces `.arachne/merge-hints-review.json`, and retains the queryable structural
+hint store for local research. The review is identity-only, local, and ignored
+by Git; `database/merge-hint-decisions.json` remains tracked human state. Tasks
+can be supplied in one command and execute strictly in the order written.
+
+Remote writes are disabled by default. A production deployment needs protected
+branches, Git LFS for the canonical SQLite database, and a least-privilege token.
+Successful product batches are removed only after commit; rejected files move to
+`inbox/rejected/` and their concrete problems are stored in the database.
+
+The included Issue Form accepts one plain UTF-8 `arachne_batch_v2` JSON file for
+review. ZIP packages, sidecars, legacy variants, and arbitrary batch metadata are
+not product input.
+
+Periodic external processing is bulk-first. The source-refresh workflow honors the
+reviewed per-source cadence, downloads the official Wikidata dump through the
+declarative Pheidippides door registry, builds the compact external graph with a
+streaming HPC worker, fully recomputes candidate state, and removes disposable raw
+and scratch data after success. Point APIs remain bounded enrichment paths.
+
+Product changes use strict `arachne_batch_v2` JSON files in the repository
+`inbox/`. See [Product inbox](docs/PRODUCT_INBOX.md) for the fixed validation and
+application commands, explicit update and merge operations, rejected-batch
+issues, and merge hints.
+
+See [Operations](docs/OPERATIONS.md) for current CLI mappings, state
+configuration, and recovery.
+
+## Contracts and architecture
+
+- [Architecture and actor boundaries](docs/ARCHITECTURE.md)
+- [Operations and recovery](docs/OPERATIONS.md)
+- [Contract compatibility notes](contracts/VERSIONS.md)
+- [Example configuration](config/README.md)
+
+The version-2 repository surface is designed to fail closed when persistent state,
+credentials, capability negotiation, or reviewed publication approval is missing.
+Static scaffolding alone is not a production deployment; configure and protect the
+external state domain before enabling remote writes.
+
+## Security and license
+
+Treat inbox batches, external responses, and filenames as untrusted data. Report
+vulnerabilities through GitHub private vulnerability reporting or the contact in
+[.github/SECURITY.md](.github/SECURITY.md).
+
+Arachne is available under the [MIT License](license).

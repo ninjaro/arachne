@@ -1,0 +1,150 @@
+name: Arachne batch intake
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: product-batch-intake-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  validate-request:
+    if: contains(github.event.issue.labels.*.name, 'arachne-batch')
+    runs-on: ubuntu-latest
+    outputs:
+      valid: ${{ steps.parse.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse batch attachment request
+        id: parse
+        continue-on-error: true
+        run: |
+          python3 scripts/issue_intake_request.py \
+            --event "${GITHUB_EVENT_PATH}" \
+            --output "${RUNNER_TEMP}/intake-request.json"
+      - name: Preserve validated request for diagnosis
+        if: steps.parse.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: intake-request-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}/intake-request.json
+          retention-days: 7
+      - name: Report malformed submission
+        if: steps.parse.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh issue comment "${ISSUE_NUMBER}" --body "fail"
+      - name: Report disabled operations
+        if: >-
+          steps.parse.outcome == 'success' &&
+          vars.ARACHNE_OPERATIONS_ENABLED != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh issue comment "${ISSUE_NUMBER}" --body "fail"
+
+  propose-batch:
+    needs: validate-request
+    if: >-
+      needs.validate-request.outputs.valid == 'true' &&
+      vars.ARACHNE_OPERATIONS_ENABLED == 'true'
+    runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Require protected transport settings
+        env:
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+        run: |
+          test -n "${STATE_REPOSITORY}"
+          test -n "${STATE_BASE_BRANCH}"
+          test -n "${STATE_TOKEN}"
+      - name: Checkout protected transport state
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          path: .arachne/ci-state
+          lfs: true
+      - name: Install application dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
+      - name: Build Arachne
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/build.sh
+      - name: Materialize runner-local transport configuration
+        run: |
+          python3 scripts/materialize_ci_config.py \
+            --template "${GITHUB_WORKSPACE}/.arachne/ci-state/config/arachne.json" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --runner-temp "${RUNNER_TEMP}" \
+            --output "${RUNNER_TEMP}/arachne-config.json"
+          python3 scripts/issue_intake_request.py \
+            --event "${GITHUB_EVENT_PATH}" \
+            --output "${RUNNER_TEMP}/intake-request.json"
+      - name: Acquire and materialize submitted batches
+        run: |
+          python3 scripts/process_issue_batches.py \
+            --request "${RUNNER_TEMP}/intake-request.json" \
+            --config "${RUNNER_TEMP}/arachne-config.json" \
+            --binary "${GITHUB_WORKSPACE}/build/arachne" \
+            --work-dir "${RUNNER_TEMP}/issue-batches" \
+            --output "${RUNNER_TEMP}/batch-intake-result.json"
+      - name: Preserve batch intake result for diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-intake-${{ github.event.issue.number }}
+          path: |
+            ${{ runner.temp }}/batch-intake-result.json
+            ${{ runner.temp }}/issue-batches
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Validate the strict product batches
+        run: build/arachne product check-inbox
+      - name: Propose the validated inbox files for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 scripts/propose_state_change.py \
+            --state-root "${GITHUB_WORKSPACE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --branch "arachne/batch-${ISSUE_NUMBER}-${GITHUB_RUN_ID}" \
+            --title "Add Arachne batches from issue #${ISSUE_NUMBER}" \
+            --body "Adds one or more validated arachne_batch_v2 files from issue #${ISSUE_NUMBER}. Product integration applies them in a separate reviewable database change."
+      - name: Return successful intake result
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh issue comment "${ISSUE_NUMBER}" --body "ok"
+      - name: Return failed intake result
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh issue comment "${ISSUE_NUMBER}" --body "fail"

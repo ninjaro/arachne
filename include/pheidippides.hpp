@@ -88,10 +88,53 @@ public:
     );
 
     /**
+     * @brief Execute a SPARQL query according to the provided request.
+     *
+     * Builds the HTTP call preview from @p request, issues the HTTP call via
+     * the internal http_client and parses the returned payload as JSON.
+     *
+     * Errors:
+     *  - Transport or HTTP failures propagate from the internal http_client
+     *    (may throw std::runtime_error on terminal failure).
+     *  - Malformed JSON in the response propagates nlohmann::json::parse_error.
+     *
+     * @param request Structured SPARQL request (query text, method hint,
+     *                accept/content-type overrides, timeout, etc.).
+     * @return Parsed JSON object containing the service response.
+     */
+    nlohmann::json sparql(const corespace::sparql_request& request);
+
+    /**
+     * @brief Convenience wrapper to run a raw SPARQL query string.
+     *
+     * Constructs a default sparql_request with the provided @p query and
+     * forwards to sparql().
+     *
+     * @param query SPARQL query string to execute.
+     * @return Parsed JSON object containing the service response.
+     */
+    nlohmann::json wdqs(std::string query);
+
+    /**
      * @brief Access aggregated network metrics of the underlying client.
      * @return Const reference to metrics snapshot.
      */
     [[nodiscard]] const corespace::network_metrics& metrics_info() const;
+
+    /**
+     * @brief Produce a call preview describing the HTTP request that would be
+     * made.
+     *
+     * The returned call_preview contains all information necessary to perform
+     * the request without actually executing it: resolved URL, HTTP method,
+     * query/form parameters, content type/body, Accept header, timeout, and
+     * whether the body should be sent as form data.
+     *
+     * @param request SPARQL request used to compute the preview.
+     * @return A filled corespace::call_preview describing the planned call.
+     */
+    [[nodiscard]] corespace::call_preview
+    preview(const corespace::sparql_request& request) const;
     /**
      * @brief Join a span of strings with a separator (no encoding or
      *        validation).
@@ -109,10 +152,14 @@ public:
     );
 
 private:
+    corespace::call_preview
+    build_call_preview(const corespace::sparql_request& request) const;
+
     corespace::options
         opt {}; ///< Request shaping parameters (chunking, fields, base params).
     corespace::http_client
         client {}; ///< Reused HTTP client (not thread-safe across threads).
+    corespace::wdqs_options wdqs_opt {};
 };
 }
 #endif // ARACHNE_PHEIDIPPIDES_HPP

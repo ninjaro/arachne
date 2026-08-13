@@ -1,0 +1,163 @@
+name: Publish Arachne viewer
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_snapshot_control:
+        description: Product snapshot control path inside the state repository
+        required: true
+        type: string
+      candidate_snapshot_control:
+        description: Optional candidate snapshot control path inside the state repository
+        required: false
+        type: string
+      image_hints_artifact:
+        description: Optional reviewed image-hints path override; defaults to derived/wikidata-image-hints.json when present
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      product_snapshot_control:
+        required: true
+        type: string
+      candidate_snapshot_control:
+        required: false
+        type: string
+      image_hints_artifact:
+        description: Optional reviewed image-hints path override; defaults to derived/wikidata-image-hints.json when present
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: arachne-viewer-pages
+  cancel-in-progress: false
+
+jobs:
+  build-site:
+    if: vars.ARACHNE_OPERATIONS_ENABLED == 'true'
+    environment: arachne-publication
+    runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require persistent-state settings
+        env:
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+        run: |
+          test -n "${STATE_REPOSITORY}"
+          test -n "${STATE_BASE_BRANCH}"
+          test -n "${STATE_TOKEN}"
+      - name: Checkout reviewed persistent state
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
+          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          path: .arachne-state
+          lfs: true
+          persist-credentials: false
+      - uses: actions/configure-pages@v5
+      - name: Install application dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
+      - name: Build Arachne operations binary
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/build.sh
+      - name: Materialize config and resolve reviewed snapshot controls
+        env:
+          PRODUCT_SNAPSHOT_INPUT: ${{ inputs.product_snapshot_control }}
+          CANDIDATE_SNAPSHOT_INPUT: ${{ inputs.candidate_snapshot_control }}
+        run: |
+          python3 scripts/materialize_ci_config.py \
+            --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --runner-temp "${RUNNER_TEMP}" \
+            --output "${RUNNER_TEMP}/arachne-config.json"
+          python3 -c 'import json,os; config=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json")); print("ARACHNE_SITE=" + config["paths"]["site_output"])' >> "${GITHUB_ENV}"
+          python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["PRODUCT_SNAPSHOT_INPUT"]).resolve(strict=True); value.relative_to(root); print("PRODUCT_SNAPSHOT_PATH=" + str(value))' >> "${GITHUB_ENV}"
+          if [[ -n "${CANDIDATE_SNAPSHOT_INPUT}" ]]; then
+            python3 -c 'import os,pathlib; root=pathlib.Path(os.environ["GITHUB_WORKSPACE"], ".arachne-state").resolve(strict=True); value=(root / os.environ["CANDIDATE_SNAPSHOT_INPUT"]).resolve(strict=True); value.relative_to(root); print("CANDIDATE_SNAPSHOT_PATH=" + str(value))' >> "${GITHUB_ENV}"
+          fi
+      - name: Stage optional snapshot-bound image hints
+        env:
+          IMAGE_HINTS_INPUT: ${{ inputs.image_hints_artifact }}
+        run: |
+          image_hints="${IMAGE_HINTS_INPUT}"
+          if [[ -z "${image_hints}" ]]; then
+            image_hints="derived/wikidata-image-hints.json"
+            if [[ ! -f "${GITHUB_WORKSPACE}/.arachne-state/${image_hints}" ]]; then
+              echo "No reviewed Wikidata image hints are available"
+              exit 0
+            fi
+          fi
+          python3 viewer/scripts/stage_image_hints.py \
+            "${image_hints}" \
+            viewer/public/data/wikidata-image-hints.json \
+            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
+            --product-snapshot-control "${PRODUCT_SNAPSHOT_PATH}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+      - name: Build React viewer assets
+        working-directory: viewer
+        run: |
+          npm ci
+          npm run build:assets
+      - name: Build versioned static viewer
+        id: viewer
+        continue-on-error: true
+        env:
+          CANDIDATE_SNAPSHOT_INPUT: ${{ inputs.candidate_snapshot_control }}
+        run: |
+          arguments=(
+            --config "${RUNNER_TEMP}/arachne-config.json"
+            --binary "${GITHUB_WORKSPACE}/build/arachne"
+            viewer-build
+            --product-snapshot "${PRODUCT_SNAPSHOT_PATH}"
+          )
+          if [[ -n "${CANDIDATE_SNAPSHOT_INPUT}" ]]; then
+            arguments+=(
+              --candidate-snapshot "${CANDIDATE_SNAPSHOT_PATH}"
+            )
+          fi
+          python3 scripts/arachne_ops.py "${arguments[@]}"
+      - name: Stop after viewer failure
+        if: steps.viewer.outcome != 'success'
+        run: exit 1
+      - name: Resolve and verify the active immutable bundle
+        id: bundle
+        run: |
+          python3 scripts/resolve_site_bundle.py \
+            --site-root "${ARACHNE_SITE}" \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Upload immutable Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.bundle.outputs.path }}
+
+  deploy:
+    needs: build-site
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy reviewed site bundle
+        id: deployment
+        uses: actions/deploy-pages@v4

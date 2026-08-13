@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/wikidata_image_hints_v1.schema.json",
+  "title": "Wikidata image hints v1",
+  "description": "Disposable Commons-filename hints derived from one verified Wikidata dump and product export.",
+  "type": "object",
+  "required": ["artifact_type", "format_version", "source_snapshot", "product_snapshot", "entities"],
+  "properties": {
+    "artifact_type": {"const": "wikidata_image_hints_v1"},
+    "format_version": {"const": 1},
+    "source_snapshot": {"$ref": "#/$defs/source_snapshot"},
+    "product_snapshot": {"$ref": "#/$defs/product_snapshot"},
+    "entities": {
+      "type": "array",
+      "maxItems": 2000000,
+      "items": {"$ref": "#/$defs/entity"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "source_snapshot": {
+      "type": "object",
+      "required": ["snapshot_id", "storage_ref", "sha256"],
+      "properties": {
+        "snapshot_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "storage_ref": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+        "sha256": {"$ref": "../schemas/common_v1.schema.json#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "product_snapshot": {
+      "type": "object",
+      "required": ["snapshot_id", "content_sha256", "export_sha256"],
+      "properties": {
+        "snapshot_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "content_sha256": {"$ref": "../schemas/common_v1.schema.json#/$defs/sha256"},
+        "export_sha256": {"$ref": "../schemas/common_v1.schema.json#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "entity": {
+      "type": "object",
+      "required": ["entity_id", "family", "images"],
+      "properties": {
+        "entity_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "family": {"enum": ["work", "agent"]},
+        "images": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/image"}
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"family": {"const": "work"}}},
+          "then": {
+            "properties": {
+              "images": {
+                "items": {
+                  "properties": {
+                    "kind": {"enum": ["work_poster", "work_image"]},
+                    "property": {"enum": ["P18", "P3383"]}
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"family": {"const": "agent"}}},
+          "then": {
+            "properties": {
+              "images": {
+                "items": {
+                  "properties": {
+                    "kind": {"enum": ["agent_portrait", "agent_logo"]},
+                    "property": {"enum": ["P18", "P154"]}
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "image": {
+      "type": "object",
+      "required": ["file", "kind", "property", "rank", "source", "wikidata_qid"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1, "maxLength": 512},
+        "kind": {"enum": ["work_poster", "work_image", "agent_portrait", "agent_logo"]},
+        "property": {"enum": ["P18", "P154", "P3383"]},
+        "rank": {"enum": ["preferred", "normal"]},
+        "source": {"const": "wikimedia_commons"},
+        "wikidata_qid": {"type": "string", "pattern": "^Q[1-9][0-9]{0,19}$"}
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"property": {"const": "P3383"}}},
+          "then": {"properties": {"kind": {"const": "work_poster"}}}
+        },
+        {
+          "if": {"properties": {"property": {"const": "P154"}}},
+          "then": {"properties": {"kind": {"const": "agent_logo"}}}
+        },
+        {
+          "if": {"properties": {"property": {"const": "P18"}}},
+          "then": {"properties": {"kind": {"enum": ["work_image", "agent_portrait"]}}}
+        }
+      ]
+    }
+  }
+}

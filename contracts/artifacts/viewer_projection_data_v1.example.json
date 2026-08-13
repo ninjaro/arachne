@@ -1,0 +1,68 @@
+{
+  "artifact_type": "viewer_projection_data_v1",
+  "format_version": 1,
+  "projection_id": "projection-20260718-01",
+  "projection_version": "ariadne-view-1.0.0",
+  "product_snapshot_id": "product-20260718-01",
+  "candidate_snapshot_id": "candidate-20260718-01",
+  "nodes": [
+    {
+      "node_id": "work-1",
+      "node_type": "work",
+      "label": "Example Film",
+      "graph_domain": "product",
+      "provenance": {
+        "origin": "human_authored",
+        "snapshot_id": "product-20260718-01",
+        "source_ids": [
+          "env-20260718-0001"
+        ]
+      },
+      "attributes": {
+        "medium": "film",
+        "year": 1954,
+        "evidence_ids": [
+          "evidence-1"
+        ]
+      }
+    },
+    {
+      "node_id": "candidate-Q123",
+      "node_type": "research_candidate",
+      "label": "Example Creator",
+      "graph_domain": "candidate",
+      "provenance": {
+        "origin": "derived_external",
+        "snapshot_id": "candidate-20260718-01",
+        "algorithm_version": "1.0.0",
+        "explanation": "Selected for uncovered-work coverage."
+      },
+      "attributes": {
+        "soft_guidance": true,
+        "ui_style": {
+          "class_name": "research-suggestion"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "derived-chronology-work-1-candidate-Q123",
+      "source": "work-1",
+      "target": "candidate-Q123",
+      "edge_type": "derived_chronological",
+      "provenance": {
+        "origin": "derived_projection",
+        "snapshot_id": "product-20260718-01",
+        "algorithm_version": "ariadne-view-1.0.0",
+        "explanation": "Build-time chronology projection; not a human assertion."
+      },
+      "attributes": {
+        "ui_style": {
+          "color": "red",
+          "line_style": "solid"
+        }
+      }
+    }
+  ]
+}

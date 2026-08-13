@@ -1,0 +1,54 @@
+name: Product inbox application
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: product-database-write
+  cancel-in-progress: false
+
+jobs:
+  apply-inbox:
+    if: vars.ARACHNE_OPERATIONS_ENABLED == 'true'
+    runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install application dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
+
+      - name: Build Arachne
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
+        run: scripts/build.sh
+
+      - name: Validate and apply strict inbox batches
+        run: build/arachne product check-inbox apply-inbox
+
+      - name: Propose the database change for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/propose_state_change.py \
+            --state-root "${GITHUB_WORKSPACE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --branch "arachne/inbox-${GITHUB_RUN_ID}" \
+            --title "Apply Arachne inbox batches" \
+            --body "Applied validated arachne_batch_v2 files from inbox/ in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."

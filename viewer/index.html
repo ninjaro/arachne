@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta id="arachne-document-links" content="generated-after-vite-build" />
+    <title>Arachne</title>
+    <style>
+      .api-fallback {
+        max-width: 76rem;
+        margin: 0 auto;
+        padding: 2rem 1rem;
+        font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .api-fallback pre {
+        padding: 1rem;
+        overflow: auto;
+        white-space: pre-wrap;
+        border: 1px solid currentColor;
+        border-radius: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="api-fallback" class="api-fallback">
+      <h1>Arachne static data</h1>
+      <p><a href="./data/catalog.json">Catalog JSON</a></p>
+      <p>JavaScript upgrades this document to the interactive viewer.</p>
+      <pre>{"kind":"arachne.viewer.development-entry"}</pre>
+    </main>
+    <div id="root" hidden></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

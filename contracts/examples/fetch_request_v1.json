@@ -1,0 +1,48 @@
+{
+  "contract": "fetch_request_v1",
+  "format_version": 1,
+  "request_id": "wikidata-page-001",
+  "door_id": "wikidata",
+  "endpoint_id": "entity-api",
+  "operation": "point_lookup",
+  "freshness_policy": "fresh_required",
+  "plan_id": "fetch-plan-20260718-01",
+  "locator": "https://www.wikidata.org/w/api.php",
+  "method": "POST",
+  "headers": {
+    "Accept": "application/json",
+    "Content-Type": "application/x-www-form-urlencoded"
+  },
+  "pagination": {
+    "mode": "none"
+  },
+  "retry": {
+    "maximum_attempts": 3,
+    "initial_delay_ms": 250,
+    "maximum_delay_ms": 10000,
+    "total_delay_budget_ms": 30000,
+    "respect_retry_after": true
+  },
+  "expected": {
+    "maximum_bytes": 16777216,
+    "timeout_ms": 60000,
+    "connect_timeout_ms": 10000,
+    "read_timeout_ms": 30000,
+    "write_timeout_ms": 30000
+  },
+  "redirect_policy": {
+    "follow": false,
+    "maximum_redirects": 0,
+    "allow_https_to_http": false,
+    "allowed_hosts": [
+      "www.wikidata.org"
+    ]
+  },
+  "output_ref": "acquired/fetch-plan-20260718-01/wikidata-page-001.json",
+  "body_artifact": {
+    "storage_ref": "fetch-bodies/fetch-plan-20260718-01/wikidata-page-001.form",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "byte_length": 114,
+    "media_type": "application/x-www-form-urlencoded"
+  }
+}

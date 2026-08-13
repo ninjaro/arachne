@@ -1,0 +1,28 @@
+{
+  "artifact_type": "external_candidate_source_graph_v1",
+  "format_version": 1,
+  "source_snapshot": {
+    "snapshot_id": "wikidata-20260718",
+    "storage_ref": "sources/wikidata-20260718.jsonl.zst",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "works": [
+    {"id": "Q100", "label": "Covered work", "covered": true},
+    {"id": "Q101", "label": "Uncovered work", "covered": false}
+  ],
+  "agents": [
+    {
+      "id": "Q200",
+      "label": "Research candidate",
+      "profile": {
+        "country": "Q183",
+        "occupation": ["Q2526255"],
+        "activity_year": 1968
+      }
+    }
+  ],
+  "edges": [
+    {"work_id": "Q100", "agent_id": "Q200"},
+    {"work_id": "Q101", "agent_id": "Q200"}
+  ]
+}
