@@ -1,5 +1,7 @@
 #include "ariadne/structural_hints.hpp"
 
+#include "structural_hint_calibration.hpp"
+
 #include "arachne/crypto.hpp"
 
 #include <algorithm>
@@ -38,8 +40,20 @@ namespace {
     struct entity_key final {
         std::string family;
         std::string id;
+        std::string canonical_entity_type;
+        std::string canonical_family_type;
 
-        auto operator<=>(const entity_key&) const = default;
+        [[nodiscard]] auto identity() const {
+            return std::tie(family, id);
+        }
+
+        bool operator==(const entity_key& other) const {
+            return identity() == other.identity();
+        }
+
+        auto operator<=>(const entity_key& other) const {
+            return identity() <=> other.identity();
+        }
     };
 
     struct concept_pair final {
@@ -71,12 +85,30 @@ namespace {
         std::map<std::string, std::size_t, std::less<>> evidence_stances;
     };
 
+    struct concept_relation_record final {
+        std::int64_t id {};
+        std::string subject_concept_id;
+        std::string object_concept_id;
+        std::string relation_type;
+        std::optional<int> strength;
+        std::optional<int> from_year;
+        std::optional<int> to_year;
+        std::optional<std::string> region_code;
+        std::optional<double> confidence;
+        std::set<std::string, std::less<>> evidence_ids;
+        std::set<std::string, std::less<>> source_ids;
+        std::map<std::string, std::size_t, std::less<>> evidence_stances;
+    };
+
     struct work_record final {
         std::string id;
         std::string medium;
         std::optional<int> year_start;
         std::optional<int> year_end;
         std::string date_precision;
+        std::optional<std::string> date_start_text;
+        std::optional<std::string> date_end_text;
+        std::optional<std::string> date_qualifier;
         std::set<std::string, std::less<>> concepts;
         std::map<std::string, double, std::less<>> concept_weights;
         std::set<std::string, std::less<>> agents;
@@ -102,6 +134,7 @@ namespace {
             assertions_by_work;
         std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
             neighbors_by_relation;
+        std::vector<concept_relation_record> explicit_relations;
         std::set<std::string, std::less<>> evidence_ids;
         std::set<std::string, std::less<>> source_ids;
         std::size_t evidence_count {};
@@ -111,6 +144,7 @@ namespace {
 
     struct agent_record final {
         std::string id;
+        std::string agent_type;
         std::set<std::string, std::less<>> works;
         std::vector<credit_record> credits;
     };
@@ -141,6 +175,9 @@ namespace {
             std::optional<int> year_start;
             std::optional<int> year_end;
             std::string precision;
+            std::optional<std::string> date_start_text;
+            std::optional<std::string> date_end_text;
+            std::optional<std::string> date_qualifier;
         };
 
         std::optional<int> year_start;
@@ -238,6 +275,15 @@ namespace {
                                      : std::nullopt;
     }
 
+    [[nodiscard]] std::optional<std::string>
+    optional_string(const json& value, const std::string_view field) {
+        const auto found = value.find(field);
+        if (found == value.end() || found->is_null() || !found->is_string()) {
+            return std::nullopt;
+        }
+        return found->get<std::string>();
+    }
+
     [[nodiscard]] std::string normalized_token(
         const json& value, const std::string_view field,
         const std::string_view fallback = "unspecified"
@@ -273,9 +319,30 @@ namespace {
             * (role == role_prior.end() ? 0.72 : role->second);
     }
 
-    void collect_evidence_stances(
-        assertion_record& result, const json& assertion
+    [[nodiscard]] bool assertion_has_supporting_evidence(
+        const assertion_record& assertion
     ) {
+        const auto supports = assertion.evidence_stances.find("supports");
+        if (supports != assertion.evidence_stances.end()) {
+            return supports->second > 0U;
+        }
+        /* Older analytical inputs did not carry stance. Preserve their
+         * evidence-backed status without treating an explicit contradiction
+         * or contextual note as supporting evidence. */
+        return !assertion.evidence_ids.empty()
+            && assertion.evidence_stances.empty();
+    }
+
+    [[nodiscard]] bool work_has_supporting_evidence(
+        const work_record& work
+    ) {
+        return std::ranges::any_of(
+            work.assertions, assertion_has_supporting_evidence
+        );
+    }
+
+    template <typename Record>
+    void collect_evidence_stances(Record& result, const json& assertion) {
         const auto add = [&](const std::string& evidence_id,
                              const std::string& stance) {
             if (!evidence_id.empty()) {
@@ -339,6 +406,8 @@ namespace {
     }
 
     void assign_quality(work_record& work) {
+        const bool has_supporting_evidence
+            = work_has_supporting_evidence(work);
         work.quality_score = 0;
         work.quality_score += work.year_start.has_value() ? 1 : 0;
         work.quality_score += work.label_count > 0U ? 1 : 0;
@@ -346,9 +415,15 @@ namespace {
         work.quality_score += work.credit_count > 0U ? 1 : 0;
         work.quality_score += work.concepts.size() >= 2U ? 1 : 0;
         work.quality_score += work.measurement_count > 0U ? 1 : 0;
-        work.quality_score += !work.evidence_ids.empty() ? 2 : 0;
-        work.quality_score += !work.source_ids.empty() ? 1 : 0;
-        if (!work.evidence_ids.empty() && !work.source_ids.empty()
+        work.quality_score += has_supporting_evidence ? 2 : 0;
+        const bool has_supporting_source = std::ranges::any_of(
+            work.assertions, [](const assertion_record& assertion) {
+                return assertion_has_supporting_evidence(assertion)
+                    && !assertion.source_ids.empty();
+            }
+        );
+        work.quality_score += has_supporting_source ? 1 : 0;
+        if (has_supporting_source
             && work.quality_score >= 6) {
             work.quality_tier = "evidence_rich";
         } else if (work.quality_score >= 4) {
@@ -373,6 +448,11 @@ namespace {
                 work.year_end = optional_integer(payload, "year_end");
                 work.date_precision
                     = payload.value("date_precision", "unknown");
+                work.date_start_text
+                    = optional_string(payload, "date_start_text");
+                work.date_end_text = optional_string(payload, "date_end_text");
+                work.date_qualifier
+                    = optional_string(payload, "date_qualifier");
                 work.label_count = array_or_empty(entity, "labels").size();
                 work.external_id_count
                     = array_or_empty(entity, "external_ids").size();
@@ -423,6 +503,48 @@ namespace {
                         concept_value
                             .neighbors_by_relation[direction + ":" + relation]
                             .emplace(peer);
+                        concept_relation_record relation_value {
+                            .id = neighbor.value("relation_id", 0LL),
+                            .subject_concept_id = direction == "incoming"
+                                ? peer
+                                : id,
+                            .object_concept_id = direction == "incoming"
+                                ? id
+                                : peer,
+                            .relation_type = relation,
+                            .strength = optional_integer(neighbor, "strength"),
+                            .from_year = optional_integer(neighbor, "from_year"),
+                            .to_year = optional_integer(neighbor, "to_year"),
+                            .region_code = optional_string(
+                                neighbor, "region_code"
+                            ),
+                            .confidence = optional_number(
+                                neighbor, "confidence"
+                            ),
+                            .evidence_ids = {},
+                            .source_ids = {},
+                            .evidence_stances = {},
+                        };
+                        for (const auto& evidence :
+                             array_or_empty(neighbor, "evidence_ids")) {
+                            if (evidence.is_string()) {
+                                relation_value.evidence_ids.emplace(
+                                    evidence.get<std::string>()
+                                );
+                            }
+                        }
+                        for (const auto& source :
+                             array_or_empty(neighbor, "source_ids")) {
+                            if (source.is_string()) {
+                                relation_value.source_ids.emplace(
+                                    source.get<std::string>()
+                                );
+                            }
+                        }
+                        collect_evidence_stances(relation_value, neighbor);
+                        concept_value.explicit_relations.push_back(
+                            std::move(relation_value)
+                        );
                     }
                 }
                 result.concepts.emplace(id, std::move(concept_value));
@@ -430,6 +552,9 @@ namespace {
                 agent_record agent;
                 agent.id = id;
                 const auto& payload = object_or_empty(entity, "agent");
+                agent.agent_type = entity.value(
+                    "entity_type", payload.value("agent_type", "unknown")
+                );
                 for (const auto& credit : array_or_empty(payload, "credits")) {
                     const std::string work = credit.value("work_id", "");
                     if (!work.empty()) {
@@ -580,6 +705,47 @@ namespace {
         return result;
     }
 
+    [[nodiscard]] entity_key canonical_entity_key(
+        const corpus_data& corpus, const std::string_view family,
+        const std::string& id
+    ) {
+        if (family == "work") {
+            const auto found = corpus.works.find(id);
+            return { "work", id, "work",
+                     found == corpus.works.end() ? "unknown"
+                                                 : found->second.medium };
+        }
+        if (family == "concept") {
+            const auto found = corpus.concepts.find(id);
+            return { "concept", id, "concept",
+                     found == corpus.concepts.end()
+                         ? "unknown"
+                         : found->second.concept_type };
+        }
+        const auto found = corpus.agents.find(id);
+        const std::string type = found == corpus.agents.end()
+            ? "unknown"
+            : found->second.agent_type;
+        return { "agent", id, type, type };
+    }
+
+    [[nodiscard]] json canonical_work_date(const work_record& work) {
+        return {
+            { "year_start",
+              work.year_start ? json(*work.year_start) : json(nullptr) },
+            { "year_end", work.year_end ? json(*work.year_end) : json(nullptr) },
+            { "date_precision", work.date_precision },
+            { "date_start_text",
+              work.date_start_text ? json(*work.date_start_text)
+                                   : json(nullptr) },
+            { "date_end_text",
+              work.date_end_text ? json(*work.date_end_text) : json(nullptr) },
+            { "date_qualifier",
+              work.date_qualifier ? json(*work.date_qualifier)
+                                  : json(nullptr) },
+        };
+    }
+
     [[nodiscard]] concept_pair
     ordered_pair(const std::string& left, const std::string& right) {
         return left < right ? concept_pair { left, right }
@@ -713,8 +879,21 @@ namespace {
                       { "credit_count", work.credit_count },
                       { "concept_count", work.concepts.size() },
                       { "measurement_count", work.measurement_count },
+                      { "has_supporting_evidence",
+                        work_has_supporting_evidence(work) },
+                      { "has_supporting_source",
+                        std::ranges::any_of(
+                            work.assertions,
+                            [](const assertion_record& assertion) {
+                                return assertion_has_supporting_evidence(
+                                           assertion
+                                       )
+                                    && !assertion.source_ids.empty();
+                            }
+                        ) },
                       { "evidence_count", work.evidence_ids.size() },
-                      { "source_count", work.source_ids.size() } } },
+                      { "source_count", work.source_ids.size() },
+                      { "evidence_stances", work.evidence_stances } } },
                   { "derived", true } }
             );
         }
@@ -819,6 +998,10 @@ namespace {
             { "right_id", right.id },
             { "left_family", left.family },
             { "right_family", right.family },
+            { "left_entity_type", left.canonical_entity_type },
+            { "right_entity_type", right.canonical_entity_type },
+            { "left_family_type", left.canonical_family_type },
+            { "right_family_type", right.canonical_family_type },
             { "algorithm", std::move(algorithm) },
             { "metric", std::move(metric) },
             { "value", value },
@@ -1064,13 +1247,64 @@ namespace {
         };
     }
 
+    [[nodiscard]] json explicit_relation_support(
+        const concept_pair& pair, const corpus_data& corpus
+    ) {
+        /* String IDs retain the planner's stable lexical set ordering. */
+        json rows = json::array();
+        std::set<std::int64_t> seen;
+        for (const auto& concept_id : { pair.left, pair.right }) {
+            const auto concept_entry = corpus.concepts.find(concept_id);
+            if (concept_entry == corpus.concepts.end()) {
+                continue;
+            }
+            for (const auto& relation :
+                 concept_entry->second.explicit_relations) {
+                if (relation.id <= 0 || !seen.emplace(relation.id).second
+                    || ordered_pair(
+                           relation.subject_concept_id,
+                           relation.object_concept_id
+                       ) != pair) {
+                    continue;
+                }
+                rows.push_back(
+                    { { "relation_id", relation.id },
+                      { "subject_concept_id", relation.subject_concept_id },
+                      { "object_concept_id", relation.object_concept_id },
+                      { "relation_type", relation.relation_type },
+                      { "strength", relation.strength
+                            ? json(*relation.strength)
+                            : json(nullptr) },
+                      { "from_year", relation.from_year
+                            ? json(*relation.from_year)
+                            : json(nullptr) },
+                      { "to_year", relation.to_year ? json(*relation.to_year)
+                                                      : json(nullptr) },
+                      { "region_code", relation.region_code
+                            ? json(*relation.region_code)
+                            : json(nullptr) },
+                      { "confidence", relation.confidence
+                            ? json(*relation.confidence)
+                            : json(nullptr) },
+                      { "evidence_ids", relation.evidence_ids },
+                      { "source_ids", relation.source_ids },
+                      { "evidence_stance_distribution",
+                        relation.evidence_stances } }
+                );
+            }
+        }
+        return rows;
+    }
+
     void append_concept_observations(
         json& observations, const concept_pair& pair,
         const pair_measurements& measured, const scope_data& scope,
         const corpus_data& corpus
     ) {
-        const entity_key left { "concept", pair.left };
-        const entity_key right { "concept", pair.right };
+        const entity_key left
+            = canonical_entity_key(corpus, "concept", pair.left);
+        const entity_key right
+            = canonical_entity_key(corpus, "concept", pair.right);
         const json identity = corpus_identity(scope);
         const json overlap_parameters {
             { "set_unit", "canonical_work" },
@@ -1110,7 +1344,9 @@ namespace {
                   { "quality_tier", work->second.quality_tier },
                   { "quality_score", work->second.quality_score },
                   { "evidence_count", work->second.evidence_ids.size() },
+                  { "evidence_ids", work->second.evidence_ids },
                   { "source_count", work->second.source_ids.size() },
+                  { "source_ids", work->second.source_ids },
                   { "weakly_mined", work->second.quality_tier == "sparse" } }
             );
         }
@@ -1120,16 +1356,38 @@ namespace {
             { "shared_work_count", measured.shared_works.size() },
             { "insufficient_support", measured.shared_works.size() < 2U },
         };
+        const json relation_support = explicit_relation_support(pair, corpus);
+        json relation_ids = json::array();
+        for (const auto& relation : relation_support) {
+            relation_ids.push_back(relation.at("relation_id"));
+        }
+        json common_support_details = support_details;
+        common_support_details["explicit_concept_relation_ids"] = relation_ids;
         json bridge_details = support_details;
+        bridge_details["explicit_concept_relation_ids"] = relation_ids;
         bridge_details["shared_work_ids"] = measured.shared_works;
         bridge_details["bridge_works"] = std::move(bridge_works);
+        if (scope.name == "all_works" && !relation_support.empty()) {
+            observations.push_back(observation(
+                left, right, "canonical-explicit-concept-relations",
+                "explicit_concept_relation_record_count",
+                static_cast<double>(relation_support.size()), "count",
+                relation_support.size(), scope.name, identity,
+                { { "canonical_fields_transformed", false },
+                  { "relation_values_used_as_similarity_weights", false } },
+                corpus.product_snapshot,
+                "Canonical explicit relation records and provenance retained "
+                "as inspectable support without deriving identity or ontology.",
+                { { "explicit_concept_relations", relation_support } }
+            ));
+        }
         observations.push_back(observation(
             left, right, "concept-work-sets", "direct_work_set_overlap",
             measured.direct_overlap, "unit_interval",
             measured.shared_works.size(), scope.name, identity,
             overlap_parameters, corpus.product_snapshot,
             "Jaccard overlap of the concepts' canonical work sets.",
-            support_details
+            common_support_details
         ));
         observations.push_back(observation(
             left, right, "concept-work-sets",
@@ -1140,7 +1398,7 @@ namespace {
             corpus.product_snapshot,
             "Generalized Jaccard overlap weighted by available assertion "
             "centrality; relation priors are used when centrality is absent.",
-            support_details
+            common_support_details
         ));
         observations.push_back(observation(
             left, right, "centrality-weight-sensitivity",
@@ -1158,7 +1416,8 @@ namespace {
               { "centrality_weighted_overlap", measured.weighted_overlap },
               { "absolute_difference",
                 std::abs(measured.weighted_overlap
-                         - measured.direct_overlap) } }
+                         - measured.direct_overlap) },
+              { "explicit_concept_relation_ids", relation_ids } }
         ));
         observations.push_back(observation(
             left, right, "concept-containment", "conditional_right_given_left",
@@ -1167,7 +1426,7 @@ namespace {
             { { "direction", "P(right|left)" } }, corpus.product_snapshot,
             "Fraction of the left concept's works also assigned to the right "
             "concept.",
-            support_details
+            common_support_details
         ));
         observations.push_back(observation(
             right, left, "concept-containment", "conditional_right_given_left",
@@ -1176,7 +1435,7 @@ namespace {
             { { "direction", "P(right|left)" } }, corpus.product_snapshot,
             "Fraction of the left concept's works also assigned to the right "
             "concept.",
-            support_details
+            common_support_details
         ));
         observations.push_back(observation(
             left, right, "concept-neighborhood-distributions",
@@ -1187,7 +1446,7 @@ namespace {
             corpus.product_snapshot,
             "Cosine similarity between distributions of concepts occurring in "
             "neighboring work contexts.",
-            support_details
+            common_support_details
         ));
         observations.push_back(observation(
             left, right, "concept-rarity-association", "normalized_pmi",
@@ -1200,7 +1459,7 @@ namespace {
             "Rarity-aware association discounts concepts that are common "
             "across "
             "the corpus.",
-            support_details
+            common_support_details
         ));
         observations.push_back(observation(
             left, right, "support-concentration", "maximum_work_share",
@@ -1209,7 +1468,7 @@ namespace {
             { { "contribution", "minimum_pair_assertion_weight" } },
             corpus.product_snapshot,
             "Largest single-work contribution to weighted pair support.",
-            scope.name == "all_works" ? bridge_details : support_details
+            scope.name == "all_works" ? bridge_details : common_support_details
         ));
         observations.push_back(observation(
             left, right, "concept-temporal-distributions", "temporal_overlap",
@@ -1298,7 +1557,10 @@ namespace {
                   .year_end = work.year_end,
                   .precision = work.date_precision.empty()
                       ? "unknown"
-                      : work.date_precision }
+                      : work.date_precision,
+                  .date_start_text = work.date_start_text,
+                  .date_end_text = work.date_end_text,
+                  .date_qualifier = work.date_qualifier }
             );
             bucket->work_ids.push_back(work_id);
             bucket->media[work.medium] += 1.0;
@@ -1459,14 +1721,18 @@ namespace {
         for (const auto& [id, agent] : corpus.agents) {
             if (agent.works.size() >= 2U) {
                 agents.push_back(
-                    make_sequence({ "agent", id }, agent.works, corpus)
+                    make_sequence(
+                        canonical_entity_key(corpus, "agent", id),
+                        agent.works, corpus
+                    )
                 );
             }
         }
         for (const auto& [id, concept_value] : corpus.concepts) {
             if (concept_value.works.size() >= 2U) {
                 concepts.push_back(make_sequence(
-                    { "concept", id }, concept_value.works, corpus
+                    canonical_entity_key(corpus, "concept", id),
+                    concept_value.works, corpus
                 ));
             }
         }
@@ -1521,7 +1787,16 @@ namespace {
                     value.year_start ? json(*value.year_start) : json(nullptr) },
                   { "year_end",
                     value.year_end ? json(*value.year_end) : json(nullptr) },
-                  { "date_precision", value.precision } }
+                  { "date_precision", value.precision },
+                  { "date_start_text",
+                    value.date_start_text ? json(*value.date_start_text)
+                                          : json(nullptr) },
+                  { "date_end_text",
+                    value.date_end_text ? json(*value.date_end_text)
+                                        : json(nullptr) },
+                  { "date_qualifier",
+                    value.date_qualifier ? json(*value.date_qualifier)
+                                         : json(nullptr) } }
             );
         }
         return {
@@ -1552,6 +1827,10 @@ namespace {
             json row {
                 { "entity_id", sequence.entity.id },
                   { "family", sequence.entity.family },
+                  { "canonical_entity_type",
+                    sequence.entity.canonical_entity_type },
+                  { "canonical_family_type",
+                    sequence.entity.canonical_family_type },
                   { "scope", "all_works" },
                   { "work_count", sequence.works.size() },
                   { "bucket_count", sequence.buckets.size() },
@@ -2023,6 +2302,10 @@ namespace {
               { "right_id", right.entity.id },
               { "left_family", left.entity.family },
               { "right_family", right.entity.family },
+              { "left_entity_type", left.entity.canonical_entity_type },
+              { "right_entity_type", right.entity.canonical_entity_type },
+              { "left_family_type", left.entity.canonical_family_type },
+              { "right_family_type", right.entity.canonical_family_type },
               { "signature", std::move(signature) },
               { "strength", std::clamp(strength, 0.0, 1.0) },
               { "explanation", std::move(explanation) },
@@ -2189,6 +2472,15 @@ namespace {
                       { { "primary", 1.0 }, { "key", 0.82 },
                         { "supporting", 0.55 },
                         { "unspecified", 0.70 } } },
+                    { "role_priors",
+                      { { "artist", 1.0 }, { "author", 1.0 },
+                        { "director", 1.0 }, { "composer", 1.0 },
+                        { "writer", 1.0 }, { "creator", 1.0 },
+                        { "designer", 0.92 }, { "performer", 0.86 },
+                        { "producer", 0.78 }, { "editor", 0.76 },
+                        { "cinematographer", 0.76 },
+                        { "unspecified", 0.72 },
+                        { "unlisted_role", 0.72 } } },
                     { "role_priors_are_temporary", true },
                     { "canonical_credit_importance_written", false },
                 };
@@ -2486,8 +2778,10 @@ namespace {
             const auto support = all_scope.pair_works.contains(pair)
                 ? all_scope.pair_works.at(pair).size()
                 : 0U;
-            const entity_key left { "concept", pair.left };
-            const entity_key right { "concept", pair.right };
+            const entity_key left
+                = canonical_entity_key(corpus, "concept", pair.left);
+            const entity_key right
+                = canonical_entity_key(corpus, "concept", pair.right);
             const json parameters {
                 { "removed_fraction", bootstrap_removed_fraction },
                 { "replicate_begin", options.bootstrap_begin },
@@ -2735,7 +3029,8 @@ namespace {
             }
             ++selected_edges;
             if (!entity_pair_in_shard(
-                    { "work", edge.first }, { "work", edge.second }, options
+                    canonical_entity_key(corpus, "work", edge.first),
+                    canonical_entity_key(corpus, "work", edge.second), options
                 )) {
                 continue;
             }
@@ -2788,8 +3083,10 @@ namespace {
                 break;
             }
             ++selected_comparison_count;
-            const entity_key left { "work", pair.first };
-            const entity_key right { "work", pair.second };
+            const entity_key left
+                = canonical_entity_key(corpus, "work", pair.first);
+            const entity_key right
+                = canonical_entity_key(corpus, "work", pair.second);
             if (!entity_pair_in_shard(left, right, options)) {
                 continue;
             }
@@ -3488,13 +3785,15 @@ namespace {
                     for (const auto& assertion : assertions->second) {
                         channel.centrality_weighted_support
                             += assertion.centrality
-                            ? std::clamp(*assertion.centrality / 100.0, 0.0, 1.0)
+                            ? std::clamp(
+                                  *assertion.centrality / 100.0, 0.0, 1.0
+                              )
                             : assertion_weight(
                                   { { "relation_type",
                                       assertion.relation_type } }
                               );
                         evidence_backed = evidence_backed
-                            || !assertion.evidence_ids.empty();
+                            || assertion_has_supporting_evidence(assertion);
                         channel.evidence_ids.insert(
                             assertion.evidence_ids.begin(),
                             assertion.evidence_ids.end()
@@ -3514,8 +3813,7 @@ namespace {
                         ? concept_value.work_weights.at(work_id)
                         : 1.0;
                 }
-                channel.evidence_backed_work_count
-                    += evidence_backed ? 1U : 0U;
+                channel.evidence_backed_work_count += evidence_backed ? 1U : 0U;
             }
         }
         for (auto& [key, channel] : channels) {
@@ -3524,8 +3822,10 @@ namespace {
         }
 
         json profiles = json::array();
-        std::map<std::string, std::vector<const concept_medium_channel*>,
-                 std::less<>> by_concept;
+        std::map<
+            std::string, std::vector<const concept_medium_channel*>,
+            std::less<>>
+            by_concept;
         for (const auto& [key, channel] : channels) {
             static_cast<void>(key);
             by_concept[channel.concept_id].push_back(&channel);
@@ -3590,12 +3890,14 @@ namespace {
 
         json same_concept = json::array();
         for (const auto& [concept_id, concept_channels] : by_concept) {
-            for (std::size_t left = 0U; left < concept_channels.size(); ++left) {
+            for (std::size_t left = 0U; left < concept_channels.size();
+                 ++left) {
                 for (std::size_t right = left + 1U;
                      right < concept_channels.size(); ++right) {
                     const auto& l = *concept_channels[left];
                     const auto& r = *concept_channels[right];
-                    const entity_key entity { "concept", concept_id };
+                    const entity_key entity
+                        = canonical_entity_key(corpus, "concept", concept_id);
                     const std::string left_channel = "medium:" + l.medium;
                     const std::string right_channel = "medium:" + r.medium;
                     if (!channel_pair_in_shard(
@@ -3603,8 +3905,7 @@ namespace {
                         )) {
                         continue;
                     }
-                    const bool dated
-                        = !l.years.empty() && !r.years.empty();
+                    const bool dated = !l.years.empty() && !r.years.empty();
                     const double lag = dated
                         ? median_of_years(r.years) - median_of_years(l.years)
                         : 0.0;
@@ -3649,7 +3950,8 @@ namespace {
                         { { "centering", "channel_median_year" },
                           { "bucket_width_years", 5 } },
                         "Similarity of medium-specific temporal shapes after "
-                        "removing absolute date offset.", details
+                        "removing absolute date offset.",
+                        details
                     ));
                     observations.push_back(channel_observation(
                         entity, left_channel, entity, right_channel,
@@ -3662,13 +3964,18 @@ namespace {
                         "low value leaves independent substructures visible.",
                         details
                     ));
-                    const std::string pattern = support < 2U
-                        ? "insufficient_support"
-                        : (context < 0.20 && shape < 0.35
-                               ? "medium_specific_substructures"
-                               : (std::abs(lag) <= 3.0
-                                      ? "synchronised_development"
-                                      : "temporally_shifted_development"));
+                    const std::string pattern = !dated
+                        ? "insufficient_dated_support"
+                        : (
+                              support < 2U
+                                  ? "insufficient_support"
+                                  : (context < 0.20 && shape < 0.35
+                                         ? "medium_specific_substructures"
+                                         : (std::abs(lag) <= 3.0
+                                                ? "synchronised_development"
+                                                : "temporally_shifted_"
+                                                  "development"))
+                          );
                     same_concept.push_back(
                         { { "concept_id", concept_id },
                           { "left_medium", l.medium },
@@ -3694,44 +4001,149 @@ namespace {
             double context {};
             double temporal_shape {};
             double agent_overlap {};
+            double medium_profile_similarity {};
+            double fingerprint_similarity {};
+            std::optional<double> temporal_lag;
             double rank {};
         };
+
+        const auto medium_profile_features =
+            [](const concept_medium_channel& channel) {
+                const double work_count = static_cast<double>(
+                    std::max<std::size_t>(1U, channel.works.size())
+                );
+                return std::map<std::string, double, std::less<>> {
+                    { "dated_fraction",
+                      safe_ratio(channel.years.size(), channel.works.size()) },
+                    { "evidence_backed_fraction",
+                      safe_ratio(
+                          channel.evidence_backed_work_count,
+                          channel.works.size()
+                      ) },
+                    { "agent_diversity_per_work",
+                      safe_ratio(channel.agents.size(), channel.works.size()) },
+                    { "centrality_weight_per_work",
+                      channel.centrality_weighted_support / work_count },
+                };
+            };
+        const auto channel_fingerprint
+            = [&](const concept_medium_channel& channel) {
+                  std::map<std::string, double, std::less<>> result;
+                  append_normalized_feature_group(
+                      result, "context:", channel.context
+                  );
+                  std::map<std::string, double, std::less<>> temporal;
+                  for (const auto& [bucket, weight] : channel.temporal_shape) {
+                      temporal[std::to_string(bucket)] = weight;
+                  }
+                  append_normalized_feature_group(
+                      result, "relative_time:", temporal
+                  );
+                  std::map<std::string, double, std::less<>> agents;
+                  for (const auto& agent_id : channel.agents) {
+                      agents[agent_id] = 1.0;
+                  }
+                  append_normalized_feature_group(result, "agent:", agents);
+                  const auto profile = medium_profile_features(channel);
+                  for (const auto& [feature, value] : profile) {
+                      if (value > 0.0) {
+                          result["medium_profile:" + feature] = value;
+                      }
+                  }
+                  return result;
+              };
         std::vector<cross_candidate> candidates;
-        for (const auto& pair : selected_pairs) {
-            const auto left_channels = by_concept.find(pair.left);
-            const auto right_channels = by_concept.find(pair.right);
-            if (left_channels == by_concept.end()
-                || right_channels == by_concept.end()) {
-                continue;
+        std::vector<const concept_medium_channel*> channel_values;
+        channel_values.reserve(channels.size());
+        std::map<std::string, std::vector<std::size_t>, std::less<>>
+            cheap_buckets;
+        for (const auto& [key, channel] : channels) {
+            static_cast<void>(key);
+            const std::size_t index = channel_values.size();
+            channel_values.push_back(&channel);
+            for (const auto& [peer_id, ignored] : channel.context) {
+                static_cast<void>(ignored);
+                cheap_buckets["context:" + peer_id].push_back(index);
             }
-            for (const auto* left : left_channels->second) {
-                for (const auto* right : right_channels->second) {
-                    if (left->medium == right->medium) {
-                        continue;
-                    }
-                    const double context
-                        = weighted_jaccard(left->context, right->context);
-                    const double shape = distribution_overlap(
-                        left->temporal_shape, right->temporal_shape
-                    );
-                    const double agents
-                        = set_jaccard(left->agents, right->agents);
-                    const double rank = std::max({ context, shape, agents });
-                    if (rank > 0.0) {
-                        candidates.push_back(
-                            { left, right, context, shape, agents, rank }
-                        );
+            for (const auto& agent_id : channel.agents) {
+                cheap_buckets["agent:" + agent_id].push_back(index);
+            }
+            if (!channel.years.empty()) {
+                const int median_decade = static_cast<int>(
+                    std::floor(median_of_years(channel.years) / 10.0) * 10.0
+                );
+                cheap_buckets["median_decade:" + std::to_string(median_decade)]
+                    .push_back(index);
+            }
+        }
+        std::set<std::pair<std::size_t, std::size_t>, std::less<>> cheap_pairs;
+        constexpr std::size_t maximum_cheap_bucket_size = 256U;
+        if (options.cross_media_pair_limit == 0U) {
+            for (std::size_t left = 0U; left < channel_values.size(); ++left) {
+                for (std::size_t right = left + 1U;
+                     right < channel_values.size(); ++right) {
+                    cheap_pairs.emplace(left, right);
+                }
+            }
+        } else {
+            for (const auto& [key, members] : cheap_buckets) {
+                static_cast<void>(key);
+                if (members.size() > maximum_cheap_bucket_size) {
+                    continue;
+                }
+                for (std::size_t left = 0U; left < members.size(); ++left) {
+                    for (std::size_t right = left + 1U;
+                         right < members.size(); ++right) {
+                        cheap_pairs.emplace(members[left], members[right]);
                     }
                 }
+            }
+        }
+        for (const auto& [left_index, right_index] : cheap_pairs) {
+            const auto* left = channel_values[left_index];
+            const auto* right = channel_values[right_index];
+            if (left->concept_id == right->concept_id
+                || left->medium == right->medium) {
+                continue;
+            }
+            const double context
+                = weighted_jaccard(left->context, right->context);
+            const double shape = distribution_overlap(
+                left->temporal_shape, right->temporal_shape
+            );
+            const double agents = set_jaccard(left->agents, right->agents);
+            const double medium_profile = cosine_similarity(
+                medium_profile_features(*left), medium_profile_features(*right)
+            );
+            const double fingerprint = cosine_similarity(
+                channel_fingerprint(*left), channel_fingerprint(*right)
+            );
+            const std::optional<double> lag
+                = left->years.empty() || right->years.empty()
+                ? std::nullopt
+                : std::optional<double>(
+                      median_of_years(right->years)
+                      - median_of_years(left->years)
+                  );
+            /* Candidate rank only limits expensive follow-up measurements. It
+             * is not emitted as a universal similarity or interpreted as a
+             * canonical relationship. */
+            const double rank
+                = std::max({ context, shape, agents, fingerprint });
+            if (rank > 0.0) {
+                candidates.push_back(
+                    { left, right, context, shape, agents, medium_profile,
+                      fingerprint, lag, rank }
+                );
             }
         }
         std::ranges::sort(candidates, [](const auto& left, const auto& right) {
             return std::tuple { -left.rank, left.left->concept_id,
                                 left.left->medium, left.right->concept_id,
                                 left.right->medium }
-                < std::tuple { -right.rank, right.left->concept_id,
-                               right.left->medium, right.right->concept_id,
-                               right.right->medium };
+            < std::tuple { -right.rank, right.left->concept_id,
+                           right.left->medium, right.right->concept_id,
+                           right.right->medium };
         });
         if (options.cross_media_pair_limit != 0U
             && candidates.size() > options.cross_media_pair_limit) {
@@ -3739,10 +4151,13 @@ namespace {
         }
         json cross_concept = json::array();
         for (const auto& candidate : candidates) {
-            const entity_key left { "concept", candidate.left->concept_id };
-            const entity_key right { "concept", candidate.right->concept_id };
-            const std::string left_channel
-                = "medium:" + candidate.left->medium;
+            const entity_key left = canonical_entity_key(
+                corpus, "concept", candidate.left->concept_id
+            );
+            const entity_key right = canonical_entity_key(
+                corpus, "concept", candidate.right->concept_id
+            );
+            const std::string left_channel = "medium:" + candidate.left->medium;
             const std::string right_channel
                 = "medium:" + candidate.right->medium;
             if (!channel_pair_in_shard(
@@ -3760,6 +4175,10 @@ namespace {
                 { "right_work_ids", candidate.right->works },
                 { "left_evidence_ids", candidate.left->evidence_ids },
                 { "right_evidence_ids", candidate.right->evidence_ids },
+                { "left_source_ids", candidate.left->source_ids },
+                { "right_source_ids", candidate.right->source_ids },
+                { "candidate_rank", candidate.rank },
+                { "candidate_rank_is_interpretation", false },
                 { "analogy_only", true },
                 { "canonical_relation", false },
             };
@@ -3770,9 +4189,10 @@ namespace {
                 "unit_interval", support, corpus,
                 { { "focus_concepts_removed", true },
                   { "candidate_generation",
-                    "selected_concept_pairs_then_distinct_media" } },
+                    "all_concept_channels_then_cheap_rank" } },
                 "Context proximity across different concepts and media is an "
-                "analogy hint only.", details
+                "analogy hint only.",
+                details
             ));
             observations.push_back(channel_observation(
                 left, left_channel, right, right_channel,
@@ -3782,8 +4202,44 @@ namespace {
                 { { "centering", "per_channel_median_year" },
                   { "bucket_width_years", 5 } },
                 "Relative temporal-shape proximity across media, kept "
-                "separate from context and chronology.", details
+                "separate from context and chronology.",
+                details
             ));
+            observations.push_back(channel_observation(
+                left, left_channel, right, right_channel,
+                "cross-concept-medium-channel-fingerprint",
+                "cross_media_channel_fingerprint_similarity",
+                candidate.fingerprint_similarity, "unit_interval", support,
+                corpus,
+                { { "feature_groups",
+                    { "context_distribution", "relative_temporal_shape",
+                      "agent_participation", "medium_profile" } },
+                  { "group_normalization", "independent_l1_where_applicable" },
+                  { "candidate_rank_is_metric", false },
+                  { "canonical_relation_written", false } },
+                "Cosine proximity between disposable channel fingerprints; "
+                "the component measurements remain independently visible.",
+                { { "context_similarity", candidate.context },
+                  { "sequence_shape_similarity", candidate.temporal_shape },
+                  { "agent_overlap", candidate.agent_overlap },
+                  { "medium_profile_similarity",
+                    candidate.medium_profile_similarity },
+                  { "candidate_rank", candidate.rank },
+                  { "analogy_only", true } }
+            ));
+            if (candidate.temporal_lag) {
+                observations.push_back(channel_observation(
+                    left, left_channel, right, right_channel,
+                    "cross-concept-medium-chronology",
+                    "cross_media_temporal_lag", *candidate.temporal_lag,
+                    "years", support, corpus,
+                    { { "sign", "right_median_minus_left_median" },
+                      { "chronology_is_not_causation", true } },
+                    "Absolute temporal lag across different concept and medium "
+                    "channels; repeated precedence remains a research hint.",
+                    details
+                ));
+            }
             cross_concept.push_back(
                 { { "left_concept_id", candidate.left->concept_id },
                   { "left_medium", candidate.left->medium },
@@ -3792,10 +4248,178 @@ namespace {
                   { "context_similarity", candidate.context },
                   { "temporal_shape_similarity", candidate.temporal_shape },
                   { "agent_overlap", candidate.agent_overlap },
+                  { "sequence_measurements",
+                    { { "relative_temporal_shape_similarity",
+                        candidate.temporal_shape },
+                      { "temporal_lag_years",
+                        candidate.temporal_lag ? json(*candidate.temporal_lag)
+                                               : json(nullptr) } } },
+                  { "fingerprint_measurements",
+                    { { "channel_fingerprint_similarity",
+                        candidate.fingerprint_similarity },
+                      { "context_component", candidate.context },
+                      { "relative_time_component", candidate.temporal_shape },
+                      { "agent_component", candidate.agent_overlap },
+                      { "medium_profile_component",
+                        candidate.medium_profile_similarity } } },
+                  { "candidate_generation",
+                    { { "rank", candidate.rank },
+                      { "rank_definition",
+                        "maximum_of_independent_cheap_signals" },
+                      { "rank_is_similarity_metric", false },
+                      { "global_limit", options.cross_media_pair_limit } } },
+                  { "temporal_lag_years",
+                    candidate.temporal_lag ? json(*candidate.temporal_lag)
+                                           : json(nullptr) },
                   { "support_size", support },
                   { "analogy_hint_only", true } }
             );
         }
+
+        struct chronology_summary final {
+            std::size_t comparison_count {};
+            std::size_t support_size {};
+            double absolute_lag_total {};
+            double sequence_shape_total {};
+            double fingerprint_total {};
+            double context_total {};
+            std::set<std::string, std::less<>> concept_ids;
+            json examples = json::array();
+        };
+
+        constexpr double synchronized_lag_years = 3.0;
+        constexpr double chronology_structural_threshold = 0.35;
+        constexpr std::size_t chronology_example_limit = 8U;
+        constexpr std::size_t chronology_summary_limit = 100U;
+        std::map<
+            std::pair<std::string, std::string>, chronology_summary,
+            std::less<>>
+            precedence;
+        std::map<
+            std::pair<std::string, std::string>, chronology_summary,
+            std::less<>>
+            synchronized;
+        for (const auto& candidate : candidates) {
+            if (!candidate.temporal_lag) {
+                continue;
+            }
+            const double structural_strength = std::max(
+                { candidate.context, candidate.temporal_shape,
+                  candidate.fingerprint_similarity }
+            );
+            if (structural_strength < chronology_structural_threshold) {
+                continue;
+            }
+            const bool is_synchronized
+                = std::abs(*candidate.temporal_lag) <= synchronized_lag_years;
+            const bool left_is_earlier = *candidate.temporal_lag > 0.0;
+            const concept_medium_channel* first = candidate.left;
+            const concept_medium_channel* second = candidate.right;
+            if (is_synchronized) {
+                if (std::tie(first->medium, first->concept_id)
+                    > std::tie(second->medium, second->concept_id)) {
+                    std::swap(first, second);
+                }
+            } else if (!left_is_earlier) {
+                std::swap(first, second);
+            }
+            auto& summary
+                = (is_synchronized
+                       ? synchronized
+                       : precedence)[{ first->medium, second->medium }];
+            ++summary.comparison_count;
+            summary.support_size += std::min(
+                candidate.left->works.size(), candidate.right->works.size()
+            );
+            summary.absolute_lag_total += std::abs(*candidate.temporal_lag);
+            summary.sequence_shape_total += candidate.temporal_shape;
+            summary.fingerprint_total += candidate.fingerprint_similarity;
+            summary.context_total += candidate.context;
+            summary.concept_ids.emplace(first->concept_id);
+            summary.concept_ids.emplace(second->concept_id);
+            if (summary.examples.size() < chronology_example_limit) {
+                summary.examples.push_back(
+                    { { is_synchronized ? "first_concept_id"
+                                        : "earlier_concept_id",
+                        first->concept_id },
+                      { is_synchronized ? "first_medium" : "earlier_medium",
+                        first->medium },
+                      { is_synchronized ? "second_concept_id"
+                                        : "later_concept_id",
+                        second->concept_id },
+                      { is_synchronized ? "second_medium" : "later_medium",
+                        second->medium },
+                      { "absolute_lag_years",
+                        std::abs(*candidate.temporal_lag) },
+                      { "sequence_shape_similarity", candidate.temporal_shape },
+                      { "channel_fingerprint_similarity",
+                        candidate.fingerprint_similarity },
+                      { "causal_claim", false } }
+                );
+            }
+        }
+        const auto chronology_rows = [&](const auto& values,
+                                         const bool is_synchronized) {
+            std::vector<json> rows;
+            rows.reserve(values.size());
+            for (const auto& [medium_pair, summary] : values) {
+                const double count
+                    = static_cast<double>(summary.comparison_count);
+                rows.push_back(
+                    { { is_synchronized ? "first_medium" : "earlier_medium",
+                        medium_pair.first },
+                      { is_synchronized ? "second_medium" : "later_medium",
+                        medium_pair.second },
+                      { "pattern",
+                        is_synchronized ? "synchronised_development"
+                                        : "medium_precedence" },
+                      { "comparison_count", summary.comparison_count },
+                      { "support_size", summary.support_size },
+                      { "mean_absolute_lag_years",
+                        summary.absolute_lag_total / count },
+                      { "mean_sequence_shape_similarity",
+                        summary.sequence_shape_total / count },
+                      { "mean_channel_fingerprint_similarity",
+                        summary.fingerprint_total / count },
+                      { "mean_context_similarity",
+                        summary.context_total / count },
+                      { "concept_ids", summary.concept_ids },
+                      { "systematic_repetition",
+                        summary.comparison_count >= 2U },
+                      { "examples", summary.examples },
+                      { "projection_scope",
+                        "global_bounded_cross_media_candidate_set" },
+                      { "causal_claim", false },
+                      { "canonical_relation", false },
+                      { "disposable", true } }
+                );
+            }
+            std::ranges::sort(rows, [](const json& left, const json& right) {
+                return std::tuple {
+                    -static_cast<long long>(left.value("comparison_count", 0U)),
+                    -left.value("mean_channel_fingerprint_similarity", 0.0),
+                    left.dump()
+                }
+                < std::tuple {
+                      -static_cast<long long>(
+                          right.value("comparison_count", 0U)
+                      ),
+                      -right.value("mean_channel_fingerprint_similarity", 0.0),
+                      right.dump()
+                  };
+            });
+            if (rows.size() > chronology_summary_limit) {
+                rows.resize(chronology_summary_limit);
+            }
+            json result = json::array();
+            for (auto& row : rows) {
+                result.push_back(std::move(row));
+            }
+            return result;
+        };
+        json medium_precedence_summaries = chronology_rows(precedence, false);
+        json synchronized_medium_summaries
+            = chronology_rows(synchronized, true);
 
         const auto labels_for_scope = [&](const scope_data& scope) {
             std::map<concept_pair, pair_measurements, std::less<>> measured;
@@ -3809,14 +4433,136 @@ namespace {
                 static_cast<void>(count);
                 concepts.emplace(concept_id);
             }
-            return std::tuple {
-                adjacency, concepts,
-                threshold_labels(adjacency, concepts, 0.20),
-                label_propagation_labels(adjacency, concepts)
-            };
+            return std::tuple { adjacency, concepts,
+                                threshold_labels(adjacency, concepts, 0.20),
+                                label_propagation_labels(adjacency, concepts) };
         };
         const auto [all_adjacency, all_concepts, all_threshold, all_labels]
             = labels_for_scope(all_scope);
+
+        constexpr double cross_media_cluster_edge_threshold = 0.35;
+        constexpr double maximum_single_concept_cluster_share = 0.60;
+        constexpr std::size_t multi_medium_cluster_limit = 100U;
+        std::map<std::string, std::string, std::less<>> channel_parents;
+        std::map<std::string, const concept_medium_channel*, std::less<>>
+            channel_by_node;
+        const auto channel_node = [](const concept_medium_channel& channel) {
+            return channel.concept_id + "\n" + channel.medium;
+        };
+        for (const auto& candidate : candidates) {
+            const double edge_strength = std::max(
+                { candidate.context, candidate.temporal_shape,
+                  candidate.fingerprint_similarity }
+            );
+            if (edge_strength < cross_media_cluster_edge_threshold) {
+                continue;
+            }
+            const std::string left = channel_node(*candidate.left);
+            const std::string right = channel_node(*candidate.right);
+            channel_parents.try_emplace(left, left);
+            channel_parents.try_emplace(right, right);
+            channel_by_node.try_emplace(left, candidate.left);
+            channel_by_node.try_emplace(right, candidate.right);
+            join_clusters(channel_parents, left, right);
+        }
+        std::map<std::string, std::vector<std::string>, std::less<>>
+            channel_groups;
+        for (const auto& [node, ignored] : channel_parents) {
+            static_cast<void>(ignored);
+            channel_groups[find_cluster_root(channel_parents, node)].push_back(
+                node
+            );
+        }
+        std::map<std::string, std::size_t, std::less<>> channel_group_edges;
+        for (const auto& candidate : candidates) {
+            const double edge_strength = std::max(
+                { candidate.context, candidate.temporal_shape,
+                  candidate.fingerprint_similarity }
+            );
+            if (edge_strength < cross_media_cluster_edge_threshold) {
+                continue;
+            }
+            const std::string left = channel_node(*candidate.left);
+            if (channel_parents.contains(left)) {
+                ++channel_group_edges[find_cluster_root(channel_parents, left)];
+            }
+        }
+        std::vector<json> undominated_cluster_rows;
+        for (const auto& [root, members] : channel_groups) {
+            static_cast<void>(root);
+            std::set<std::string, std::less<>> cluster_concepts;
+            std::set<std::string, std::less<>> cluster_media;
+            std::map<std::string, std::size_t, std::less<>> concept_support;
+            json member_rows = json::array();
+            std::size_t total_support = 0U;
+            for (const auto& node : members) {
+                const auto* channel = channel_by_node.at(node);
+                cluster_concepts.emplace(channel->concept_id);
+                cluster_media.emplace(channel->medium);
+                concept_support[channel->concept_id] += channel->works.size();
+                total_support += channel->works.size();
+                member_rows.push_back(
+                    { { "concept_id", channel->concept_id },
+                      { "medium", channel->medium },
+                      { "work_support", channel->works.size() } }
+                );
+            }
+            if (cluster_concepts.size() < 2U || cluster_media.size() < 2U) {
+                continue;
+            }
+            const auto dominant = std::ranges::max_element(
+                concept_support, [](const auto& left, const auto& right) {
+                    if (left.second != right.second) {
+                        return left.second < right.second;
+                    }
+                    return left.first > right.first;
+                }
+            );
+            const double dominant_share
+                = safe_ratio(dominant->second, total_support);
+            if (dominant_share > maximum_single_concept_cluster_share) {
+                continue;
+            }
+            undominated_cluster_rows.push_back(
+                { { "channel_count", members.size() },
+                  { "edge_count", channel_group_edges[root] },
+                  { "concept_ids", cluster_concepts },
+                  { "media", cluster_media },
+                  { "channels", std::move(member_rows) },
+                  { "work_support_by_concept", concept_support },
+                  { "dominant_concept_id", dominant->first },
+                  { "maximum_concept_support_share", dominant_share },
+                  { "not_dominated_by_one_concept", true },
+                  { "edge_threshold", cross_media_cluster_edge_threshold },
+                  { "canonical_cluster", false },
+                  { "disposable", true } }
+            );
+        }
+        std::ranges::sort(
+            undominated_cluster_rows, [](const json& left, const json& right) {
+                return std::tuple {
+                    -static_cast<long long>(left.value("channel_count", 0U)),
+                    -static_cast<long long>(left.value("edge_count", 0U)),
+                    left.dump()
+                }
+                < std::tuple {
+                      -static_cast<long long>(right.value("channel_count", 0U)),
+                      -static_cast<long long>(right.value("edge_count", 0U)),
+                      right.dump()
+                  };
+            }
+        );
+        if (undominated_cluster_rows.size() > multi_medium_cluster_limit) {
+            undominated_cluster_rows.resize(multi_medium_cluster_limit);
+        }
+        json undominated_multi_medium_clusters = json::array();
+        std::size_t cluster_sequence = 0U;
+        for (auto& row : undominated_cluster_rows) {
+            row["cluster_id"] = "cross-media-undominated:"
+                + std::to_string(++cluster_sequence);
+            undominated_multi_medium_clusters.push_back(std::move(row));
+        }
+
         json medium_clusterings = json::array(
             { { { "scope", "all_media" },
                 { "algorithm", "weighted-threshold-components" },
@@ -3830,8 +4576,7 @@ namespace {
                 { "algorithm", "deterministic-weighted-label-propagation" },
                 { "clusters",
                   cluster_rows(
-                      "all-media-label-propagation", all_labels,
-                      all_adjacency
+                      "all-media-label-propagation", all_labels, all_adjacency
                   ) },
                 { "disposable", true } } }
         );
@@ -3855,8 +4600,7 @@ namespace {
             medium_clusterings.push_back(
                 { { "scope", "medium:" + medium },
                   { "medium", medium },
-                  { "algorithm",
-                    "deterministic-weighted-label-propagation" },
+                  { "algorithm", "deterministic-weighted-label-propagation" },
                   { "clusters",
                     cluster_rows(
                         "medium-" + medium + "-label-propagation", labels,
@@ -3882,8 +4626,7 @@ namespace {
                             >= options.cluster_disagreement_pair_limit) {
                         break;
                     }
-                    const bool global_together
-                        = all_labels.at(shared[first])
+                    const bool global_together = all_labels.at(shared[first])
                         == all_labels.at(shared[second]);
                     const bool medium_together
                         = labels.at(shared[first]) == labels.at(shared[second]);
@@ -3904,23 +4647,68 @@ namespace {
             disagreements.push_back(
                 { { "medium", medium },
                   { "against_scope", "all_media" },
-                  { "algorithm",
-                    "deterministic-weighted-label-propagation" },
+                  { "algorithm", "deterministic-weighted-label-propagation" },
                   { "shared_concept_count", shared.size() },
                   { "pair_count", compared },
-                  { "disagreement_rate",
-                    safe_ratio(disagreed, compared) },
+                  { "disagreement_rate", safe_ratio(disagreed, compared) },
                   { "boundary_concepts", std::move(boundary_concepts) },
-                  { "pair_limit",
-                    options.cluster_disagreement_pair_limit } }
+                  { "pair_limit", options.cluster_disagreement_pair_limit } }
             );
         }
+
+        constexpr double weak_cluster_edge_threshold = 0.20;
+        constexpr std::size_t weak_connection_example_limit = 16U;
+        const auto all_media_edge_weight
+            = [&](const std::string& left, const std::string& right) {
+                  const auto neighbors = all_adjacency.find(left);
+                  if (neighbors == all_adjacency.end()) {
+                      return 0.0;
+                  }
+                  const auto found = neighbors->second.find(right);
+                  return found == neighbors->second.end() ? 0.0 : found->second;
+              };
+        const auto weak_cluster_connection
+            = [&](const cross_candidate& candidate) {
+                  const auto left
+                      = all_threshold.find(candidate.left->concept_id);
+                  const auto right
+                      = all_threshold.find(candidate.right->concept_id);
+                  return left != all_threshold.end()
+                      && right != all_threshold.end()
+                      && left->second != right->second
+                      && all_media_edge_weight(
+                             candidate.left->concept_id,
+                             candidate.right->concept_id
+                         )
+                      < weak_cluster_edge_threshold;
+              };
+        const auto weak_connection_row = [&](const cross_candidate& candidate) {
+            return json {
+                { "left_concept_id", candidate.left->concept_id },
+                { "left_medium", candidate.left->medium },
+                { "left_cluster_label",
+                  all_threshold.at(candidate.left->concept_id) },
+                { "right_concept_id", candidate.right->concept_id },
+                { "right_medium", candidate.right->medium },
+                { "right_cluster_label",
+                  all_threshold.at(candidate.right->concept_id) },
+                { "all_media_edge_weight",
+                  all_media_edge_weight(
+                      candidate.left->concept_id, candidate.right->concept_id
+                  ) },
+                { "channel_fingerprint_similarity",
+                  candidate.fingerprint_similarity },
+                { "sequence_shape_similarity", candidate.temporal_shape },
+                { "weak_cluster_threshold", weak_cluster_edge_threshold },
+                { "analytical_connection_only", true },
+            };
+        };
 
         json bridge_agents = json::array();
         for (const auto& [agent_id, agent] : corpus.agents) {
             std::map<std::string, std::size_t, std::less<>> counts;
             std::map<std::string, std::size_t, std::less<>> roles;
-            std::vector<std::pair<int, std::string>> chronology;
+            std::map<int, std::set<std::string, std::less<>>> chronology;
             for (const auto& work_id : agent.works) {
                 const auto work = corpus.works.find(work_id);
                 if (work == corpus.works.end()) {
@@ -3928,8 +4716,8 @@ namespace {
                 }
                 ++counts[work->second.medium];
                 if (work->second.year_start) {
-                    chronology.emplace_back(
-                        *work->second.year_start, work->second.medium
+                    chronology[*work->second.year_start].emplace(
+                        work->second.medium
                     );
                 }
             }
@@ -3939,25 +4727,65 @@ namespace {
             if (counts.size() < 2U) {
                 continue;
             }
-            std::ranges::sort(chronology);
             std::size_t transitions = 0U;
-            for (std::size_t index = 1U; index < chronology.size(); ++index) {
-                transitions += chronology[index - 1U].second
-                        != chronology[index].second
-                    ? 1U
-                    : 0U;
+            std::set<std::string, std::less<>> previous_media;
+            for (const auto& [year, year_media] : chronology) {
+                static_cast<void>(year);
+                if (!previous_media.empty()) {
+                    const bool shares_medium = std::ranges::any_of(
+                        year_media, [&](const std::string& medium) {
+                            return previous_media.contains(medium);
+                        }
+                    );
+                    transitions += shares_medium ? 0U : 1U;
+                }
+                previous_media = year_media;
             }
-            const auto maximum = std::ranges::max_element(
-                counts, {}, [](const auto& value) { return value.second; }
-            );
-            const double bridge_strength = 1.0
-                - safe_ratio(maximum->second, agent.works.size());
+            const auto maximum
+                = std::ranges::max_element(counts, {}, [](const auto& value) {
+                      return value.second;
+                  });
+            const double medium_spread_strength
+                = 1.0 - safe_ratio(maximum->second, agent.works.size());
+            std::size_t candidate_connection_count = 0U;
+            std::size_t weak_connection_count = 0U;
+            json weak_connections = json::array();
+            for (const auto& candidate : candidates) {
+                if (!candidate.left->agents.contains(agent_id)
+                    || !candidate.right->agents.contains(agent_id)) {
+                    continue;
+                }
+                ++candidate_connection_count;
+                if (!weak_cluster_connection(candidate)) {
+                    continue;
+                }
+                ++weak_connection_count;
+                if (weak_connections.size() < weak_connection_example_limit) {
+                    weak_connections.push_back(weak_connection_row(candidate));
+                }
+            }
+            const double weak_cluster_strength
+                = safe_ratio(weak_connection_count, candidate_connection_count);
+            const double bridge_strength
+                = std::max(medium_spread_strength, weak_cluster_strength);
             bridge_agents.push_back(
                 { { "agent_id", agent_id },
                   { "work_count", agent.works.size() },
                   { "medium_distribution", counts },
                   { "role_distribution", roles },
                   { "dated_cross_media_transitions", transitions },
+                  { "chronology_year_bucket_count", chronology.size() },
+                  { "same_year_order_inferred", false },
+                  { "medium_spread_strength", medium_spread_strength },
+                  { "analytical_cross_media_candidate_count",
+                    candidate_connection_count },
+                  { "weak_cluster_connection_count", weak_connection_count },
+                  { "weak_cluster_connection_examples",
+                    std::move(weak_connections) },
+                  { "weak_cluster_connections_truncated",
+                    weak_connection_count > weak_connection_example_limit },
+                  { "weak_cluster_bridge_strength", weak_cluster_strength },
+                  { "bridges_weak_clusters", weak_connection_count > 0U },
                   { "bridge_strength", bridge_strength },
                   { "disposable", true } }
             );
@@ -3965,6 +4793,7 @@ namespace {
         json bridge_works = json::array();
         for (const auto& [work_id, work] : corpus.works) {
             std::set<std::string, std::less<>> reached_media;
+            std::set<std::string, std::less<>> analytically_reached_media;
             std::size_t spanning_concepts = 0U;
             for (const auto& concept_id : work.concepts) {
                 const auto found = by_concept.find(concept_id);
@@ -3980,17 +4809,56 @@ namespace {
                 }
                 spanning_concepts += spans ? 1U : 0U;
             }
-            if (reached_media.empty()) {
+            std::size_t candidate_connection_count = 0U;
+            std::size_t weak_connection_count = 0U;
+            json weak_connections = json::array();
+            for (const auto& candidate : candidates) {
+                const bool anchors_left
+                    = candidate.left->works.contains(work_id);
+                const bool anchors_right
+                    = candidate.right->works.contains(work_id);
+                if (!anchors_left && !anchors_right) {
+                    continue;
+                }
+                ++candidate_connection_count;
+                analytically_reached_media.emplace(
+                    anchors_left ? candidate.right->medium
+                                 : candidate.left->medium
+                );
+                if (!weak_cluster_connection(candidate)) {
+                    continue;
+                }
+                ++weak_connection_count;
+                if (weak_connections.size() < weak_connection_example_limit) {
+                    weak_connections.push_back(weak_connection_row(candidate));
+                }
+            }
+            if (reached_media.empty() && analytically_reached_media.empty()) {
                 continue;
             }
+            const double medium_span_strength
+                = safe_ratio(spanning_concepts, work.concepts.size());
+            const double weak_cluster_strength
+                = safe_ratio(weak_connection_count, candidate_connection_count);
             bridge_works.push_back(
                 { { "work_id", work_id },
                   { "medium", work.medium },
                   { "reached_media", reached_media },
+                  { "analytically_reached_media", analytically_reached_media },
                   { "spanning_concept_count", spanning_concepts },
                   { "concept_count", work.concepts.size() },
+                  { "medium_span_strength", medium_span_strength },
+                  { "analytical_cross_media_candidate_count",
+                    candidate_connection_count },
+                  { "weak_cluster_connection_count", weak_connection_count },
+                  { "weak_cluster_connection_examples",
+                    std::move(weak_connections) },
+                  { "weak_cluster_connections_truncated",
+                    weak_connection_count > weak_connection_example_limit },
+                  { "weak_cluster_bridge_strength", weak_cluster_strength },
+                  { "bridges_weak_clusters", weak_connection_count > 0U },
                   { "bridge_strength",
-                    safe_ratio(spanning_concepts, work.concepts.size()) },
+                    std::max(medium_span_strength, weak_cluster_strength) },
                   { "quality_tier", work.quality_tier },
                   { "evidence_ids", work.evidence_ids },
                   { "source_ids", work.source_ids },
@@ -4000,8 +4868,7 @@ namespace {
         const auto rank_bridge = [](const json& left, const json& right) {
             return std::tuple { -left.value("bridge_strength", 0.0),
                                 left.dump() }
-                < std::tuple { -right.value("bridge_strength", 0.0),
-                               right.dump() };
+            < std::tuple { -right.value("bridge_strength", 0.0), right.dump() };
         };
         const auto sort_json_array = [&](json& values) {
             std::vector<json> sorted(values.begin(), values.end());
@@ -4022,10 +4889,33 @@ namespace {
             { "concept_medium_profiles", std::move(profiles) },
             { "same_concept_comparisons", std::move(same_concept) },
             { "cross_concept_comparisons", std::move(cross_concept) },
+            { "medium_precedence_summaries",
+              std::move(medium_precedence_summaries) },
+            { "synchronized_medium_summaries",
+              std::move(synchronized_medium_summaries) },
+            { "undominated_multi_medium_clusters",
+              std::move(undominated_multi_medium_clusters) },
             { "clusterings", std::move(medium_clusterings) },
             { "clustering_disagreements", std::move(disagreements) },
             { "bridge_agents", std::move(bridge_agents) },
             { "bridge_works", std::move(bridge_works) },
+            { "parameters",
+              { { "cheap_candidate_bucket_limit", maximum_cheap_bucket_size },
+                { "cross_media_candidate_limit",
+                  options.cross_media_pair_limit },
+                { "chronology_structural_threshold",
+                  chronology_structural_threshold },
+                { "synchronized_lag_years", synchronized_lag_years },
+                { "chronology_summary_limit", chronology_summary_limit },
+                { "chronology_example_limit", chronology_example_limit },
+                { "cross_media_cluster_edge_threshold",
+                  cross_media_cluster_edge_threshold },
+                { "maximum_single_concept_cluster_share",
+                  maximum_single_concept_cluster_share },
+                { "multi_medium_cluster_limit", multi_medium_cluster_limit },
+                { "weak_cluster_edge_threshold", weak_cluster_edge_threshold },
+                { "weak_connection_example_limit",
+                  weak_connection_example_limit } } },
             { "chronology_is_causation", false },
             { "canonical_relations_written", false },
         };
@@ -4206,8 +5096,19 @@ namespace {
         }
         std::size_t sensitivity_count = 0U;
         std::size_t material_count = 0U;
+        std::size_t negligible_count = 0U;
         double absolute_total = 0.0;
         json material_examples = json::array();
+        json negligible_examples = json::array();
+        const auto example_row = [](const json& value) {
+            return json {
+                { "left_id", value.at("left_id") },
+                { "right_id", value.at("right_id") },
+                { "scope", value.at("scope") },
+                { "value", value.at("value") },
+                { "details", value.at("details") },
+            };
+        };
         for (const auto& value : observations) {
             if (value.value("metric", "") != "centrality_weighting_delta") {
                 continue;
@@ -4218,13 +5119,12 @@ namespace {
             if (delta >= 0.15) {
                 ++material_count;
                 if (material_examples.size() < maximum_view_rows) {
-                    material_examples.push_back(
-                        { { "left_id", value.at("left_id") },
-                          { "right_id", value.at("right_id") },
-                          { "scope", value.at("scope") },
-                          { "value", value.at("value") },
-                          { "details", value.at("details") } }
-                    );
+                    material_examples.push_back(example_row(value));
+                }
+            } else if (delta <= 0.02) {
+                ++negligible_count;
+                if (negligible_examples.size() < maximum_view_rows) {
+                    negligible_examples.push_back(example_row(value));
                 }
             }
         }
@@ -4245,8 +5145,14 @@ namespace {
                 { "mean_absolute_delta",
                   safe_ratio(absolute_total, sensitivity_count) },
                 { "material_delta_threshold", 0.15 },
+                { "negligible_delta_threshold", 0.02 },
                 { "material_change_count", material_count },
-                { "material_examples", std::move(material_examples) } } },
+                { "negligible_change_count", negligible_count },
+                { "negligible_change_may_reflect_saturation",
+                  overall.count > 0U
+                      && safe_ratio(overall.at_least_95, overall.count) >= 0.75 },
+                { "material_examples", std::move(material_examples) },
+                { "negligible_examples", std::move(negligible_examples) } } },
             { "canonical_centrality_changed", false },
             { "canonical_confidence_changed", false },
             { "canonical_historical_role_changed", false },
@@ -4272,8 +5178,10 @@ namespace {
             std::map<std::string, double, std::less<>> credit_importance;
             std::map<std::string, double, std::less<>> centrality_distribution;
             std::map<std::string, double, std::less<>> evidence_signals;
+            std::map<std::string, double, std::less<>> identity_features;
             std::map<std::string, double, std::less<>> two_hop_distribution;
             std::set<std::string, std::less<>> two_hop_entities;
+            json exact_canonical_work_dates = json::array();
             std::vector<int> years;
             std::size_t degree {};
             std::size_t agent_count {};
@@ -4305,11 +5213,29 @@ namespace {
                 );
             }
         };
+        const auto add_exact_work_date = [&](fingerprint_record& value,
+                                             const std::string& work_id) {
+            const auto work = corpus.works.find(work_id);
+            if (work == corpus.works.end()
+                || (work->second.date_precision != "exact"
+                    && !work->second.date_start_text
+                    && !work->second.date_end_text
+                    && !work->second.date_qualifier)) {
+                return;
+            }
+            json date = canonical_work_date(work->second);
+            date["work_id"] = work_id;
+            value.exact_canonical_work_dates.push_back(std::move(date));
+        };
 
         std::vector<fingerprint_record> values;
         for (const auto& [id, work] : corpus.works) {
             fingerprint_record value;
-            value.entity = { "work", id };
+            value.entity = canonical_entity_key(corpus, "work", id);
+            value.identity_features["family:work"] = 1.0;
+            value.identity_features["entity_type:work"] = 1.0;
+            value.identity_features["work_medium:" + work.medium] = 1.0;
+            add_exact_work_date(value, id);
             value.degree = work.concepts.size() + work.agents.size();
             value.agent_count = work.agents.size();
             value.work_count = 1U;
@@ -4344,6 +5270,26 @@ namespace {
                 { "source_diversity",
                   static_cast<double>(work.source_ids.size()) },
                 { "has_evidence", work.evidence_ids.empty() ? 0.0 : 1.0 },
+                { "has_supporting_evidence",
+                  work_has_supporting_evidence(work) ? 1.0 : 0.0 },
+                { "supports_count",
+                  static_cast<double>(
+                      work.evidence_stances.contains("supports")
+                          ? work.evidence_stances.at("supports")
+                          : 0U
+                  ) },
+                { "contradicts_count",
+                  static_cast<double>(
+                      work.evidence_stances.contains("contradicts")
+                          ? work.evidence_stances.at("contradicts")
+                          : 0U
+                  ) },
+                { "contextualizes_count",
+                  static_cast<double>(
+                      work.evidence_stances.contains("contextualizes")
+                          ? work.evidence_stances.at("contextualizes")
+                          : 0U
+                  ) },
             };
             if (work.year_start) {
                 value.years.push_back(*work.year_start);
@@ -4382,7 +5328,10 @@ namespace {
         }
         for (const auto& [id, agent] : corpus.agents) {
             fingerprint_record value;
-            value.entity = { "agent", id };
+            value.entity = canonical_entity_key(corpus, "agent", id);
+            value.identity_features["family:agent"] = 1.0;
+            value.identity_features["entity_type:" + agent.agent_type] = 1.0;
+            value.identity_features["agent_type:" + agent.agent_type] = 1.0;
             value.degree = agent.works.size();
             value.agent_count = 1U;
             value.work_count = agent.works.size();
@@ -4403,6 +5352,7 @@ namespace {
                     continue;
                 }
                 value.work_distribution[work_id] = 1.0;
+                add_exact_work_date(value, work_id);
                 value.medium_distribution[work->second.medium] += 1.0;
                 evidence_ids.insert(
                     work->second.evidence_ids.begin(),
@@ -4452,7 +5402,7 @@ namespace {
                           agent.works, [&](const std::string& work_id) {
                               const auto found = corpus.works.find(work_id);
                               return found != corpus.works.end()
-                                  && !found->second.evidence_ids.empty();
+                                  && work_has_supporting_evidence(found->second);
                           }
                       ),
                       agent.works.size()
@@ -4462,7 +5412,12 @@ namespace {
         }
         for (const auto& [id, concept_value] : corpus.concepts) {
             fingerprint_record value;
-            value.entity = { "concept", id };
+            value.entity = canonical_entity_key(corpus, "concept", id);
+            value.identity_features["family:concept"] = 1.0;
+            value.identity_features["entity_type:concept"] = 1.0;
+            value.identity_features[
+                "concept_type:" + concept_value.concept_type
+            ] = 1.0;
             std::size_t explicit_neighbor_count = 0U;
             for (const auto& [relation, neighbors] :
                  concept_value.neighbors_by_relation) {
@@ -4489,9 +5444,8 @@ namespace {
                           concept_value.assertions_by_work,
                           [](const auto& item) {
                               return std::ranges::any_of(
-                                  item.second, [](const auto& assertion) {
-                                      return !assertion.evidence_ids.empty();
-                                  }
+                                  item.second,
+                                  assertion_has_supporting_evidence
                               );
                           }
                       ),
@@ -4508,6 +5462,7 @@ namespace {
                     = concept_value.work_weights.contains(work_id)
                     ? concept_value.work_weights.at(work_id)
                     : 1.0;
+                add_exact_work_date(value, work_id);
                 value.medium_distribution[work->second.medium] += 1.0;
                 if (const auto assertions
                     = concept_value.assertions_by_work.find(work_id);
@@ -4652,6 +5607,9 @@ namespace {
                 value.features, "evidence:", value.evidence_signals
             );
             append_normalized_feature_group(
+                value.features, "identity:", value.identity_features
+            );
+            append_normalized_feature_group(
                 value.features, "two_hop:", value.two_hop_distribution
             );
         }
@@ -4670,6 +5628,10 @@ namespace {
             result.push_back(
                 { { "entity_id", value.entity.id },
                   { "family", value.entity.family },
+                  { "canonical_entity_type",
+                    value.entity.canonical_entity_type },
+                  { "canonical_family_type",
+                    value.entity.canonical_family_type },
                   { "degree", value.degree },
                   { "neighbor_type_distribution", value.neighbor_types },
                   { "relation_type_distribution", value.relation_types },
@@ -4685,6 +5647,9 @@ namespace {
                   { "centrality_distribution",
                     value.centrality_distribution },
                   { "evidence_density_signals", value.evidence_signals },
+                  { "family_type_features", value.identity_features },
+                  { "exact_canonical_work_dates",
+                    value.exact_canonical_work_dates },
                   { "two_hop_distribution", value.two_hop_distribution },
                   { "agent_count", value.agent_count },
                   { "work_count", value.work_count },
@@ -4751,6 +5716,7 @@ namespace {
                           "credit_importance_distribution",
                           "centrality_distribution",
                           "evidence_density_signals",
+                          "canonical_family_and_entity_subtype",
                           "two_hop_relation_paths_and_entities" } },
                       { "group_normalization", "independent_l1" },
                       { "proximity_is_not_identity_or_ontology", true } },
@@ -4781,7 +5747,8 @@ namespace {
             }
             for (const auto& [concept_id, weight] :
                  work->second.concept_weights) {
-                const entity_key concept_entity { "concept", concept_id };
+                const entity_key concept_entity
+                    = canonical_entity_key(corpus, "concept", concept_id);
                 if (!entity_pair_in_shard(
                         value.entity, concept_entity, options
                     )) {
@@ -5227,8 +6194,10 @@ namespace {
         };
         const auto [minimum, maximum] = std::ranges::minmax_element(overlaps);
         const double spread = *maximum - *minimum;
-        const entity_key left { "concept", pair.left };
-        const entity_key right { "concept", pair.right };
+        const entity_key left
+            = canonical_entity_key(corpus, "concept", pair.left);
+        const entity_key right
+            = canonical_entity_key(corpus, "concept", pair.right);
         const json details {
             { "all_works", values[0].direct_overlap },
             { "sufficiently_mined", values[1].direct_overlap },
@@ -5550,6 +6519,30 @@ namespace {
                     found->second.begin(), found->second.end(), 0.0
                 ) / static_cast<double>(found->second.size());
             }
+            std::size_t stable_neighbor_count = 0U;
+            for (const auto& [relation, neighbors] :
+                 concept_value.neighbors_by_relation) {
+                static_cast<void>(relation);
+                stable_neighbor_count += static_cast<std::size_t>(
+                    std::ranges::count_if(
+                        neighbors, [&](const std::string& neighbor_id) {
+                            const auto neighbor
+                                = stability.find(neighbor_id);
+                            if (neighbor == stability.end()
+                                || neighbor->second.empty()) {
+                                return false;
+                            }
+                            return std::accumulate(
+                                       neighbor->second.begin(),
+                                       neighbor->second.end(), 0.0
+                                   ) / static_cast<double>(
+                                       neighbor->second.size()
+                                   )
+                                >= 0.60;
+                        }
+                    )
+                );
+            }
             double maximum_medium_share = 1.0;
             std::size_t medium_count = 0U;
             if (const auto found = medium_profiles.find(concept_id);
@@ -5577,9 +6570,7 @@ namespace {
                     concept_value.assertions_by_work,
                     [](const auto& value) {
                         return std::ranges::any_of(
-                            value.second, [](const auto& assertion) {
-                                return !assertion.evidence_ids.empty();
-                            }
+                            value.second, assertion_has_supporting_evidence
                         );
                     }
                 ),
@@ -5600,9 +6591,8 @@ namespace {
             if (cohesion < 0.20 && maximum_containment[concept_id] >= 0.60) {
                 patterns.push_back("descriptive_modifier_like");
             }
-            if ((concept_value.concept_type == "theme"
-                 || concept_value.concept_type == "motif")
-                && medium_count > 1U) {
+            if (support_dimension <= 0.45 && cohesion >= 0.25
+                && continuity >= 0.20 && medium_count > 1U) {
                 patterns.push_back("recurring_motif_or_theme_like");
             }
             result.push_back(
@@ -5633,6 +6623,8 @@ namespace {
                             }
                         ) },
                       { "cluster_stability", cluster_stability },
+                      { "stable_explicit_neighbor_count",
+                        stable_neighbor_count },
                       { "medium_count", medium_count },
                       { "medium_spread", 1.0 - maximum_medium_share },
                       { "evidence_backed_work_fraction", evidence_coverage },
@@ -5650,16 +6642,27 @@ namespace {
     [[nodiscard]] json build_research_priorities(
         const corpus_data& corpus, const json& observations,
         const json& clusterings, const bridge_projection& bridges,
-        const json& cross_media, const json& centrality_diagnostics
+        const json& cross_media, const json& centrality_diagnostics,
+        const std::array<scope_data, 3>& quality_scopes
     ) {
         json priorities = json::array();
         for (const auto& [id, concept_value] : corpus.concepts) {
             std::size_t dated = 0U;
+            std::size_t supporting_evidence_works = 0U;
             for (const auto& work_id : concept_value.works) {
                 const auto work = corpus.works.find(work_id);
                 dated += work != corpus.works.end() && work->second.year_start
                     ? 1U
                     : 0U;
+                if (const auto assertions
+                    = concept_value.assertions_by_work.find(work_id);
+                    assertions != concept_value.assertions_by_work.end()) {
+                    supporting_evidence_works += std::ranges::any_of(
+                        assertions->second, assertion_has_supporting_evidence
+                    )
+                        ? 1U
+                        : 0U;
+                }
             }
             const double temporal_coverage
                 = safe_ratio(dated, concept_value.works.size());
@@ -5677,19 +6680,171 @@ namespace {
                           { "temporal_coverage", temporal_coverage } } } }
                 );
             }
-            if (concept_value.evidence_count == 0U) {
+            if (supporting_evidence_works == 0U) {
                 priorities.push_back(
                     { { "kind", "weak_evidence_coverage" },
                       { "entity_family", "concept" },
                       { "entity_id", id },
                       { "priority", 1.0 },
                       { "explanation",
-                        "No assertion evidence is visible in the analytical "
-                        "snapshot for this concept." },
+                        "No supporting assertion evidence is visible in the "
+                        "analytical snapshot for this concept; contradictory "
+                        "and contextual evidence remains separately visible." },
                       { "details",
                         { { "work_count", concept_value.works.size() },
+                          { "supporting_evidence_work_count",
+                            supporting_evidence_works },
                           { "evidence_count", concept_value.evidence_count },
-                          { "source_count", concept_value.source_count } } } }
+                          { "source_count", concept_value.source_count },
+                          { "evidence_stances",
+                            concept_value.evidence_stances } } } }
+                );
+            }
+
+            std::vector<std::pair<double, std::string>> weighted_works;
+            double total_weight = 0.0;
+            for (const auto& work_id : concept_value.works) {
+                const double weight
+                    = concept_value.work_weights.contains(work_id)
+                    ? concept_value.work_weights.at(work_id)
+                    : 1.0;
+                weighted_works.emplace_back(weight, work_id);
+                total_weight += weight;
+            }
+            std::ranges::sort(
+                weighted_works, [](const auto& left, const auto& right) {
+                    return std::tuple { -left.first, left.second }
+                        < std::tuple { -right.first, right.second };
+                }
+            );
+            const double maximum_work_share = weighted_works.empty()
+                ? 0.0
+                : safe_ratio(weighted_works.front().first, total_weight);
+            const double top_two_work_share = safe_ratio(
+                std::accumulate(
+                    weighted_works.begin(),
+                    std::next(
+                        weighted_works.begin(),
+                        static_cast<std::ptrdiff_t>(
+                            std::min<std::size_t>(2U, weighted_works.size())
+                        )
+                    ),
+                    0.0,
+                    [](const double total, const auto& value) {
+                        return total + value.first;
+                    }
+                ),
+                total_weight
+            );
+            double squared_share_sum = 0.0;
+            for (const auto& [weight, work_id] : weighted_works) {
+                static_cast<void>(work_id);
+                const double share = safe_ratio(weight, total_weight);
+                squared_share_sum += share * share;
+            }
+            const bool single_work_dominates
+                = weighted_works.size() >= 2U && maximum_work_share >= 0.60;
+            const bool two_works_dominate
+                = weighted_works.size() >= 4U && top_two_work_share >= 0.80;
+            if (single_work_dominates || two_works_dominate) {
+                json dominant_work_ids = json::array();
+                for (std::size_t index = 0U;
+                     index < std::min<std::size_t>(2U, weighted_works.size());
+                     ++index) {
+                    dominant_work_ids.push_back(weighted_works[index].second);
+                }
+                priorities.push_back(
+                    { { "kind",
+                        "concept_importance_concentrated_in_few_works" },
+                      { "entity_family", "concept" },
+                      { "entity_id", id },
+                      { "priority",
+                        std::max(maximum_work_share, top_two_work_share) },
+                      { "explanation",
+                        "The temporary weighted support for this concept is "
+                        "concentrated in one or two works; miners may check "
+                        "whether its apparent structural importance is "
+                        "corpus-sensitive." },
+                      { "details",
+                        { { "work_count", weighted_works.size() },
+                          { "weighted_support_total", total_weight },
+                          { "maximum_work_share", maximum_work_share },
+                          { "top_two_work_share", top_two_work_share },
+                          { "effective_work_count",
+                            squared_share_sum > 0.0
+                                ? json(1.0 / squared_share_sum)
+                                : json(nullptr) },
+                          { "dominant_work_ids",
+                            std::move(dominant_work_ids) },
+                          { "single_work_share_threshold", 0.60 },
+                          { "top_two_share_threshold", 0.80 },
+                          { "minimum_support_for_top_two_rule", 4 },
+                          { "canonical_importance_changed", false } } } }
+                );
+            }
+
+            const auto all_context = quality_scopes[0].contexts.find(id);
+            const std::size_t all_support
+                = quality_scopes[0].concept_frequency.contains(id)
+                ? quality_scopes[0].concept_frequency.at(id)
+                : 0U;
+            json scope_comparisons = json::array();
+            double maximum_role_change = 0.0;
+            if (all_context != quality_scopes[0].contexts.end()
+                && !all_context->second.empty() && all_support >= 3U) {
+                for (std::size_t index = 1U;
+                     index < quality_scopes.size(); ++index) {
+                    const auto scoped_context
+                        = quality_scopes[index].contexts.find(id);
+                    const std::size_t scoped_support
+                        = quality_scopes[index].concept_frequency.contains(id)
+                        ? quality_scopes[index].concept_frequency.at(id)
+                        : 0U;
+                    if (scoped_context == quality_scopes[index].contexts.end()
+                        || scoped_context->second.empty()
+                        || scoped_support < 2U) {
+                        continue;
+                    }
+                    const double similarity = cosine_similarity(
+                        all_context->second, scoped_context->second
+                    );
+                    const double role_change
+                        = std::clamp(1.0 - similarity, 0.0, 1.0);
+                    maximum_role_change
+                        = std::max(maximum_role_change, role_change);
+                    scope_comparisons.push_back(
+                        { { "scope", quality_scopes[index].name },
+                          { "all_works_support", all_support },
+                          { "scope_support", scoped_support },
+                          { "context_cosine_similarity", similarity },
+                          { "structural_role_change", role_change } }
+                    );
+                }
+            }
+            if (maximum_role_change >= 0.40) {
+                priorities.push_back(
+                    { { "kind", "concept_quality_scope_role_change" },
+                      { "entity_family", "concept" },
+                      { "entity_id", id },
+                      { "priority", maximum_role_change },
+                      { "explanation",
+                        "This concept's co-occurrence neighborhood changes "
+                        "substantially when sparse records are excluded; the "
+                        "difference is a quality-scope diagnostic, not a "
+                        "canonical reclassification." },
+                      { "details",
+                        { { "base_scope", quality_scopes[0].name },
+                          { "base_scope_support", all_support },
+                          { "comparison_metric", "cosine_similarity" },
+                          { "role_change_definition",
+                            "one_minus_context_cosine_similarity" },
+                          { "role_change_threshold", 0.40 },
+                          { "minimum_base_support", 3 },
+                          { "minimum_comparison_scope_support", 2 },
+                          { "scope_comparisons",
+                            std::move(scope_comparisons) },
+                          { "canonical_concept_type_changed", false },
+                          { "canonical_relations_changed", false } } } }
                 );
             }
         }
@@ -5706,14 +6861,15 @@ namespace {
                     continue;
                 }
                 dated += work->second.year_start ? 1U : 0U;
-                evidence_backed
-                    += !work->second.evidence_ids.empty() ? 1U : 0U;
+                evidence_backed += work_has_supporting_evidence(work->second)
+                    ? 1U
+                    : 0U;
                 media.emplace(work->second.medium);
             }
             const double dated_fraction = safe_ratio(dated, agent.works.size());
             const double evidence_fraction
                 = safe_ratio(evidence_backed, agent.works.size());
-            if (dated_fraction < 0.60 || evidence_fraction < 0.40) {
+            if (dated_fraction < 0.60 || evidence_fraction <= 0.40) {
                 priorities.push_back(
                     { { "kind", "weakly_mined_trajectory_agent" },
                       { "entity_family", "agent" },
@@ -6182,7 +7338,7 @@ namespace {
         );
         json research_priorities = build_research_priorities(
             corpus, observations, clusterings, bridges, cross_media,
-            centrality_diagnostics
+            centrality_diagnostics, scopes
         );
         json views = build_views(observations, trajectory_signatures, bridges);
         std::map<std::string, std::size_t, std::less<>> metric_counts;
@@ -6203,6 +7359,194 @@ namespace {
             quality_counts[work.quality_tier]
                 = quality_counts.at(work.quality_tier).get<std::size_t>() + 1U;
         }
+        const json analytical_parameters {
+            { "canonical_assertion_weighting",
+              { { "centrality_transform",
+                  "clamp(canonical_centrality/100,0.01,1.0)" },
+                { "missing_centrality_relation_priors",
+                  { { "exemplifies", 1.0 },
+                    { "anticipates", 0.9 },
+                    { "influences", 0.9 },
+                    { "influenced_by", 0.9 },
+                    { "revives", 0.9 },
+                    { "contains", 0.8 },
+                    { "deconstructs", 0.8 },
+                    { "parodies", 0.8 },
+                    { "unlisted_relation", 0.7 } } },
+                { "weights_are_temporary", true },
+                { "canonical_values_written", false } } },
+            { "credit_weighting",
+              { { "importance_priors",
+                  { { "primary", 1.0 }, { "key", 0.82 },
+                    { "supporting", 0.55 },
+                    { "unspecified", 0.70 },
+                    { "unlisted_importance", 0.70 } } },
+                { "role_priors",
+                  { { "artist", 1.0 }, { "author", 1.0 },
+                    { "director", 1.0 }, { "composer", 1.0 },
+                    { "writer", 1.0 }, { "creator", 1.0 },
+                    { "designer", 0.92 }, { "performer", 0.86 },
+                    { "producer", 0.78 }, { "editor", 0.76 },
+                    { "cinematographer", 0.76 },
+                    { "unspecified", 0.72 },
+                    { "unlisted_role", 0.72 } } },
+                { "combination", "importance_prior*role_prior" },
+                { "multiple_work_credits", "maximum_weight" },
+                { "weights_are_temporary", true },
+                { "canonical_credit_values_written", false } } },
+            { "work_quality_scopes",
+              { { "score_features",
+                  { { "dated", 1 }, { "has_label", 1 },
+                    { "has_external_identifier", 1 },
+                    { "has_credit", 1 },
+                    { "at_least_two_concepts", 1 },
+                    { "has_measurement", 1 },
+                    { "has_supporting_evidence", 2 },
+                    { "has_supporting_source", 1 } } },
+                { "sufficiently_mined_minimum_score", 4 },
+                { "evidence_rich_minimum_score", 6 },
+                { "evidence_rich_requires_supporting_evidence_and_source",
+                  true },
+                { "quality_is_completeness_not_historical_truth", true },
+                { "canonical_quality_written", false } } },
+            { "bootstrap",
+              { { "removed_work_fraction", bootstrap_removed_fraction },
+                { "stable_partition_denominator", 10'000 },
+                { "cluster_member_unstable_below", 0.75 } } },
+            { "sequence_alignment",
+              { { "bucket_similarity", "weighted_jaccard" },
+                { "same_year_order_invented", false },
+                { "global_gap_penalty", -0.35 },
+                { "global_substitution", "2*similarity-1" },
+                { "local_gap_penalty", -0.40 },
+                { "local_substitution", "2*similarity-0.8" },
+                { "time_warp_cost", "1-weighted_jaccard" },
+                { "time_warp_step_pattern", "symmetric_1" } } },
+            { "trajectory_signature_thresholds",
+              { { "highly_parallel_trajectory",
+                  { { "minimum_global_alignment", 0.70 },
+                    { "maximum_absolute_temporal_offset_years", 3.0 } } },
+                { "temporally_shifted_trajectory",
+                  { { "minimum_global_alignment", 0.60 },
+                    { "minimum_absolute_temporal_offset_years_exclusive",
+                      3.0 } } },
+                { "shared_local_trajectory_fragment",
+                  { { "minimum_local_alignment", 0.65 },
+                    { "maximum_global_alignment_exclusive", 0.60 } } },
+                { "similar_repertoire_different_order",
+                  { { "minimum_repertoire_similarity", 0.65 },
+                    { "maximum_order_similarity_exclusive", 0.50 } } },
+                { "converging_trajectory",
+                  { { "minimum_change", 0.25 },
+                    { "minimum_terminal_similarity", 0.50 } } },
+                { "diverging_trajectory",
+                  { { "minimum_change", 0.25 },
+                    { "minimum_initial_similarity", 0.50 } } },
+                { "bridge_trajectory",
+                  { { "minimum_bridge_strength", 0.25 } } },
+                { "thresholds_are_disposable", true } } },
+            { "concept_graph",
+              { { "edge_weight",
+                  "0.55*direct_overlap+0.45*positive_rarity_association" },
+                { "clustering_thresholds", { 0.20, 0.40, 0.60 } },
+                { "boundary_membership_below", 0.60 },
+                { "mixed_family_clustering_thresholds", { 0.45, 0.65 } },
+                { "fingerprint_comparison_minimum", 0.25 } } },
+            { "ancestry",
+              { { "maximum_backward_cone_depth", 3 },
+                { "little_shared_ancestry_maximum", 0.20 },
+                { "cross_branch_topology_similarity_minimum", 0.50 },
+                { "chronology_is_documented_influence", false } } },
+            { "cross_media",
+              { { "same_concept_substructure_context_below", 0.20 },
+                { "same_concept_substructure_shape_below", 0.35 },
+                { "synchronised_absolute_lag_years_maximum", 3.0 },
+                { "clustering_threshold", 0.20 },
+                { "cheap_candidate_bucket_maximum", 256 },
+                { "chronology_is_causation", false },
+                { "popularity_signal_used", false } } },
+            { "centrality_diagnostics",
+              { { "bands", { 75, 90, 95, 100 } },
+                { "concept_saturation_minimum_assignments", 2 },
+                { "concept_exact_100_saturation_proportion", 0.75 },
+                { "concept_at_least_95_saturation_proportion", 0.90 },
+                { "global_at_least_95_saturation_proportion", 0.75 },
+                { "material_weighting_delta", 0.15 },
+                { "negligible_weighting_delta", 0.02 },
+                { "canonical_values_recalibrated", false } } },
+            { "genre_like_pattern_thresholds",
+              { { "broad_umbrella_like",
+                  { { "minimum_relative_work_support", 0.60 },
+                    { "minimum_asymmetric_containment", 0.60 } } },
+                { "narrow_subgenre_like",
+                  { { "maximum_relative_work_support", 0.35 },
+                    { "minimum_context_cohesion", 0.35 },
+                    { "minimum_neighbor_separation", 0.35 } } },
+                { "sibling_microgenre_like",
+                  { { "maximum_relative_work_support", 0.20 },
+                    { "minimum_context_cohesion", 0.45 } } },
+                { "descriptive_modifier_like",
+                  { { "maximum_context_cohesion_exclusive", 0.20 },
+                    { "minimum_asymmetric_containment", 0.60 } } },
+                { "recurring_motif_or_theme_like",
+                  { { "maximum_relative_work_support", 0.45 },
+                    { "minimum_context_cohesion", 0.25 },
+                    { "minimum_temporal_continuity", 0.20 },
+                    { "minimum_medium_count", 2 } } },
+                { "canonical_concept_type_changed", false } } },
+            { "research_priority_thresholds",
+              { { "weak_concept_minimum_work_count", 3 },
+                { "weak_concept_temporal_coverage", 0.40 },
+                { "weak_agent_dated_fraction", 0.60 },
+                { "weak_agent_evidence_fraction", 0.40 },
+                { "weak_cross_media_support_ratio", 0.40 },
+                { "cross_media_bridge_strength", 0.20 },
+                { "unstable_relationship_stddev", 0.10 },
+                { "unstable_relationship_maximum_support", 2 },
+                { "relationship_maximum_work_share", 0.75 },
+                { "quality_scope_pair_spread", 0.25 },
+                { "concept_single_work_share", 0.60 },
+                { "concept_top_two_work_share", 0.80 },
+                { "concept_top_two_minimum_work_count", 4 },
+                { "concept_quality_scope_role_change", 0.40 },
+                { "concept_quality_scope_minimum_base_support", 3 },
+                { "concept_quality_scope_minimum_comparison_support", 2 } } },
+            { "parameter_status",
+              { { "calibrated_probabilities", false },
+                { "permanent_cultural_semantics", false },
+                { "adjustable_in_future_versions", true } } },
+        };
+        const json evidence_semantics {
+            { "evidence_and_source_ids_reference_canonical_records", true },
+            { "quotes_or_citations_duplicated_into_observations", false },
+            { "stance_counts_preserved", true },
+            { "supporting_evidence_definition",
+              "explicit supports stance, or legacy evidence with no stance "
+              "metadata" },
+            { "contradicts_counts_as_supporting", false },
+            { "contextualizes_counts_as_supporting", false },
+            { "absence_of_support_is_contradiction", false },
+            { "historical_acceptance_vs_scene_or_community_usage",
+              { { "status", "unavailable_in_normalized_structural_input" },
+                { "canonical_schema_support",
+                  "not_represented_in_product_v6" },
+                { "available_explicit_category_count", 0 },
+                { "inferred_from_source_type_or_text", false },
+                { "semantic_categories_collapsed", false },
+                { "future_explicit_categories_may_be_preserved", true },
+                { "canonical_evidence_written", false } } },
+        };
+        const json external_classification_calibration {
+            { "status", "not_supplied" },
+            { "optional", true },
+            { "used_by_this_run", false },
+            { "treated_as_ground_truth", false },
+            { "popularity_or_platform_usage_used", false },
+            { "canonical_values_written", false },
+            { "policy",
+              "Future external classifications may be compared as optional "
+              "calibration signals only, never as canonical ground truth." },
+        };
         const json manifest {
             { "entity_counts",
               { { "work", corpus.works.size() },
@@ -6217,11 +7561,17 @@ namespace {
                 { { "name", scopes[2].name },
                   { "work_count", scopes[2].works.size() } } } },
             { "metrics", std::move(metric_manifest) },
+            { "analytical_parameters", analytical_parameters },
+            { "evidence_semantics", evidence_semantics },
+            { "external_classification_calibration",
+              external_classification_calibration },
             { "candidate_generation",
               { { "concept_pairs",
                   "direct_work_cooccurrence_plus_explicit_relation_neighbors" },
                 { "sequence_pairs", "nonzero_repertoire_overlap" },
                 { "cross_family_pairs", "typed_fingerprint_overlap" },
+                { "cross_media_pairs",
+                  "all_concept_medium_channels_then_cheap_structural_rank" },
                 { "direct_cooccurrence_concept_pairs",
                   pair_selection.direct_cooccurrence_count },
                 { "explicit_relation_concept_pairs",
@@ -6274,15 +7624,61 @@ namespace {
                 { "bootstrap_end", options.bootstrap_end },
                 { "bootstrap_runs_independently_executable", true },
                 { "shard_pairwise_measurements", true },
+                { "raw_shard_observations_unionable", true },
+                { "raw_observation_identity",
+                  { "left_family", "left_id", "right_family", "right_id",
+                    "algorithm", "metric", "scope", "left_channel",
+                    "right_channel", "parameters", "details" } },
                 { "partitioned_pairwise_sections",
                   { "observations", "trajectory_signatures",
+                    "cross_media.same_concept_comparisons",
+                    "cross_media.cross_concept_comparisons",
                     "ancestry.chronological.edges",
                     "ancestry.chronological.comparisons" } },
                 { "replicated_entity_sections",
                   { "work_quality", "sequences", "structural_fingerprints" } },
+                { "replicated_global_projection_sections",
+                  { "cross_media.medium_precedence_summaries",
+                    "cross_media.synchronized_medium_summaries",
+                    "cross_media.undominated_multi_medium_clusters" } },
+                { "replicated_section_validation",
+                  "The distributed finalizer validates common contract, "
+                  "algorithm, snapshot, parameters, and limits, then "
+                  "recomputes rather than retaining shard projections." },
                 { "shard_local_global_projections",
                   { "ancestry.views", "clusterings", "research_priorities",
-                    "views" } },
+                    "views", "cross_media.clusterings",
+                    "cross_media.clustering_disagreements",
+                    "centrality_diagnostics.weighting_sensitivity",
+                    "genre_like_signatures", "mixed_family_structure" } },
+                { "aggregate_recompute_required_after_shard_union", true },
+                { "shard_local_projections_must_not_be_unioned", true },
+                { "unioned_raw_rows_are_not_final_aggregate_projections",
+                  true },
+                { "aggregate_recompute_input",
+                  "a validated complete shard union plus the same canonical "
+                  "normalized input and requested analytical parameters" },
+                { "aggregate_recompute_entry_point",
+                  "structural_hint_planner::"
+                  "finalize_distributed_aggregate" },
+                { "single_process_full_rebuild_entry_point",
+                  "structural_hint_planner::"
+                  "rebuild_aggregate_from_normalized_input" },
+                { "aggregate_recompute_forces",
+                  { { "shard_index", 0 }, { "shard_count", 1 } } },
+                { "aggregate_recompute_retains_requested_limits", true },
+                { "aggregate_recompute_retains_bootstrap_range", true },
+                { "aggregate_recompute_validates_normalized_input",
+                  "through the normal full structural planner parse and "
+                  "validation path" },
+                { "recommended_distributed_finalization",
+                  { "validate_equal_snapshot_algorithm_parameters_and_limits",
+                    "union partitioned raw rows by raw_observation_identity",
+                    "validate the complete union against a deterministic full "
+                    "recomputation",
+                    "discard shard-local aggregate projections",
+                    "return validated union rows in deterministic full-result "
+                    "order" } },
                 { "deterministic", true } } },
             { "semantic_policy",
               { { "observations_are_authoritative_relations", false },
@@ -6319,7 +7715,18 @@ namespace {
 json structural_hint_planner::build(
     const json& input, const structural_hint_options options
 ) {
-    return build_analysis(input, options);
+    return detail::attach_external_classification_comparison(
+        build_analysis(input, options), input,
+        structural_hint_external_inputs {}
+    );
+}
+
+json structural_hint_planner::rebuild_aggregate_from_normalized_input(
+    const json& input, structural_hint_options options
+) {
+    options.shard_index = 0U;
+    options.shard_count = 1U;
+    return build(input, options);
 }
 
 } // namespace arachne::ariadne

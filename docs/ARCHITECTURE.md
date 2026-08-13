@@ -35,6 +35,27 @@ calculations use only disposable derived state. One process may host all actors,
 but cross-actor data still uses versioned contracts rather than private storage
 access.
 
+## Canonical semantic write boundary
+
+Algorithms may observe, compare, rank, cluster, align, and produce disposable
+hints, but they never treat a score or threshold as permission to update the
+canonical product. In particular, calculated centrality, confidence, historical
+role, concept type, assignments, relations, agent data, evidence, and source
+references are not written back. A hint is not a draft batch and is never
+converted or applied as one automatically. The only semantic path is:
+
+```text
+algorithm -> disposable observation or hint -> human review and research
+          -> human-authored product batch -> normal validation
+          -> explicit batch apply -> canonical product database
+```
+
+An explicitly supplied batch may of course be validated and applied by the
+normal pipeline. Schema migrations are a narrower mechanical exception: they
+may change representation while preserving meaning, but must not recalibrate or
+reinterpret mined values. A changed cultural or research interpretation belongs
+in a human-authored, sourced batch.
+
 Pheidippides has an internal, declarative door registry rather than source logic.
 Global defaults are narrowed or overridden per door and endpoint before network
 work. Endpoint policy declares URL scope, methods, protocol mechanics, independent
@@ -133,6 +154,35 @@ Directional measurements retain their direction. Cross-family proximity and
 trajectory signatures are never identity evidence, and computed containment,
 ancestry, bridges, clusters, or temporal order never become canonical
 relationships. Existing merge candidates remain the dedicated identity subset.
+
+Optional external genre-hierarchy data crosses into Ariadne through a separate
+analytical input, not through the strict normalized merge-hint contract and not
+through Penelope's product schema. Its nodes must already be mapped to canonical
+concept IDs. The resulting agreement/disagreement rows preserve the provider,
+dataset version, raw support, and directional containment measurements while
+explicitly declaring that they are uncalibrated, disposable, and not ground
+truth. They cannot alter canonical concept types, assertions, or relations.
+
+Distributed structural artifacts are also disposable. A distributed aggregate
+is accepted only after one artifact for every shard index has been validated
+against a common algorithm, product snapshot, bootstrap range, limits, and
+parameters. Ariadne unions the declared partitioned rows, rejects incomplete or
+conflicting unions, discards shard-local projections, and recomputes aggregate
+clusters, views, and research priorities from the same read-only normalized
+snapshot. No HPC or finalization path has product-database write authority.
+
+Structural analysis is research-neutral. Temporary selections are exploration
+context rather than a durable taste profile, and neither mainstream popularity
+nor moral approval is a structural-importance signal. Obscure, peripheral,
+underground, taboo, exploitation, outsider, and other niche material remains
+ordinary analytical data. Browser-local recommendation preferences are a
+separate presentation feature and do not feed the structural hint store.
+
+The canonical and analytical scope remains art, works, agents, concepts,
+chronology, relationships, and evidence. General historical events and external
+taxonomies may inform sources, mining leads, or separate tools, but they do not
+expand the product into a general world-history ontology or a Wikidata
+replacement by default.
 
 ## Candidate graph and viewer
 

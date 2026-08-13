@@ -67,6 +67,7 @@ struct credit_record final {
     std::string normalized_role;
     std::string importance;
     std::optional<normalized_text> credited_as;
+    std::optional<int> credit_order;
 };
 
 struct measurement_record final {
@@ -665,9 +666,11 @@ template <typename T>
         value,
         family == "agent"
             ? std::set<std::string_view, std::less<>> {
-                  "work_id", "role", "importance", "credited_as" }
+                  "work_id", "role", "importance", "credited_as",
+                  "credit_order" }
             : std::set<std::string_view, std::less<>> {
-                  "agent_id", "role", "importance", "credited_as" },
+                  "agent_id", "role", "importance", "credited_as",
+                  "credit_order" },
         context
     );
     credit_record result;
@@ -680,6 +683,9 @@ template <typename T>
     result.role = value.value("role", "");
     result.normalized_role = normalized_role(result.role);
     result.importance = value.value("importance", "supporting");
+    result.credit_order = optional_integer<int>(
+        value, "credit_order", context
+    );
     if (const auto credited = value.find("credited_as");
         credited != value.end() && !credited->is_null()) {
         if (!credited->is_string()
@@ -792,7 +798,11 @@ template <typename T>
     const json& value, const std::string_view context
 ) {
     require_only_fields(
-        value, { "concept_id", "relation_type", "direction" }, context
+        value,
+        { "concept_id", "relation_type", "direction", "relation_id",
+          "strength", "from_year", "to_year", "region_code", "confidence",
+          "evidence_ids", "source_ids", "evidence" },
+        context
     );
     if (const auto direction = value.find("direction");
         direction != value.end()
@@ -817,7 +827,7 @@ template <typename T>
     require_only_fields(
         value,
         { "id", "family", "labels", "external_ids", "agent", "work",
-          "concept" },
+          "concept", "entity_type" },
         context
     );
     entity_record result;
@@ -904,7 +914,7 @@ template <typename T>
     }
     if (result.family == "agent") {
         require_only_fields(
-            *payload, { "birth_year", "death_year", "credits" },
+            *payload, { "agent_type", "birth_year", "death_year", "credits" },
             context + ".agent"
         );
         result.birth_year = optional_integer<int>(
@@ -917,6 +927,7 @@ template <typename T>
         require_only_fields(
             *payload,
             { "medium", "year_start", "year_end", "date_precision", "credits",
+              "date_start_text", "date_end_text", "date_qualifier",
               "concept_ids", "measurements" },
             context + ".work"
         );

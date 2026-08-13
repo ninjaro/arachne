@@ -1,5 +1,9 @@
 import type {
   AggregateMembership,
+  ContextPathProvenance,
+  ContextTraversalState,
+  DirectionalReachInfo,
+  ReachReason,
   VisibleEvolution,
   VisibleEvolutionTag,
   VisibleEvolutionWork,
@@ -334,6 +338,101 @@ function groupAggregateMembershipsByStation(
   return result;
 }
 
+interface EvolutionProjectionReferenceScope {
+  tagIds: ReadonlySet<EntityId>;
+  workIds: ReadonlySet<EntityId>;
+  stationIds: ReadonlySet<string>;
+}
+
+function contextReferencesAvailable(
+  context: ContextPathProvenance | undefined,
+  scope: EvolutionProjectionReferenceScope,
+): boolean {
+  if (!context) return true;
+  if (
+    (context.originStationId && !scope.stationIds.has(context.originStationId)) ||
+    (context.entryStationId && !scope.stationIds.has(context.entryStationId))
+  ) {
+    return false;
+  }
+  return context.path.every(
+    (step) =>
+      scope.tagIds.has(step.tagId) &&
+      (!step.sourceStationId || scope.stationIds.has(step.sourceStationId)) &&
+      (!step.targetStationId || scope.stationIds.has(step.targetStationId)),
+  );
+}
+
+function reasonReferencesAvailable(
+  reason: ReachReason,
+  scope: EvolutionProjectionReferenceScope,
+): boolean {
+  if (!scope.tagIds.has(reason.seedTagId)) return false;
+  if (
+    "viaTagId" in reason &&
+    !scope.tagIds.has(reason.viaTagId)
+  ) {
+    return false;
+  }
+  if ("tagId" in reason && !scope.tagIds.has(reason.tagId)) return false;
+  if (
+    "fromWorkId" in reason &&
+    !scope.workIds.has(reason.fromWorkId)
+  ) {
+    return false;
+  }
+  if ("workId" in reason && !scope.workIds.has(reason.workId)) return false;
+  if (
+    "sourceStationId" in reason &&
+    reason.sourceStationId &&
+    !scope.stationIds.has(reason.sourceStationId)
+  ) {
+    return false;
+  }
+  if (
+    "targetStationId" in reason &&
+    reason.targetStationId &&
+    !scope.stationIds.has(reason.targetStationId)
+  ) {
+    return false;
+  }
+  return contextReferencesAvailable(
+    "context" in reason ? reason.context : undefined,
+    scope,
+  );
+}
+
+function sanitizeReach<T extends DirectionalReachInfo>(
+  reach: T,
+  scope: EvolutionProjectionReferenceScope,
+): T {
+  return {
+    ...reach,
+    seedTagIds: reach.seedTagIds.filter((tagId) => scope.tagIds.has(tagId)),
+    reasons: reach.reasons.filter((reason) =>
+      reasonReferencesAvailable(reason, scope),
+    ),
+  };
+}
+
+function contextStateReferencesAvailable(
+  state: ContextTraversalState,
+  scope: EvolutionProjectionReferenceScope,
+): boolean {
+  return (
+    scope.tagIds.has(state.tagId) &&
+    scope.tagIds.has(state.seedTagId) &&
+    scope.stationIds.has(state.originStationId) &&
+    scope.stationIds.has(state.entryStationId) &&
+    state.path.every(
+      (step) =>
+        scope.tagIds.has(step.tagId) &&
+        (!step.sourceStationId || scope.stationIds.has(step.sourceStationId)) &&
+        (!step.targetStationId || scope.stationIds.has(step.targetStationId)),
+    )
+  );
+}
+
 /**
  * Derive the layout/render projection without changing the fully filtered
  * traversal result. The canonical domain and the eligible projection remain
@@ -346,11 +445,13 @@ export function projectVisibleEvolutionTrajectories(
   const acceptedTagIds = new Set(
     [...selectedTagIds].filter((tagId) => source.tagById.has(tagId)),
   );
-  const tags = source.tags
+  const selectedTags = source.tags
     .filter((tag) => acceptedTagIds.has(tag.tag.id))
     .map((tag) => ({ ...tag }));
-  const stationIds = new Set(tags.flatMap((tag) => tag.stationIds));
-  const stations = source.stations
+  const stationIds = new Set(
+    selectedTags.flatMap((tag) => tag.stationIds),
+  );
+  const selectedStations = source.stations
     .filter((station) => stationIds.has(station.id))
     .map((station) => ({
       ...station,
@@ -359,39 +460,117 @@ export function projectVisibleEvolutionTrajectories(
       ),
     }))
     .filter((station) => station.visibleTagIds.length > 0);
-  const acceptedStationIds = new Set(stations.map((station) => station.id));
-  const workIds = new Set(stations.flatMap((station) => station.workIds));
-  const works: VisibleEvolutionWork[] = source.works
-    .filter((work) => workIds.has(work.work.id))
+  const acceptedStationIds = new Set(
+    selectedStations.map((station) => station.id),
+  );
+  const stationWorkIds = new Set(
+    selectedStations.flatMap((station) => station.workIds),
+  );
+  const selectedWorks = source.works
+    .filter((work) => stationWorkIds.has(work.work.id))
     .map((work) => ({
       ...work,
       visibleTagIds: work.visibleTagIds.filter((tagId) =>
         acceptedTagIds.has(tagId),
       ),
     }));
+  const acceptedWorkIds = new Set(
+    selectedWorks.map((work) => work.work.id),
+  );
+  const scope: EvolutionProjectionReferenceScope = {
+    tagIds: acceptedTagIds,
+    workIds: acceptedWorkIds,
+    stationIds: acceptedStationIds,
+  };
+  const tags = selectedTags.map((tag) => ({
+    ...sanitizeReach(tag, scope),
+    workIds: tag.workIds.filter((workId) => acceptedWorkIds.has(workId)),
+    stationIds: tag.stationIds.filter((stationId) =>
+      acceptedStationIds.has(stationId),
+    ),
+    origin: {
+      ...tag.origin,
+      targetWorkIds: tag.origin.targetWorkIds.filter((workId) =>
+        acceptedWorkIds.has(workId),
+      ),
+      targetStationIds: tag.origin.targetStationIds.filter((stationId) =>
+        acceptedStationIds.has(stationId),
+      ),
+    },
+  }));
+  const works: VisibleEvolutionWork[] = selectedWorks.map((work) =>
+    sanitizeReach(work, scope),
+  );
+  const stations = selectedStations.map((station) => {
+    const workIds = station.workIds.filter((workId) =>
+      acceptedWorkIds.has(workId),
+    );
+    return {
+      ...sanitizeReach(station, scope),
+      workIds,
+      workCount: workIds.length,
+      reach: sanitizeReach(station.reach, scope),
+    };
+  });
   const memberships = source.memberships.filter(
     (membership) =>
-      acceptedTagIds.has(membership.tagId) && workIds.has(membership.workId),
-  );
+      acceptedTagIds.has(membership.tagId) &&
+      acceptedWorkIds.has(membership.workId),
+  ).map((membership) => sanitizeReach(membership, scope));
   const aggregateMemberships = source.aggregateMemberships.filter(
     (membership) =>
       acceptedTagIds.has(membership.tagId) &&
       acceptedStationIds.has(membership.stationId),
-  );
+  ).map((membership) => ({
+    ...sanitizeReach(membership, scope),
+    strengthSummary: {
+      ...membership.strengthSummary,
+      maxWorkIds: membership.strengthSummary.maxWorkIds.filter((workId) =>
+        acceptedWorkIds.has(workId),
+      ),
+      memberships: membership.strengthSummary.memberships.filter(
+        (sourceMembership) =>
+          acceptedTagIds.has(sourceMembership.tagId) &&
+          acceptedWorkIds.has(sourceMembership.workId) &&
+          acceptedStationIds.has(sourceMembership.stationId),
+      ),
+    },
+    reach: sanitizeReach(membership.reach, scope),
+  }));
   const stationIdByWorkId = new Map(
     [...source.stationIdByWorkId].filter(
       ([workId, stationId]) =>
-        workIds.has(workId) && acceptedStationIds.has(stationId),
+        acceptedWorkIds.has(workId) && acceptedStationIds.has(stationId),
     ),
   );
   const explicitRelations = source.explicitRelations.filter(
-    (relation) => workIds.has(relation.sourceId) && workIds.has(relation.targetId),
-  );
-  const aggregateRelations = source.aggregateRelations.filter(
     (relation) =>
-      acceptedStationIds.has(relation.sourceStationId) &&
-      acceptedStationIds.has(relation.targetStationId),
+      acceptedWorkIds.has(relation.sourceId) &&
+      acceptedWorkIds.has(relation.targetId),
   );
+  const aggregateRelations = source.aggregateRelations
+    .filter(
+      (relation) =>
+        acceptedStationIds.has(relation.sourceStationId) &&
+        acceptedStationIds.has(relation.targetStationId),
+    )
+    .map((relation) => {
+      const relations = relation.relations.filter(
+        (sourceRelation) =>
+          acceptedWorkIds.has(sourceRelation.sourceId) &&
+          acceptedWorkIds.has(sourceRelation.targetId),
+      );
+      return {
+        ...relation,
+        relations,
+        relationTypes: [
+          ...new Set(relations.map((sourceRelation) =>
+            sourceRelation.relationType,
+          )),
+        ].sort(),
+      };
+    })
+    .filter((relation) => relation.relations.length > 0);
 
   return {
     ...source,
@@ -414,11 +593,13 @@ export function projectVisibleEvolutionTrajectories(
       aggregateMemberships,
     ),
     aggregateRelations,
-    traversalStates: source.traversalStates.filter((state) =>
-      acceptedTagIds.has(state.tagId),
+    traversalStates: source.traversalStates.filter(
+      (state) =>
+        acceptedTagIds.has(state.tagId) &&
+        acceptedStationIds.has(state.stopId),
     ),
     contextTraversalStates: source.contextTraversalStates.filter((state) =>
-      acceptedTagIds.has(state.tagId),
+      contextStateReferencesAvailable(state, scope),
     ),
     temporalTagStops: source.temporalTagStops
       .filter((stop) => acceptedTagIds.has(stop.tagId))
@@ -443,6 +624,36 @@ export function selectVisibleEvolutionTrajectories(
   const requiredTagIds = new Set(options.requiredTagIds ?? []);
   for (const tag of eligible.tags) {
     if (tag.seed) requiredTagIds.add(tag.tag.id);
+  }
+  const eligibleTagIds = new Set(eligible.tags.map((tag) => tag.tag.id));
+  const protectReason = (reason: VisibleEvolutionTag["reasons"][number]) => {
+    for (const tagId of [
+      reason.seedTagId,
+      "viaTagId" in reason ? reason.viaTagId : undefined,
+      "tagId" in reason ? reason.tagId : undefined,
+    ]) {
+      if (tagId && eligibleTagIds.has(tagId)) requiredTagIds.add(tagId);
+    }
+    if ("context" in reason) {
+      for (const step of reason.context?.path ?? []) {
+        if (eligibleTagIds.has(step.tagId)) requiredTagIds.add(step.tagId);
+      }
+    }
+  };
+  /* Preserve only the direct path dependencies of explicitly protected
+   * trajectories. Iterating this snapshot once is deliberate: dependencies do
+   * not recursively pull their complete neighborhoods through the cap. */
+  for (const tagId of [...requiredTagIds]) {
+    const tag = eligible.tagById.get(tagId);
+    if (!tag) continue;
+    for (const reason of tag.reasons) protectReason(reason);
+    for (const state of eligible.contextTraversalStates) {
+      if (state.tagId !== tagId) continue;
+      if (eligibleTagIds.has(state.seedTagId)) requiredTagIds.add(state.seedTagId);
+      for (const step of state.path) {
+        if (eligibleTagIds.has(step.tagId)) requiredTagIds.add(step.tagId);
+      }
+    }
   }
   const selection = selectTrajectoryCandidates(
     buildConceptTrajectoryCandidates(eligible),

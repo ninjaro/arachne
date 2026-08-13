@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <string_view>
+#include <vector>
 
 namespace arachne::ariadne {
 
@@ -39,6 +40,15 @@ struct structural_hint_options final {
     std::size_t cluster_disagreement_pair_limit = 200'000;
 };
 
+/** Optional, disposable inputs that are never part of canonical product data. */
+struct structural_hint_external_inputs final {
+    /**
+     * An optional mapped external hierarchy used only to compare analytical
+     * containment with externally supplied broader/narrower classifications.
+     */
+    nlohmann::json genre_hierarchy = nullptr;
+};
+
 /**
  * Build a deterministic, disposable structural analysis over the same closed
  * snapshot input used by the identity-oriented merge-hint planner.
@@ -50,6 +60,44 @@ class structural_hint_planner final {
 public:
     [[nodiscard]] static nlohmann::json
     build(const nlohmann::json& input, structural_hint_options options = {});
+
+    [[nodiscard]] static nlohmann::json build(
+        const nlohmann::json& input, structural_hint_options options,
+        const structural_hint_external_inputs& external_inputs
+    );
+
+    /**
+     * Run a single-process full rebuild from canonical normalized input.
+     *
+     * This deliberately does not accept or validate shard output. Use
+     * finalize_distributed_aggregate for a distributed run.
+     */
+    [[nodiscard]] static nlohmann::json rebuild_aggregate_from_normalized_input(
+        const nlohmann::json& input, structural_hint_options options = {}
+    );
+
+    [[nodiscard]] static nlohmann::json rebuild_aggregate_from_normalized_input(
+        const nlohmann::json& input, structural_hint_options options,
+        const structural_hint_external_inputs& external_inputs
+    );
+
+    /**
+     * Validate a complete union of deterministic shard output, discard every
+     * shard-local aggregate projection, and recompute one aggregate result.
+     * The returned partitioned rows come from the validated shard union.
+     */
+    [[nodiscard]] static nlohmann::json finalize_distributed_aggregate(
+        const nlohmann::json& input,
+        const std::vector<nlohmann::json>& shard_outputs,
+        structural_hint_options options = {}
+    );
+
+    [[nodiscard]] static nlohmann::json finalize_distributed_aggregate(
+        const nlohmann::json& input,
+        const std::vector<nlohmann::json>& shard_outputs,
+        structural_hint_options options,
+        const structural_hint_external_inputs& external_inputs
+    );
 };
 
 } // namespace arachne::ariadne

@@ -44,7 +44,7 @@ python3 scripts/arachne_ops.py capabilities
 | `product-taste-index` | `arachne product taste-index --config CONFIG --product-snapshot CONTROL [--output FILE|-] [--compact]` |
 | `candidate-plan` | `arachne candidate plan --config CONFIG --external-graph JSON --product-snapshot PRODUCT_SNAPSHOT_CONTROL --output-artifact PATH --output-control PATH` |
 | `candidate-rebuild` | `arachne candidate rebuild --config CONFIG --plan-control FILE --run-id ID` |
-| `viewer-build` | `arachne viewer build --config CONFIG --product-snapshot CONTROL [--candidate-snapshot CONTROL]` |
+| `viewer-build` | `arachne viewer build --config CONFIG --product-snapshot CONTROL [--candidate-snapshot CONTROL] [--merge-hints FILE --merge-hint-decisions FILE]` |
 
 `--print-command` resolves and quotes argv without requiring a built binary. Actual
 execution always performs capability negotiation.
@@ -194,6 +194,34 @@ replicated. Aggregate views, research priorities, ancestry anomaly views, and
 clusterings are explicitly shard-local and must be recomputed in a final full
 projection after distributed measurements finish. The analysis manifest records
 these quota and merge semantics.
+
+Distributed callers finalize with
+`structural_hint_planner::finalize_distributed_aggregate`. The finalizer
+requires exactly one artifact for every declared shard index, verifies their
+contract, product snapshot, algorithm, bootstrap range, limits, and shared
+parameters, and materializes the union of every declared partitioned section.
+It rejects missing, duplicate, conflicting, or unexpected raw rows by comparing
+that union with a deterministic single-shard recomputation over the same
+normalized input. Shard-local views, clusters, and priorities are discarded;
+the returned raw sections come from the validated union and the aggregate
+projections come from the recomputation performed after the union was built.
+`rebuild_aggregate_from_normalized_input` remains a single-process convenience,
+not a distributed finalizer. This correctness-first finalizer repeats the full
+calculation and retains both the union and recomputed result temporarily; a
+future streaming sufficient-statistics implementation may reduce that cost
+without changing the canonical database.
+
+External genre hierarchies may be supplied through
+`structural_hint_external_inputs` only after their nodes have been explicitly
+mapped to canonical concept IDs. The strict optional input records its provider
+and dataset version and is kept separate from the normalized merge-hint input.
+Ariadne reports conservative agreement, disagreement, insufficient-support, or
+inconclusive comparisons against directional work-set containment. It preserves
+the raw support and both containment directions, does not expose a calibrated
+probability, does not tune analytical parameters, and never treats an external
+classification as ground truth. The comparison is disposable local analysis;
+it cannot write a concept type, relation, work assignment, evidence row, or any
+other canonical value.
 
 ## Product inspection and viewer projections
 

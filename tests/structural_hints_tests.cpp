@@ -67,6 +67,7 @@ json work(
     return {
         { "id", std::move(id) },
         { "family", "work" },
+        { "entity_type", "work" },
         { "labels",
           detailed ? json::array({ label(std::move(title)) }) : json::array() },
         { "external_ids",
@@ -106,6 +107,7 @@ json concept_entity(
     return {
         { "id", std::move(id) },
         { "family", "concept" },
+        { "entity_type", "concept" },
         { "labels", json::array({ label(std::move(name)) }) },
         { "external_ids", json::array() },
         { "concept",
@@ -116,18 +118,22 @@ json concept_entity(
 }
 
 json agent(
-    std::string id, std::string name, json credits, std::string shared_id
+    std::string id, std::string name, json credits, std::string shared_id,
+    std::string agent_type = "person"
 ) {
     return {
         { "id", std::move(id) },
         { "family", "agent" },
+        { "entity_type", agent_type },
         { "labels", json::array({ label(std::move(name)) }) },
         { "external_ids",
           json::array(
               { { { "scheme", "imdb_name" },
                   { "value", std::move(shared_id) } } }
           ) },
-        { "agent", { { "credits", std::move(credits) } } },
+        { "agent",
+          { { "agent_type", std::move(agent_type) },
+            { "credits", std::move(credits) } } },
     };
 }
 
@@ -230,7 +236,7 @@ json fixture_input() {
                         { credit_for_agent(std::string(work_1)),
                           credit_for_agent(std::string(work_4)) }
                     ),
-                    "nm0000001"
+                    "nm0000001", "organization"
                 ) }
           ) },
     };
@@ -573,12 +579,44 @@ TEST(StructuralHints, ObservationSchemaIsDeterministicAndSnapshotBound) {
         arachne::ariadne::structural_hint_algorithm_version
     );
     EXPECT_EQ(first.at("snapshot"), source.at("product_snapshot"));
+    const auto& manifest = first.at("manifest");
+    EXPECT_TRUE(manifest.at("analytical_parameters").is_object());
+    EXPECT_TRUE(manifest.at("evidence_semantics").at("stance_counts_preserved"));
+    EXPECT_FALSE(
+        manifest.at("evidence_semantics")
+            .at("historical_acceptance_vs_scene_or_community_usage")
+            .at("inferred_from_source_type_or_text")
+    );
+    EXPECT_EQ(
+        manifest.at("evidence_semantics")
+            .at("historical_acceptance_vs_scene_or_community_usage")
+            .at("canonical_schema_support"),
+        "not_represented_in_product_v6"
+    );
+    EXPECT_EQ(
+        manifest.at("evidence_semantics")
+            .at("historical_acceptance_vs_scene_or_community_usage")
+            .at("available_explicit_category_count"),
+        0
+    );
+    EXPECT_EQ(
+        manifest.at("external_classification_calibration").at("status"),
+        "not_supplied"
+    );
+    EXPECT_FALSE(
+        manifest.at("external_classification_calibration")
+            .at("treated_as_ground_truth")
+    );
     ASSERT_FALSE(first.at("observations").empty());
     const std::set<std::string, std::less<>> required {
         "left_id",
         "right_id",
         "left_family",
         "right_family",
+        "left_entity_type",
+        "right_entity_type",
+        "left_family_type",
+        "right_family_type",
         "algorithm",
         "metric",
         "value",
@@ -602,6 +640,29 @@ TEST(StructuralHints, ObservationSchemaIsDeterministicAndSnapshotBound) {
         EXPECT_TRUE(value.at("corpus").is_object());
         EXPECT_TRUE(value.at("parameters").is_object());
         EXPECT_TRUE(value.at("details").is_object());
+        const auto expect_type = [&](const std::string_view side) {
+            const std::string id = value.at(std::string(side) + "_id");
+            const std::string family
+                = value.at(std::string(side) + "_family");
+            const std::string entity_type
+                = value.at(std::string(side) + "_entity_type");
+            const std::string family_type
+                = value.at(std::string(side) + "_family_type");
+            if (family == "agent") {
+                const std::string expected
+                    = id == "agent-000002" ? "organization" : "person";
+                EXPECT_EQ(entity_type, expected);
+                EXPECT_EQ(family_type, expected);
+            } else if (family == "work") {
+                EXPECT_EQ(entity_type, "work");
+                EXPECT_EQ(family_type, "painting");
+            } else {
+                EXPECT_EQ(entity_type, "concept");
+                EXPECT_EQ(family_type, "theme");
+            }
+        };
+        expect_type("left");
+        expect_type("right");
         EXPECT_EQ(value.at("product_snapshot"), source.at("product_snapshot"));
         EXPECT_EQ(
             value.at("algorithm_version"),
@@ -750,6 +811,17 @@ TEST(StructuralHints, SequencesAndFingerprintsSupportCrossFamilyTrajectories) {
             EXPECT_TRUE(fingerprint.contains(field)) << field;
         }
     }
+    const auto& organization = row_by_entity(
+        analysis.at("structural_fingerprints"), "agent-000002"
+    );
+    EXPECT_EQ(organization.at("canonical_entity_type"), "organization");
+    EXPECT_EQ(organization.at("canonical_family_type"), "organization");
+    EXPECT_EQ(
+        organization.at("family_type_features").at(
+            "agent_type:organization"
+        ),
+        1.0
+    );
 }
 
 TEST(StructuralHints, AncestryComparesTopologyAndSurfacesSeparateBranches) {
@@ -869,11 +941,17 @@ TEST(StructuralHints, EqualStartDatesShareOneUnorderedBucketWithoutLosingRanges)
     for (auto& entity : source["entities"]) {
         if (entity.at("id") == "work-000001") {
             entity["work"].erase("year_end");
-            entity["work"]["date_precision"] = "year";
+            entity["work"]["date_precision"] = "exact";
+            entity["work"]["date_start_text"] = "1980-05-17";
+            entity["work"]["date_end_text"] = nullptr;
+            entity["work"]["date_qualifier"] = "documented";
         } else if (entity.at("id") == "work-000002") {
             entity["work"]["year_start"] = 1980;
             entity["work"]["year_end"] = 1989;
             entity["work"]["date_precision"] = "range";
+            entity["work"]["date_start_text"] = "1980";
+            entity["work"]["date_end_text"] = "1989";
+            entity["work"]["date_qualifier"] = nullptr;
         }
     }
 
@@ -894,10 +972,29 @@ TEST(StructuralHints, EqualStartDatesShareOneUnorderedBucketWithoutLosingRanges)
     ASSERT_EQ(bucket.at("date_values").size(), 2U);
     EXPECT_EQ(bucket.at("date_values").at(0).at("work_id"), "work-000001");
     EXPECT_TRUE(bucket.at("date_values").at(0).at("year_end").is_null());
-    EXPECT_EQ(bucket.at("date_values").at(0).at("date_precision"), "year");
+    EXPECT_EQ(bucket.at("date_values").at(0).at("date_precision"), "exact");
+    EXPECT_EQ(
+        bucket.at("date_values").at(0).at("date_start_text"), "1980-05-17"
+    );
+    EXPECT_TRUE(bucket.at("date_values").at(0).at("date_end_text").is_null());
+    EXPECT_EQ(
+        bucket.at("date_values").at(0).at("date_qualifier"), "documented"
+    );
     EXPECT_EQ(bucket.at("date_values").at(1).at("work_id"), "work-000002");
     EXPECT_EQ(bucket.at("date_values").at(1).at("year_end"), 1989);
     EXPECT_EQ(bucket.at("date_values").at(1).at("date_precision"), "range");
+    EXPECT_EQ(bucket.at("date_values").at(1).at("date_start_text"), "1980");
+    EXPECT_EQ(bucket.at("date_values").at(1).at("date_end_text"), "1989");
+    const auto& fingerprint = row_by_entity(
+        analysis.at("structural_fingerprints"), "work-000001"
+    );
+    ASSERT_EQ(fingerprint.at("exact_canonical_work_dates").size(), 1U);
+    EXPECT_EQ(
+        fingerprint.at("exact_canonical_work_dates").at(0).at(
+            "date_start_text"
+        ),
+        "1980-05-17"
+    );
 }
 
 TEST(StructuralHints, SequenceAlignmentDetailsIdentifyEveryGapElement) {
@@ -1178,6 +1275,50 @@ TEST(StructuralHints, ShardsPartitionPairwiseMeasurementsWithoutChangingThem) {
     );
 }
 
+TEST(StructuralHints, AggregateRebuildForcesOneShardAndRetainsRequestedLimits) {
+    arachne::ariadne::structural_hint_options requested;
+    requested.shard_index = 2U;
+    requested.shard_count = 3U;
+    requested.bootstrap_begin = 1U;
+    requested.bootstrap_end = 3U;
+    requested.sequence_pair_limit = 7U;
+    requested.cross_media_pair_limit = 9U;
+    const json source = fixture_input();
+
+    const json aggregate
+        = arachne::ariadne::structural_hint_planner::
+            rebuild_aggregate_from_normalized_input(source, requested);
+    auto direct_options = requested;
+    direct_options.shard_index = 0U;
+    direct_options.shard_count = 1U;
+    EXPECT_EQ(
+        aggregate,
+        arachne::ariadne::structural_hint_planner::build(
+            source, direct_options
+        )
+    );
+    const auto& execution = aggregate.at("manifest").at("execution");
+    EXPECT_EQ(execution.at("shard_index"), 0U);
+    EXPECT_EQ(execution.at("shard_count"), 1U);
+    EXPECT_EQ(execution.at("bootstrap_begin"), 1U);
+    EXPECT_EQ(execution.at("bootstrap_end"), 3U);
+    EXPECT_EQ(
+        execution.at("aggregate_recompute_entry_point"),
+        "structural_hint_planner::finalize_distributed_aggregate"
+    );
+    EXPECT_EQ(
+        execution.at("single_process_full_rebuild_entry_point"),
+        "structural_hint_planner::rebuild_aggregate_from_normalized_input"
+    );
+    EXPECT_TRUE(execution.at("aggregate_recompute_required_after_shard_union"));
+    EXPECT_EQ(
+        aggregate.at("manifest").at("limits").at("sequence_pairs"), 7U
+    );
+    EXPECT_EQ(
+        aggregate.at("manifest").at("limits").at("cross_media_pairs"), 9U
+    );
+}
+
 TEST(StructuralHints, TopNeighborViewsAreBoundedPerEntityAndScope) {
     const json analysis
         = arachne::ariadne::structural_hint_planner::build(fixture_input());
@@ -1300,7 +1441,26 @@ TEST(
     StructuralHints,
     RoleAwareTrajectoriesAndCrossMediaChannelsRemainDisposableAndExplainable
 ) {
-    const json source = cross_media_fixture_input();
+    json source = cross_media_fixture_input();
+    for (auto& entity : source["entities"]) {
+        if (entity.at("id") != "concept-000001") {
+            continue;
+        }
+        for (auto& assertion : entity["concept"]["assertions"]) {
+            if (assertion.at("work_id") == "work-000002") {
+                assertion["evidence"].push_back(
+                    { { "evidence_id", "evidence-context-only" },
+                      { "source_id", "source-context-only" },
+                      { "stance", "contextualizes" } }
+                );
+                assertion["evidence"].push_back(
+                    { { "evidence_id", "evidence-contradiction" },
+                      { "source_id", "source-contradiction" },
+                      { "stance", "contradicts" } }
+                );
+            }
+        }
+    }
     const json analysis
         = arachne::ariadne::structural_hint_planner::build(source);
 
@@ -1308,22 +1468,20 @@ TEST(
         = row_by_entity(analysis.at("sequences"), "agent-000001");
     const auto& variants = sequence.at("analytical_variants");
     EXPECT_TRUE(variants.at("multiple_roles_preserved"));
-    EXPECT_TRUE(
-        variants.at("credit_role_distribution").contains("producer")
-    );
+    EXPECT_TRUE(variants.at("credit_role_distribution").contains("producer"));
     EXPECT_TRUE(
         variants.at("credit_importance_distribution").contains("supporting")
     );
     ASSERT_FALSE(variants.at("credit_records").empty());
-    EXPECT_TRUE(std::ranges::any_of(
-        analysis.at("observations"), [](const json& value) {
+    EXPECT_TRUE(
+        std::ranges::any_of(analysis.at("observations"), [](const json& value) {
             return value.at("metric")
-                    == "role_importance_weighted_repertoire_similarity"
+                == "role_importance_weighted_repertoire_similarity"
                 && is_cross_family_pair(
-                    value, "agent-000001", "concept-000001"
+                       value, "agent-000001", "concept-000001"
                 );
-        }
-    ));
+        })
+    );
 
     const auto& cross_media = analysis.at("cross_media");
     const auto& profile = row_by_key(
@@ -1333,15 +1491,42 @@ TEST(
     EXPECT_EQ(profile.at("medium_count"), 2U);
     EXPECT_EQ(profile.at("all_media_work_support"), 5U);
     for (const auto& medium : profile.at("media")) {
-        for (const std::string_view field : {
-                 "work_support", "centrality_weighted_support",
-                 "dated_support", "temporal_span_years", "median_year",
-                 "agent_diversity", "evidence_backed_work_support",
-                 "evidence_ids", "source_ids", "source_diversity",
-                 "evidence_stance_distribution" }) {
+        for (const std::string_view field :
+             { "work_support", "centrality_weighted_support", "dated_support",
+               "temporal_span_years", "median_year", "agent_diversity",
+               "evidence_backed_work_support", "evidence_ids", "source_ids",
+               "source_diversity", "evidence_stance_distribution" }) {
             EXPECT_TRUE(medium.contains(field)) << field;
         }
     }
+    const auto& film_profile
+        = row_by_key(profile.at("media"), "medium", "film");
+    EXPECT_EQ(film_profile.at("evidence_backed_work_support"), 0U);
+    EXPECT_TRUE(
+        std::ranges::any_of(
+            film_profile.at("evidence_ids"),
+            [](const json& value) { return value == "evidence-context-only"; }
+        )
+    );
+    EXPECT_TRUE(
+        std::ranges::any_of(
+            film_profile.at("evidence_ids"),
+            [](const json& value) { return value == "evidence-contradiction"; }
+        )
+    );
+    EXPECT_EQ(
+        film_profile.at("evidence_stance_distribution").at("contextualizes"), 1U
+    );
+    EXPECT_EQ(
+        film_profile.at("evidence_stance_distribution").at("contradicts"), 1U
+    );
+    const auto& contextual_work
+        = row_by_key(analysis.at("work_quality"), "work_id", "work-000002");
+    EXPECT_EQ(contextual_work.at("tier"), "sufficiently_mined");
+    EXPECT_FALSE(
+        contextual_work.at("features").at("has_supporting_evidence")
+    );
+    EXPECT_FALSE(contextual_work.at("features").at("has_supporting_source"));
     const auto same_channel = std::ranges::find_if(
         analysis.at("observations"), [](const json& value) {
             return value.at("left_id") == "concept-000001"
@@ -1357,12 +1542,131 @@ TEST(
     EXPECT_FALSE(cross_media.at("bridge_agents").empty());
     EXPECT_FALSE(cross_media.at("bridge_works").empty());
     EXPECT_FALSE(cross_media.at("clustering_disagreements").empty());
+    ASSERT_FALSE(cross_media.at("cross_concept_comparisons").empty());
+    const auto& cross_concept
+        = cross_media.at("cross_concept_comparisons").front();
+    EXPECT_TRUE(cross_concept.contains("sequence_measurements"));
+    EXPECT_TRUE(cross_concept.contains("fingerprint_measurements"));
+    EXPECT_TRUE(cross_concept.contains("candidate_generation"));
+    EXPECT_FALSE(
+        cross_concept.at("candidate_generation").at("rank_is_similarity_metric")
+    );
+    EXPECT_TRUE(
+        std::ranges::any_of(analysis.at("observations"), [](const json& value) {
+            return value.at("metric")
+                == "cross_media_channel_fingerprint_similarity";
+        })
+    );
+    ASSERT_FALSE(cross_media.at("medium_precedence_summaries").empty());
+    const auto& precedence
+        = cross_media.at("medium_precedence_summaries").front();
+    EXPECT_TRUE(precedence.contains("comparison_count"));
+    EXPECT_TRUE(precedence.contains("systematic_repetition"));
+    EXPECT_FALSE(precedence.at("causal_claim"));
+    EXPECT_FALSE(precedence.at("canonical_relation"));
+    EXPECT_TRUE(cross_media.contains("undominated_multi_medium_clusters"));
+    if (!cross_media.at("undominated_multi_medium_clusters").empty()) {
+        const auto& cluster
+            = cross_media.at("undominated_multi_medium_clusters").front();
+        EXPECT_TRUE(cluster.at("not_dominated_by_one_concept"));
+        EXPECT_FALSE(cluster.at("canonical_cluster"));
+        EXPECT_TRUE(cluster.contains("concept_ids"));
+        EXPECT_TRUE(cluster.contains("channels"));
+    }
+    for (const auto& bridge : cross_media.at("bridge_agents")) {
+        EXPECT_FALSE(bridge.at("same_year_order_inferred"));
+        EXPECT_TRUE(bridge.contains("weak_cluster_connection_count"));
+        EXPECT_TRUE(bridge.contains("weak_cluster_connection_examples"));
+        EXPECT_TRUE(bridge.contains("bridges_weak_clusters"));
+    }
+    for (const auto& bridge : cross_media.at("bridge_works")) {
+        EXPECT_TRUE(bridge.contains("weak_cluster_connection_count"));
+        EXPECT_TRUE(bridge.contains("weak_cluster_connection_examples"));
+        EXPECT_TRUE(bridge.contains("bridges_weak_clusters"));
+    }
 
     json reordered = source;
     std::ranges::reverse(reordered["entities"]);
     EXPECT_EQ(
-        analysis,
-        arachne::ariadne::structural_hint_planner::build(reordered)
+        analysis, arachne::ariadne::structural_hint_planner::build(reordered)
+    );
+}
+
+TEST(StructuralHints, UndatedCrossMediaChannelsDoNotImplySynchronization) {
+    json source = cross_media_fixture_input();
+    for (auto& entity : source["entities"]) {
+        if (entity.at("id") == "work-000004") {
+            entity["work"].erase("year_start");
+            entity["work"].erase("year_end");
+        }
+    }
+    const json analysis
+        = arachne::ariadne::structural_hint_planner::build(source);
+    const auto& comparisons
+        = analysis.at("cross_media").at("same_concept_comparisons");
+    const auto found = std::ranges::find_if(comparisons, [](const json& value) {
+        return value.at("concept_id") == "concept-000003";
+    });
+    ASSERT_NE(found, comparisons.end());
+    EXPECT_EQ(found->at("pattern_hint"), "insufficient_dated_support");
+    EXPECT_TRUE(found->at("temporal_lag_years").is_null());
+    EXPECT_FALSE(found->at("causal_claim"));
+}
+
+TEST(StructuralHints, ZeroCrossMediaLimitEnumeratesTheCompleteChannelUniverse) {
+    json source = fixture_input();
+    source["entities"] = json::array(
+        { work(
+              "work-200001", "Early isolated channel",
+              json::array({ "concept-200001" }),
+              json::array({ credit_for_work("agent-200001") }), 1900, false
+          ),
+          work(
+              "work-200002", "Late isolated channel",
+              json::array({ "concept-200002" }),
+              json::array({ credit_for_work("agent-200002") }), 2020, false
+          ),
+          concept_entity(
+              "concept-200001", "Early concept",
+              json::array({ assertion("work-200001") })
+          ),
+          concept_entity(
+              "concept-200002", "Late concept",
+              json::array({ assertion("work-200002") })
+          ),
+          agent(
+              "agent-200001", "Early agent",
+              json::array({ credit_for_agent("work-200001") }), "nm2000001"
+          ),
+          agent(
+              "agent-200002", "Late agent",
+              json::array({ credit_for_agent("work-200002") }), "nm2000002"
+          ) }
+    );
+    source["entities"][1]["work"]["medium"] = "film";
+
+    const json bounded
+        = arachne::ariadne::structural_hint_planner::build(source);
+    EXPECT_TRUE(
+        bounded.at("cross_media").at("cross_concept_comparisons").empty()
+    );
+
+    arachne::ariadne::structural_hint_options unbounded;
+    unbounded.cross_media_pair_limit = 0U;
+    const json complete
+        = arachne::ariadne::structural_hint_planner::build(source, unbounded);
+    ASSERT_EQ(
+        complete.at("cross_media").at("cross_concept_comparisons").size(), 1U
+    );
+    const auto& comparison
+        = complete.at("cross_media").at("cross_concept_comparisons").front();
+    EXPECT_EQ(comparison.at("left_concept_id"), "concept-200001");
+    EXPECT_EQ(comparison.at("right_concept_id"), "concept-200002");
+    EXPECT_EQ(
+        complete.at("manifest").at("limits").at("cross_media_pairs"), 0U
+    );
+    EXPECT_TRUE(
+        complete.at("manifest").at("limits").at("zero_means_unbounded")
     );
 }
 
@@ -1379,6 +1683,22 @@ TEST(
     EXPECT_FALSE(diagnostics.at("canonical_centrality_changed"));
     EXPECT_FALSE(diagnostics.at("canonical_confidence_changed"));
     EXPECT_FALSE(diagnostics.at("normalization_experiments").empty());
+    EXPECT_TRUE(
+        diagnostics.at("weighting_sensitivity")
+            .contains("negligible_change_count")
+    );
+    EXPECT_TRUE(
+        diagnostics.at("weighting_sensitivity")
+            .contains("negligible_change_may_reflect_saturation")
+    );
+    const json negligible_fixture
+        = arachne::ariadne::structural_hint_planner::build(fixture_input());
+    const auto& negligible = negligible_fixture.at("centrality_diagnostics")
+                                 .at("weighting_sensitivity")
+                                 .at("negligible_examples");
+    ASSERT_FALSE(negligible.empty());
+    EXPECT_LE(std::abs(negligible.at(0).at("value").get<double>()), 0.02);
+    EXPECT_TRUE(negligible.at(0).at("details").contains("binary_overlap"));
     for (const auto& row : diagnostics.at("normalization_experiments")) {
         EXPECT_TRUE(row.contains("raw_canonical_centrality"));
         EXPECT_TRUE(row.at("derived_only"));
@@ -1396,7 +1716,8 @@ TEST(
              "temporal_span_years", "temporal_continuity",
              "context_cohesion", "neighbor_separation",
              "maximum_asymmetric_containment", "cluster_stability",
-             "medium_spread", "evidence_backed_work_fraction" }) {
+             "stable_explicit_neighbor_count", "medium_spread",
+             "evidence_backed_work_fraction" }) {
         EXPECT_TRUE(signature.at("dimensions").contains(dimension))
             << dimension;
     }
@@ -1408,7 +1729,7 @@ TEST(
         for (const std::string_view field : {
                  "medium_distribution", "credit_role_distribution",
                  "credit_importance_distribution", "centrality_distribution",
-                 "evidence_density_signals" }) {
+                 "evidence_density_signals", "family_type_features" }) {
             EXPECT_TRUE(fingerprint.contains(field)) << id << ':' << field;
         }
     }

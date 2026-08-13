@@ -656,6 +656,7 @@ void require_current_store(
         "      THEN 'agent' ELSE e.entity_type END,"
         " e.entity_type,a.birth_year,a.death_year,"
         " w.medium,w.year_start,w.year_end,w.date_precision,"
+        " w.date_start_text,w.date_end_text,w.date_qualifier,"
         " c.concept_type,c.slug"
         " FROM product.entities e"
         " LEFT JOIN product.agents a ON a.entity_id=e.id"
@@ -669,11 +670,13 @@ void require_current_store(
         json entity {
             { "id", base.text(0) },
             { "family", base.text(1) },
+            { "entity_type", base.text(2) },
             { "labels", json::array() },
             { "external_ids", json::array() },
         };
         if (base.text(1) == "agent") {
             entity["agent"] = {
+                { "agent_type", base.text(2) },
                 { "birth_year", optional_integer(base, 3) },
                 { "death_year", optional_integer(base, 4) },
                 { "credits", json::array() },
@@ -686,19 +689,25 @@ void require_current_store(
                 { "year_end", optional_integer(base, 7) },
                 { "date_precision", base.is_null(8) ? json("unknown")
                                                       : json(base.text(8)) },
+                { "date_start_text", base.is_null(9) ? json(nullptr)
+                                                       : json(base.text(9)) },
+                { "date_end_text", base.is_null(10) ? json(nullptr)
+                                                      : json(base.text(10)) },
+                { "date_qualifier", base.is_null(11) ? json(nullptr)
+                                                       : json(base.text(11)) },
                 { "credits", json::array() },
                 { "concept_ids", json::array() },
                 { "measurements", json::array() },
             };
         } else {
             entity["concept"] = {
-                { "concept_type", base.text(9) },
+                { "concept_type", base.text(12) },
                 { "assertions", json::array() },
                 { "neighbors", json::array() },
             };
-            if (!base.is_null(10) && !base.text(10).empty()) {
+            if (!base.is_null(13) && !base.text(13).empty()) {
                 entity["labels"].push_back(
-                    { { "value", base.text(10) },
+                    { { "value", base.text(13) },
                       { "preferred", true }, { "kind", "slug" } }
                 );
             }
@@ -740,7 +749,7 @@ void require_current_store(
 
     statement credits(
         hints.native(),
-        "SELECT work_id,agent_id,role,importance,credited_as"
+        "SELECT work_id,agent_id,role,importance,credited_as,credit_order"
         " FROM product.credits ORDER BY work_id,agent_id,role,id"
     );
     while (credits.step()) {
@@ -752,6 +761,9 @@ void require_current_store(
         };
         if (!credits.is_null(4)) {
             common["credited_as"] = credits.text(4);
+        }
+        if (!credits.is_null(5)) {
+            common["credit_order"] = credits.integer(5);
         }
         if (work != indices.end()) {
             json value = common;
@@ -873,28 +885,89 @@ void require_current_store(
         }
     }
 
+    std::map<std::int64_t, std::vector<assertion_location>> relation_locations;
     statement relations(
         hints.native(),
-        "SELECT subject_concept_id,object_concept_id,relation_type"
+        "SELECT id,subject_concept_id,object_concept_id,relation_type,"
+        "strength,from_year,to_year,region_code,confidence"
         " FROM product.concept_relations"
         " ORDER BY subject_concept_id,object_concept_id,relation_type"
     );
     while (relations.step()) {
-        const auto left = indices.find(relations.text(0));
-        const auto right = indices.find(relations.text(1));
+        const auto left = indices.find(relations.text(1));
+        const auto right = indices.find(relations.text(2));
+        json common {
+            { "relation_id", relations.integer(0) },
+            { "relation_type", relations.text(3) },
+            { "strength", optional_integer(relations, 4) },
+            { "from_year", optional_integer(relations, 5) },
+            { "to_year", optional_integer(relations, 6) },
+            { "region_code", relations.is_null(7) ? json(nullptr)
+                                                    : json(relations.text(7)) },
+            { "confidence", relations.is_null(8) ? json(nullptr)
+                                                   : json(relations.real(8)) },
+            { "evidence_ids", json::array() },
+            { "source_ids", json::array() },
+            { "evidence", json::array() },
+        };
         if (left != indices.end()) {
-            entities[left->second]["concept"]["neighbors"].push_back(
-                { { "concept_id", relations.text(1) },
-                  { "relation_type", relations.text(2) },
-                  { "direction", "outgoing" } }
+            json outgoing = common;
+            outgoing["concept_id"] = relations.text(2);
+            outgoing["direction"] = "outgoing";
+            auto& values = entities[left->second]["concept"]["neighbors"];
+            const std::size_t index = values.size();
+            values.push_back(std::move(outgoing));
+            relation_locations[relations.integer(0)].push_back(
+                { left->second, index }
             );
         }
         if (right != indices.end()) {
-            entities[right->second]["concept"]["neighbors"].push_back(
-                { { "concept_id", relations.text(0) },
-                  { "relation_type", relations.text(2) },
-                  { "direction", "incoming" } }
+            json incoming = common;
+            incoming["concept_id"] = relations.text(1);
+            incoming["direction"] = "incoming";
+            auto& values = entities[right->second]["concept"]["neighbors"];
+            const std::size_t index = values.size();
+            values.push_back(std::move(incoming));
+            relation_locations[relations.integer(0)].push_back(
+                { right->second, index }
             );
+        }
+    }
+    statement relation_evidence(
+        hints.native(),
+        "SELECT cre.assertion_id,cre.evidence_id,e.source_id,e.stance"
+        " FROM product.concept_relation_evidence cre"
+        " JOIN product.evidence e ON e.id=cre.evidence_id"
+        " ORDER BY cre.assertion_id,cre.evidence_id,e.source_id"
+    );
+    while (relation_evidence.step()) {
+        const auto locations
+            = relation_locations.find(relation_evidence.integer(0));
+        if (locations == relation_locations.end()) {
+            continue;
+        }
+        const std::string evidence_id
+            = std::to_string(relation_evidence.integer(1));
+        const std::string source_id
+            = std::to_string(relation_evidence.integer(2));
+        for (const auto& location : locations->second) {
+            auto& relation = entities[location.first]["concept"]["neighbors"]
+                                     [location.second];
+            relation["evidence_ids"].push_back(evidence_id);
+            relation["evidence"].push_back(
+                { { "evidence_id", evidence_id },
+                  { "source_id", source_id },
+                  { "stance", relation_evidence.text(3) } }
+            );
+            const bool source_seen = std::ranges::any_of(
+                relation["source_ids"], [&](const json& value) {
+                    return value.is_string()
+                        && value.get_ref<const std::string&>() == source_id;
+                }
+            );
+            if (!source_seen) {
+                relation["source_ids"].push_back(source_id);
+            }
         }
     }
     return result;
@@ -1063,6 +1136,15 @@ void require_family(
 
 using canonical_family_index
     = std::unordered_map<std::string, std::string>;
+struct canonical_type_descriptor final {
+    std::string entity_type;
+    std::string family_type;
+};
+using canonical_type_index
+    = std::unordered_map<std::string, canonical_type_descriptor>;
+using canonical_work_date_index = std::unordered_map<std::string, json>;
+using canonical_concept_relation_index = std::map<std::int64_t, json>;
+using canonical_internal_id_index = std::set<std::string, std::less<>>;
 
 [[nodiscard]] canonical_family_index canonical_entity_families(
     sqlite3* const sql
@@ -1076,6 +1158,159 @@ using canonical_family_index
         } else if (type == "work" || type == "concept") {
             result.emplace(entities.text(0), type);
         }
+    }
+    return result;
+}
+
+[[nodiscard]] canonical_type_index canonical_entity_types(sqlite3* const sql) {
+    canonical_type_index result;
+    statement entities(
+        sql,
+        "SELECT e.id,e.entity_type,"
+        " CASE WHEN e.entity_type IN('person','organization','group')"
+        "      THEN e.entity_type"
+        "      WHEN e.entity_type='work' THEN w.medium"
+        "      WHEN e.entity_type='concept' THEN c.concept_type END"
+        " FROM product.entities e"
+        " LEFT JOIN product.works w ON w.entity_id=e.id"
+        " LEFT JOIN product.concepts c ON c.entity_id=e.id"
+        " WHERE e.entity_type IN("
+        " 'person','organization','group','work','concept')"
+    );
+    while (entities.step()) {
+        result.emplace(
+            entities.text(0),
+            canonical_type_descriptor {
+                .entity_type = entities.text(1),
+                .family_type = entities.is_null(2) ? "unknown"
+                                                  : entities.text(2),
+            }
+        );
+    }
+    return result;
+}
+
+[[nodiscard]] canonical_work_date_index canonical_work_dates(sqlite3* const sql) {
+    canonical_work_date_index result;
+    statement works(
+        sql,
+        "SELECT entity_id,year_start,year_end,date_precision,date_start_text,"
+        "date_end_text,date_qualifier FROM product.works"
+    );
+    while (works.step()) {
+        result.emplace(
+            works.text(0),
+            json {
+                { "year_start", optional_integer(works, 1) },
+                { "year_end", optional_integer(works, 2) },
+                { "date_precision", works.is_null(3) ? json("unknown")
+                                                       : json(works.text(3)) },
+                { "date_start_text", works.is_null(4) ? json(nullptr)
+                                                        : json(works.text(4)) },
+                { "date_end_text", works.is_null(5) ? json(nullptr)
+                                                      : json(works.text(5)) },
+                { "date_qualifier", works.is_null(6) ? json(nullptr)
+                                                       : json(works.text(6)) },
+            }
+        );
+    }
+    return result;
+}
+
+[[nodiscard]] canonical_concept_relation_index canonical_concept_relations(
+    sqlite3* const sql
+) {
+    canonical_concept_relation_index result;
+    statement relations(
+        sql,
+        "SELECT id,subject_concept_id,object_concept_id,relation_type,"
+        "strength,from_year,to_year,region_code,confidence"
+        " FROM product.concept_relations"
+    );
+    while (relations.step()) {
+        result.emplace(
+            relations.integer(0),
+            json {
+                { "relation_id", relations.integer(0) },
+                { "subject_concept_id", relations.text(1) },
+                { "object_concept_id", relations.text(2) },
+                { "relation_type", relations.text(3) },
+                { "strength", optional_integer(relations, 4) },
+                { "from_year", optional_integer(relations, 5) },
+                { "to_year", optional_integer(relations, 6) },
+                { "region_code", relations.is_null(7) ? json(nullptr)
+                                                        : json(relations.text(7)) },
+                { "confidence", relations.is_null(8) ? json(nullptr)
+                                                       : json(relations.real(8)) },
+                { "evidence_ids", json::array() },
+                { "source_ids", json::array() },
+                { "evidence_stance_distribution", json::object() },
+            }
+        );
+    }
+    statement evidence(
+        sql,
+        "SELECT cre.assertion_id,cre.evidence_id,e.source_id,e.stance"
+        " FROM product.concept_relation_evidence cre"
+        " JOIN product.evidence e ON e.id=cre.evidence_id"
+        " ORDER BY cre.assertion_id,cre.evidence_id,e.source_id"
+    );
+    std::map<std::int64_t, std::set<std::string, std::less<>>> source_ids;
+    while (evidence.step()) {
+        const auto found = result.find(evidence.integer(0));
+        if (found == result.end()) {
+            continue;
+        }
+        found->second["evidence_ids"].push_back(
+            std::to_string(evidence.integer(1))
+        );
+        source_ids[evidence.integer(0)].emplace(
+            std::to_string(evidence.integer(2))
+        );
+        auto& count = found->second["evidence_stance_distribution"]
+                                  [evidence.text(3)];
+        count = count.is_number() ? count.get<std::size_t>() + 1U : 1U;
+    }
+    for (auto& [relation_id, relation] : result) {
+        static_cast<void>(relation_id);
+        std::set<std::string, std::less<>> ids;
+        for (const auto& evidence_id : relation.at("evidence_ids")) {
+            ids.emplace(evidence_id.get<std::string>());
+        }
+        relation["evidence_ids"] = ids;
+    }
+    for (auto& [relation_id, ids] : source_ids) {
+        result.at(relation_id)["source_ids"] = ids;
+    }
+    return result;
+}
+
+void validate_canonical_type_reference(
+    const canonical_type_index& types, const json& value,
+    const std::string_view id_key, const std::string_view entity_type_key,
+    const std::string_view family_type_key, const std::string_view context
+) {
+    const std::string& id = required_string(value, id_key, context);
+    const auto found = types.find(id);
+    if (found == types.end()
+        || required_string(value, entity_type_key, context)
+            != found->second.entity_type
+        || required_string(value, family_type_key, context)
+            != found->second.family_type) {
+        invalid_projection(
+            std::string(context)
+            + " does not preserve the canonical entity and family types"
+        );
+    }
+}
+
+[[nodiscard]] canonical_internal_id_index canonical_internal_ids(
+    sqlite3* const sql, const std::string_view query_text
+) {
+    canonical_internal_id_index result;
+    statement ids(sql, query_text);
+    while (ids.step()) {
+        result.emplace(ids.text(0));
     }
     return result;
 }
@@ -1126,8 +1361,56 @@ void validate_entity_id_array(
     }
 }
 
+void validate_internal_id_array(
+    const canonical_internal_id_index& ids, const json& values,
+    const std::string_view context
+) {
+    if (!values.is_array()) {
+        invalid_projection(std::string(context) + " must be an array");
+    }
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        const json& value = values.at(index);
+        const std::string item_context
+            = std::string(context) + "[" + std::to_string(index) + "]";
+        if (!value.is_string() || value.get_ref<const std::string&>().empty()) {
+            invalid_projection(item_context + " must be a non-empty string");
+        }
+        if (!ids.contains(value.get_ref<const std::string&>())) {
+            invalid_projection(
+                item_context + " references an unknown canonical record"
+            );
+        }
+    }
+}
+
+void validate_provenance_id_fields(
+    const canonical_internal_id_index& evidence_ids,
+    const canonical_internal_id_index& source_ids, const json& value,
+    const std::string_view context
+) {
+    for (const auto* field : {
+             "evidence_ids", "left_evidence_ids", "right_evidence_ids" }) {
+        if (value.contains(field)) {
+            validate_internal_id_array(
+                evidence_ids, value.at(field),
+                std::string(context) + "." + field
+            );
+        }
+    }
+    for (const auto* field : {
+             "source_ids", "left_source_ids", "right_source_ids" }) {
+        if (value.contains(field)) {
+            validate_internal_id_array(
+                source_ids, value.at(field),
+                std::string(context) + "." + field
+            );
+        }
+    }
+}
+
 void validate_temporal_bucket_references(
-    const canonical_family_index& entities, const json& bucket,
+    const canonical_family_index& entities,
+    const canonical_work_date_index& canonical_dates, const json& bucket,
     const std::string_view context
 ) {
     if (!bucket.is_object()) {
@@ -1138,6 +1421,7 @@ void validate_temporal_bucket_references(
         std::string(context) + ".work_ids"
     );
     const json& dates = required_array(bucket, "date_values", context);
+    std::set<std::string, std::less<>> dated_work_ids;
     for (std::size_t date_index = 0; date_index < dates.size(); ++date_index) {
         const std::string date_context = std::string(context) + ".date_values["
             + std::to_string(date_index) + "]";
@@ -1145,6 +1429,37 @@ void validate_temporal_bucket_references(
             entities,
             required_string(dates.at(date_index), "work_id", date_context),
             "work", date_context + ".work_id"
+        );
+        const std::string& work_id
+            = required_string(dates.at(date_index), "work_id", date_context);
+        dated_work_ids.emplace(work_id);
+        const auto expected = canonical_dates.find(work_id);
+        if (expected == canonical_dates.end()) {
+            invalid_projection(date_context + " references an unknown work date");
+        }
+        json actual = dates.at(date_index);
+        actual.erase("work_id");
+        for (const auto* field : { "year_start", "year_end", "date_precision",
+                                  "date_start_text", "date_end_text",
+                                  "date_qualifier" }) {
+            static_cast<void>(
+                required_field(dates.at(date_index), field, date_context)
+            );
+        }
+        if (actual != expected->second) {
+            invalid_projection(
+                date_context + " does not match the canonical work date"
+            );
+        }
+    }
+    std::set<std::string, std::less<>> bucket_work_ids;
+    for (const auto& work_id : bucket.at("work_ids")) {
+        bucket_work_ids.emplace(work_id.get<std::string>());
+    }
+    if (dated_work_ids != bucket_work_ids || dates.size() != dated_work_ids.size()) {
+        invalid_projection(
+            std::string(context)
+            + ".date_values must preserve one canonical date for every work"
         );
     }
     const json& concepts = required_array(bucket, "concepts", context);
@@ -1163,7 +1478,8 @@ void validate_temporal_bucket_references(
 }
 
 void validate_sequence_references(
-    const canonical_family_index& entities, const json& sequences
+    const canonical_family_index& entities,
+    const canonical_work_date_index& canonical_dates, const json& sequences
 ) {
     for (std::size_t index = 0; index < sequences.size(); ++index) {
         const json& sequence = sequences.at(index);
@@ -1179,14 +1495,18 @@ void validate_sequence_references(
             const std::string bucket_context = context + ".buckets["
                 + std::to_string(bucket_index) + "]";
             validate_temporal_bucket_references(
-                entities, bucket, bucket_context
+                entities, canonical_dates, bucket, bucket_context
             );
         }
     }
 }
 
 void validate_observation_detail_references(
-    const canonical_family_index& entities, const json& observations
+    const canonical_family_index& entities,
+    const canonical_work_date_index& canonical_dates,
+    const canonical_concept_relation_index& canonical_relations,
+    const canonical_internal_id_index& evidence_ids,
+    const canonical_internal_id_index& source_ids, const json& observations
 ) {
     for (std::size_t index = 0; index < observations.size(); ++index) {
         const json& observation = observations.at(index);
@@ -1196,11 +1516,106 @@ void validate_observation_detail_references(
         const json& details = required_object(
             observation, "details", observation_context
         );
+        validate_provenance_id_fields(
+            evidence_ids, source_ids, observation, observation_context
+        );
+        validate_provenance_id_fields(
+            evidence_ids, source_ids, details, context
+        );
+        if (details.contains("explicit_concept_relations")) {
+            const json& relations = details.at("explicit_concept_relations");
+            if (!relations.is_array()) {
+                invalid_projection(
+                    context + ".explicit_concept_relations must be an array"
+                );
+            }
+            for (std::size_t relation_index = 0;
+                 relation_index < relations.size(); ++relation_index) {
+                const std::string relation_context = context
+                    + ".explicit_concept_relations["
+                    + std::to_string(relation_index) + "]";
+                const json& relation = relations.at(relation_index);
+                const std::int64_t relation_id = required_integer(
+                    relation, "relation_id", relation_context, 1,
+                    std::numeric_limits<std::int64_t>::max()
+                );
+                const auto expected = canonical_relations.find(relation_id);
+                if (expected == canonical_relations.end()
+                    || relation != expected->second
+                    || !((relation.at("subject_concept_id")
+                               == observation.at("left_id")
+                           && relation.at("object_concept_id")
+                               == observation.at("right_id"))
+                         || (relation.at("subject_concept_id")
+                                 == observation.at("right_id")
+                             && relation.at("object_concept_id")
+                                 == observation.at("left_id")))) {
+                    invalid_projection(
+                        relation_context
+                        + " does not match the canonical concept relation"
+                    );
+                }
+                validate_internal_id_array(
+                    evidence_ids,
+                    required_array(relation, "evidence_ids", relation_context),
+                    relation_context + ".evidence_ids"
+                );
+                validate_internal_id_array(
+                    source_ids,
+                    required_array(relation, "source_ids", relation_context),
+                    relation_context + ".source_ids"
+                );
+            }
+        }
+        if (details.contains("explicit_concept_relation_ids")) {
+            const json& relation_ids
+                = details.at("explicit_concept_relation_ids");
+            if (!relation_ids.is_array()) {
+                invalid_projection(
+                    context + ".explicit_concept_relation_ids must be an array"
+                );
+            }
+            for (std::size_t relation_index = 0;
+                 relation_index < relation_ids.size(); ++relation_index) {
+                const json& id = relation_ids.at(relation_index);
+                if (!id.is_number_integer() && !id.is_number_unsigned()) {
+                    invalid_projection(
+                        context + ".explicit_concept_relation_ids contains "
+                        "a non-integer"
+                    );
+                }
+                const std::int64_t relation_id = id.get<std::int64_t>();
+                const auto expected = canonical_relations.find(relation_id);
+                if (expected == canonical_relations.end()
+                    || !((expected->second.at("subject_concept_id")
+                               == observation.at("left_id")
+                           && expected->second.at("object_concept_id")
+                               == observation.at("right_id"))
+                         || (expected->second.at("subject_concept_id")
+                                 == observation.at("right_id")
+                             && expected->second.at("object_concept_id")
+                                 == observation.at("left_id")))) {
+                    invalid_projection(
+                        context
+                        + ".explicit_concept_relation_ids references a "
+                          "mismatched canonical relation"
+                    );
+                }
+            }
+        }
         if (details.contains("shared_work_ids")) {
             validate_entity_id_array(
                 entities, details.at("shared_work_ids"), "work",
                 context + ".shared_work_ids"
             );
+        }
+        for (const auto* field : { "left_work_ids", "right_work_ids" }) {
+            if (details.contains(field)) {
+                validate_entity_id_array(
+                    entities, details.at(field), "work",
+                    context + "." + field
+                );
+            }
         }
         if (details.contains("shared_tag_ids")) {
             validate_entity_id_array(
@@ -1231,6 +1646,9 @@ void validate_observation_detail_references(
                         );
                     }
                 }
+                validate_provenance_id_fields(
+                    evidence_ids, source_ids, row, row_context
+                );
             }
         }
         if (details.contains("gaps")) {
@@ -1248,7 +1666,8 @@ void validate_observation_detail_references(
                 }
                 if (gap.contains("element")) {
                     validate_temporal_bucket_references(
-                        entities, gap.at("element"), gap_context + ".element"
+                        entities, canonical_dates, gap.at("element"),
+                        gap_context + ".element"
                     );
                 }
             }
@@ -1257,7 +1676,8 @@ void validate_observation_detail_references(
 }
 
 void validate_fingerprint_references(
-    const canonical_family_index& entities, const json& fingerprints
+    const canonical_family_index& entities,
+    const canonical_work_date_index& canonical_dates, const json& fingerprints
 ) {
     for (std::size_t index = 0; index < fingerprints.size(); ++index) {
         const json& fingerprint = fingerprints.at(index);
@@ -1266,6 +1686,62 @@ void validate_fingerprint_references(
         validate_typed_entity_reference(
             entities, fingerprint, "entity_id", "family", context
         );
+        const json& exact_dates = required_array(
+            fingerprint, "exact_canonical_work_dates", context
+        );
+        json expected_exact_dates = json::array();
+        for (const auto& [work_id, weight] :
+             required_object(fingerprint, "work_distribution", context).items()) {
+            static_cast<void>(weight);
+            const auto expected = canonical_dates.find(work_id);
+            if (expected == canonical_dates.end()
+                || (expected->second.at("date_precision") != "exact"
+                    && expected->second.at("date_start_text").is_null()
+                    && expected->second.at("date_end_text").is_null()
+                    && expected->second.at("date_qualifier").is_null())) {
+                continue;
+            }
+            json row = expected->second;
+            row["work_id"] = work_id;
+            expected_exact_dates.push_back(std::move(row));
+        }
+        if (exact_dates != expected_exact_dates) {
+            invalid_projection(
+                context
+                + ".exact_canonical_work_dates does not completely preserve "
+                  "the canonical work dates"
+            );
+        }
+        for (std::size_t date_index = 0; date_index < exact_dates.size();
+             ++date_index) {
+            const std::string date_context = context
+                + ".exact_canonical_work_dates["
+                + std::to_string(date_index) + "]";
+            require_canonical_entity(
+                entities,
+                required_string(
+                    exact_dates.at(date_index), "work_id", date_context
+                ),
+                "work", date_context + ".work_id"
+            );
+            const std::string& work_id = required_string(
+                exact_dates.at(date_index), "work_id", date_context
+            );
+            const auto expected = canonical_dates.find(work_id);
+            json actual = exact_dates.at(date_index);
+            actual.erase("work_id");
+            if (expected == canonical_dates.end()
+                || actual != expected->second
+                || (expected->second.at("date_precision") != "exact"
+                    && expected->second.at("date_start_text").is_null()
+                    && expected->second.at("date_end_text").is_null()
+                    && expected->second.at("date_qualifier").is_null())) {
+                invalid_projection(
+                    date_context
+                    + " does not match an exact canonical work date"
+                );
+            }
+        }
         for (const auto& [field, family] : {
                  std::pair { "concept_distribution", "concept" },
                  std::pair { "agent_distribution", "agent" },
@@ -1296,18 +1772,19 @@ void validate_work_quality_references(
     }
 }
 
-void validate_clustering_references(
-    const canonical_family_index& entities, const json& clusterings
+void validate_concept_clustering_references(
+    const canonical_family_index& entities, const json& clusterings,
+    const std::string_view context_prefix
 ) {
     for (std::size_t index = 0; index < clusterings.size(); ++index) {
+        const std::string clustering_context
+            = std::string(context_prefix) + "[" + std::to_string(index) + "]";
         const json& clusters = required_array(
-            clusterings.at(index), "clusters",
-            "analysis.clusterings[" + std::to_string(index) + "]"
+            clusterings.at(index), "clusters", clustering_context
         );
         for (std::size_t cluster_index = 0; cluster_index < clusters.size();
              ++cluster_index) {
-            const std::string context = "analysis.clusterings["
-                + std::to_string(index) + "].clusters["
+            const std::string context = clustering_context + ".clusters["
                 + std::to_string(cluster_index) + "]";
             const json& members
                 = required_array(clusters.at(cluster_index), "members", context);
@@ -1327,6 +1804,424 @@ void validate_clustering_references(
     }
 }
 
+void validate_clustering_references(
+    const canonical_family_index& entities, const json& clusterings
+) {
+    validate_concept_clustering_references(
+        entities, clusterings, "analysis.clusterings"
+    );
+}
+
+void validate_analysis_section_binding(
+    const json& section, const std::string_view context,
+    const std::string_view expected_algorithm_version,
+    const json& expected_snapshot
+) {
+    if (required_string(section, "algorithm_version", context)
+        != expected_algorithm_version) {
+        invalid_projection(
+            std::string(context)
+            + ".algorithm_version does not match the enclosing analysis"
+        );
+    }
+    if (required_object(section, "product_snapshot", context)
+        != expected_snapshot) {
+        invalid_projection(
+            std::string(context)
+            + ".product_snapshot does not match the enclosing analysis"
+        );
+    }
+}
+
+void validate_medium_chronology_references(
+    const canonical_family_index& entities, const json& summaries,
+    const std::string_view context, const std::string_view first_concept_field,
+    const std::string_view second_concept_field
+) {
+    for (std::size_t index = 0; index < summaries.size(); ++index) {
+        const json& summary = summaries.at(index);
+        const std::string summary_context
+            = std::string(context) + "[" + std::to_string(index) + "]";
+        validate_entity_id_array(
+            entities, required_array(summary, "concept_ids", summary_context),
+            "concept", summary_context + ".concept_ids"
+        );
+        const json& examples
+            = required_array(summary, "examples", summary_context);
+        for (std::size_t example_index = 0; example_index < examples.size();
+             ++example_index) {
+            const json& example = examples.at(example_index);
+            const std::string example_context = summary_context + ".examples["
+                + std::to_string(example_index) + "]";
+            for (const auto field : {
+                     first_concept_field, second_concept_field }) {
+                require_canonical_entity(
+                    entities,
+                    required_string(example, field, example_context), "concept",
+                    example_context + "." + std::string(field)
+                );
+            }
+        }
+    }
+}
+
+void validate_undominated_cross_media_cluster_references(
+    const canonical_family_index& entities, const json& clusters,
+    const std::string_view context
+) {
+    for (std::size_t index = 0; index < clusters.size(); ++index) {
+        const json& cluster = clusters.at(index);
+        const std::string cluster_context
+            = std::string(context) + "[" + std::to_string(index) + "]";
+        validate_entity_id_array(
+            entities, required_array(cluster, "concept_ids", cluster_context),
+            "concept", cluster_context + ".concept_ids"
+        );
+        const json& channels
+            = required_array(cluster, "channels", cluster_context);
+        for (std::size_t channel_index = 0; channel_index < channels.size();
+             ++channel_index) {
+            const std::string channel_context = cluster_context + ".channels["
+                + std::to_string(channel_index) + "]";
+            require_canonical_entity(
+                entities,
+                required_string(
+                    channels.at(channel_index), "concept_id", channel_context
+                ),
+                "concept", channel_context + ".concept_id"
+            );
+        }
+        require_canonical_entity(
+            entities,
+            required_string(cluster, "dominant_concept_id", cluster_context),
+            "concept", cluster_context + ".dominant_concept_id"
+        );
+        const json& support = required_object(
+            cluster, "work_support_by_concept", cluster_context
+        );
+        for (const auto& [concept_id, value] : support.items()) {
+            static_cast<void>(value);
+            require_canonical_entity(
+                entities, concept_id, "concept",
+                cluster_context + ".work_support_by_concept." + concept_id
+            );
+        }
+    }
+}
+
+void validate_weak_cluster_connection_references(
+    const canonical_family_index& entities, const json& owner,
+    const std::string_view context
+) {
+    const json& examples = required_array(
+        owner, "weak_cluster_connection_examples", context
+    );
+    for (std::size_t index = 0; index < examples.size(); ++index) {
+        const json& example = examples.at(index);
+        const std::string example_context = std::string(context)
+            + ".weak_cluster_connection_examples[" + std::to_string(index)
+            + "]";
+        for (const auto* field : { "left_concept_id", "right_concept_id" }) {
+            require_canonical_entity(
+                entities, required_string(example, field, example_context),
+                "concept", example_context + "." + field
+            );
+        }
+    }
+}
+
+void validate_cross_media_references(
+    const canonical_family_index& entities,
+    const canonical_internal_id_index& evidence_ids,
+    const canonical_internal_id_index& source_ids, const json& cross_media,
+    const std::string_view algorithm_version, const json& snapshot
+) {
+    constexpr std::string_view context = "analysis.cross_media";
+    validate_analysis_section_binding(
+        cross_media, context, algorithm_version, snapshot
+    );
+    static_cast<void>(required_array(cross_media, "media", context));
+
+    const json& profiles
+        = required_array(cross_media, "concept_medium_profiles", context);
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        const json& profile = profiles.at(index);
+        const std::string profile_context = std::string(context)
+            + ".concept_medium_profiles[" + std::to_string(index) + "]";
+        require_canonical_entity(
+            entities, required_string(profile, "concept_id", profile_context),
+            "concept", profile_context + ".concept_id"
+        );
+        const json& media = required_array(profile, "media", profile_context);
+        for (std::size_t medium_index = 0; medium_index < media.size();
+             ++medium_index) {
+            const json& channel = media.at(medium_index);
+            const std::string channel_context = profile_context + ".media["
+                + std::to_string(medium_index) + "]";
+            validate_entity_id_array(
+                entities, required_array(channel, "work_ids", channel_context),
+                "work", channel_context + ".work_ids"
+            );
+            validate_entity_id_array(
+                entities, required_array(channel, "agent_ids", channel_context),
+                "agent", channel_context + ".agent_ids"
+            );
+            validate_internal_id_array(
+                evidence_ids,
+                required_array(channel, "evidence_ids", channel_context),
+                channel_context + ".evidence_ids"
+            );
+            validate_internal_id_array(
+                source_ids,
+                required_array(channel, "source_ids", channel_context),
+                channel_context + ".source_ids"
+            );
+        }
+    }
+
+    const json& same_concept
+        = required_array(cross_media, "same_concept_comparisons", context);
+    for (std::size_t index = 0; index < same_concept.size(); ++index) {
+        const std::string row_context = std::string(context)
+            + ".same_concept_comparisons[" + std::to_string(index) + "]";
+        require_canonical_entity(
+            entities,
+            required_string(same_concept.at(index), "concept_id", row_context),
+            "concept", row_context + ".concept_id"
+        );
+    }
+
+    const json& cross_concept
+        = required_array(cross_media, "cross_concept_comparisons", context);
+    for (std::size_t index = 0; index < cross_concept.size(); ++index) {
+        const json& row = cross_concept.at(index);
+        const std::string row_context = std::string(context)
+            + ".cross_concept_comparisons[" + std::to_string(index) + "]";
+        for (const auto* field : { "left_concept_id", "right_concept_id" }) {
+            require_canonical_entity(
+                entities, required_string(row, field, row_context), "concept",
+                row_context + "." + field
+            );
+        }
+    }
+
+    validate_medium_chronology_references(
+        entities,
+        required_array(cross_media, "medium_precedence_summaries", context),
+        "analysis.cross_media.medium_precedence_summaries",
+        "earlier_concept_id", "later_concept_id"
+    );
+    validate_medium_chronology_references(
+        entities,
+        required_array(cross_media, "synchronized_medium_summaries", context),
+        "analysis.cross_media.synchronized_medium_summaries",
+        "first_concept_id", "second_concept_id"
+    );
+    validate_undominated_cross_media_cluster_references(
+        entities,
+        required_array(
+            cross_media, "undominated_multi_medium_clusters", context
+        ),
+        "analysis.cross_media.undominated_multi_medium_clusters"
+    );
+
+    validate_concept_clustering_references(
+        entities, required_array(cross_media, "clusterings", context),
+        "analysis.cross_media.clusterings"
+    );
+    const json& disagreements
+        = required_array(cross_media, "clustering_disagreements", context);
+    for (std::size_t index = 0; index < disagreements.size(); ++index) {
+        const json& disagreement = disagreements.at(index);
+        const std::string disagreement_context = std::string(context)
+            + ".clustering_disagreements[" + std::to_string(index) + "]";
+        const json& boundaries = required_array(
+            disagreement, "boundary_concepts", disagreement_context
+        );
+        for (std::size_t boundary_index = 0; boundary_index < boundaries.size();
+             ++boundary_index) {
+            const std::string boundary_context = disagreement_context
+                + ".boundary_concepts[" + std::to_string(boundary_index) + "]";
+            require_canonical_entity(
+                entities,
+                required_string(
+                    boundaries.at(boundary_index), "concept_id", boundary_context
+                ),
+                "concept", boundary_context + ".concept_id"
+            );
+        }
+    }
+
+    const json& bridge_agents
+        = required_array(cross_media, "bridge_agents", context);
+    for (std::size_t index = 0; index < bridge_agents.size(); ++index) {
+        const std::string row_context = std::string(context)
+            + ".bridge_agents[" + std::to_string(index) + "]";
+        require_canonical_entity(
+            entities,
+            required_string(bridge_agents.at(index), "agent_id", row_context),
+            "agent", row_context + ".agent_id"
+        );
+        validate_weak_cluster_connection_references(
+            entities, bridge_agents.at(index), row_context
+        );
+    }
+    const json& bridge_works
+        = required_array(cross_media, "bridge_works", context);
+    for (std::size_t index = 0; index < bridge_works.size(); ++index) {
+        const json& row = bridge_works.at(index);
+        const std::string row_context = std::string(context)
+            + ".bridge_works[" + std::to_string(index) + "]";
+        require_canonical_entity(
+            entities, required_string(row, "work_id", row_context), "work",
+            row_context + ".work_id"
+        );
+        validate_internal_id_array(
+            evidence_ids, required_array(row, "evidence_ids", row_context),
+            row_context + ".evidence_ids"
+        );
+        validate_internal_id_array(
+            source_ids, required_array(row, "source_ids", row_context),
+            row_context + ".source_ids"
+        );
+        validate_weak_cluster_connection_references(
+            entities, row, row_context
+        );
+    }
+}
+
+void validate_centrality_diagnostic_references(
+    const canonical_family_index& entities, const json& diagnostics,
+    const std::string_view algorithm_version, const json& snapshot
+) {
+    constexpr std::string_view context = "analysis.centrality_diagnostics";
+    validate_analysis_section_binding(
+        diagnostics, context, algorithm_version, snapshot
+    );
+    for (const auto* field : { "overall", "by_concept_type",
+                              "by_relation_type", "by_medium",
+                              "confidence_presence",
+                              "historical_role_distribution" }) {
+        static_cast<void>(required_object(diagnostics, field, context));
+    }
+    const json& saturation
+        = required_array(diagnostics, "concept_saturation", context);
+    for (std::size_t index = 0; index < saturation.size(); ++index) {
+        const std::string row_context = std::string(context)
+            + ".concept_saturation[" + std::to_string(index) + "]";
+        require_canonical_entity(
+            entities,
+            required_string(saturation.at(index), "concept_id", row_context),
+            "concept", row_context + ".concept_id"
+        );
+    }
+    const json& experiments
+        = required_array(diagnostics, "normalization_experiments", context);
+    for (std::size_t index = 0; index < experiments.size(); ++index) {
+        const json& row = experiments.at(index);
+        const std::string row_context = std::string(context)
+            + ".normalization_experiments[" + std::to_string(index) + "]";
+        require_canonical_entity(
+            entities, required_string(row, "work_id", row_context), "work",
+            row_context + ".work_id"
+        );
+        require_canonical_entity(
+            entities, required_string(row, "concept_id", row_context),
+            "concept", row_context + ".concept_id"
+        );
+    }
+    const json& sensitivity
+        = required_object(diagnostics, "weighting_sensitivity", context);
+    for (const auto* field : { "material_examples", "negligible_examples" }) {
+        const json& examples = required_array(sensitivity, field, context);
+        for (std::size_t index = 0; index < examples.size(); ++index) {
+            const json& row = examples.at(index);
+            const std::string row_context = std::string(context)
+                + ".weighting_sensitivity." + field + "["
+                + std::to_string(index) + "]";
+            for (const auto* id_field : { "left_id", "right_id" }) {
+                require_canonical_entity(
+                    entities, required_string(row, id_field, row_context),
+                    "concept", row_context + "." + id_field
+                );
+            }
+        }
+    }
+}
+
+void validate_genre_like_references(
+    const canonical_family_index& entities, const json& signatures
+) {
+    for (std::size_t index = 0; index < signatures.size(); ++index) {
+        const json& row = signatures.at(index);
+        const std::string row_context = "analysis.genre_like_signatures["
+            + std::to_string(index) + "]";
+        require_canonical_entity(
+            entities, required_string(row, "concept_id", row_context),
+            "concept", row_context + ".concept_id"
+        );
+        const json& contexts
+            = required_array(row, "characteristic_contexts", row_context);
+        for (std::size_t context_index = 0; context_index < contexts.size();
+             ++context_index) {
+            const std::string item_context = row_context
+                + ".characteristic_contexts[" + std::to_string(context_index)
+                + "]";
+            require_canonical_entity(
+                entities,
+                required_string(
+                    contexts.at(context_index), "concept_id", item_context
+                ),
+                "concept", item_context + ".concept_id"
+            );
+        }
+    }
+}
+
+void validate_mixed_family_references(
+    const canonical_family_index& entities, const json& mixed
+) {
+    constexpr std::string_view context = "analysis.mixed_family_structure";
+    const json& proximity
+        = required_array(mixed, "proximity_hints", context);
+    for (std::size_t index = 0; index < proximity.size(); ++index) {
+        const std::string row_context = std::string(context)
+            + ".proximity_hints[" + std::to_string(index) + "]";
+        validate_typed_entity_reference(
+            entities, proximity.at(index), "left_id", "left_family",
+            row_context
+        );
+        validate_typed_entity_reference(
+            entities, proximity.at(index), "right_id", "right_family",
+            row_context
+        );
+    }
+    const json& clusterings = required_array(mixed, "clusterings", context);
+    for (std::size_t index = 0; index < clusterings.size(); ++index) {
+        const std::string clustering_context = std::string(context)
+            + ".clusterings[" + std::to_string(index) + "]";
+        const json& clusters = required_array(
+            clusterings.at(index), "clusters", clustering_context
+        );
+        for (std::size_t cluster_index = 0; cluster_index < clusters.size();
+             ++cluster_index) {
+            const std::string cluster_context = clustering_context
+                + ".clusters[" + std::to_string(cluster_index) + "]";
+            const json& members = required_array(
+                clusters.at(cluster_index), "members", cluster_context
+            );
+            for (std::size_t member_index = 0; member_index < members.size();
+                 ++member_index) {
+                validate_typed_entity_reference(
+                    entities, members.at(member_index), "entity_id", "family",
+                    cluster_context + ".members["
+                        + std::to_string(member_index) + "]"
+                );
+            }
+        }
+    }
+}
+
 void validate_priority_detail_references(
     const canonical_family_index& entities, const json& priority,
     const std::string_view context
@@ -1340,7 +2235,7 @@ void validate_priority_detail_references(
             );
         }
     }
-    for (const auto* field : { "shared_work_ids" }) {
+    for (const auto* field : { "shared_work_ids", "dominant_work_ids" }) {
         if (details.contains(field)) {
             validate_entity_id_array(
                 entities, details.at(field), "work",
@@ -1423,7 +2318,8 @@ void validate_priority_references(
 }
 
 void validate_trajectory_references(
-    const canonical_family_index& entities, const json& signatures
+    const canonical_family_index& entities, const canonical_type_index& types,
+    const json& signatures
 ) {
     for (std::size_t index = 0; index < signatures.size(); ++index) {
         const json& signature = signatures.at(index);
@@ -1434,6 +2330,14 @@ void validate_trajectory_references(
         );
         validate_typed_entity_reference(
             entities, signature, "right_id", "right_family", context
+        );
+        validate_canonical_type_reference(
+            types, signature, "left_id", "left_entity_type",
+            "left_family_type", context
+        );
+        validate_canonical_type_reference(
+            types, signature, "right_id", "right_entity_type",
+            "right_family_type", context
         );
     }
 }
@@ -1458,7 +2362,8 @@ void validate_pair_view_rows(
 }
 
 void validate_view_references(
-    const canonical_family_index& entities, const json& views
+    const canonical_family_index& entities, const canonical_type_index& types,
+    const json& views
 ) {
     const json& top_neighbors
         = required_object(views, "top_neighbors", "analysis.views");
@@ -1530,7 +2435,7 @@ void validate_view_references(
         }
     }
     validate_trajectory_references(
-        entities,
+        entities, types,
         required_array(views, "sequence_alignment_outliers", "analysis.views")
     );
 }
@@ -1598,25 +2503,452 @@ void validate_ancestry_references(
     }
 }
 
+void validate_external_classification_comparison(
+    const canonical_family_index& entities, const canonical_type_index& types,
+    const json& comparison, const std::string_view algorithm_version,
+    const json& snapshot
+) {
+    constexpr std::int64_t minimum_side_support = 2;
+    constexpr std::int64_t minimum_shared_support = 2;
+    constexpr double minimum_containment = 0.60;
+    constexpr double minimum_margin = 0.15;
+    constexpr double tolerance = 1.0e-12;
+    constexpr std::int64_t maximum_count
+        = std::numeric_limits<std::int64_t>::max();
+    const std::string context
+        = "analysis.external_classification_comparison";
+    if (!comparison.is_object()
+        || required_string(comparison, "algorithm_version", context)
+            != algorithm_version
+        || required_object(comparison, "product_snapshot", context)
+            != snapshot) {
+        invalid_projection(
+            context + " has a stale algorithm version or product snapshot"
+        );
+    }
+    if (required_boolean(comparison, "treated_as_ground_truth", context)
+        || required_boolean(
+            comparison, "used_to_calibrate_parameters", context
+        )
+        || required_boolean(comparison, "calibrated_probability", context)
+        || required_boolean(comparison, "canonical_values_written", context)
+        || !required_boolean(comparison, "disposable", context)) {
+        invalid_projection(context + " violates the analytical-only policy");
+    }
+    const json& method = required_object(comparison, "method", context);
+    if (required_string(method, "signal", context + ".method")
+            != "directional_canonical_work_set_containment"
+        || required_string(method, "scope", context + ".method")
+            != "all_works"
+        || required_integer(
+               method, "minimum_relation_side_support", context + ".method",
+               0, maximum_count
+           )
+            != minimum_side_support
+        || required_integer(
+               method, "minimum_relation_shared_support",
+               context + ".method", 0, maximum_count
+           )
+            != minimum_shared_support
+        || required_boolean(
+            method, "absence_of_agreement_is_disagreement",
+            context + ".method"
+        )) {
+        invalid_projection(context + ".method is inconsistent");
+    }
+    const double containment_threshold = required_finite_number(
+        method, "minimum_directional_containment", context + ".method"
+    ).get<double>();
+    const double margin_threshold = required_finite_number(
+        method, "minimum_directional_margin", context + ".method"
+    ).get<double>();
+    if (std::abs(containment_threshold - minimum_containment) > tolerance
+        || std::abs(margin_threshold - minimum_margin) > tolerance) {
+        invalid_projection(context + ".method thresholds are inconsistent");
+    }
+
+    const json& rows = required_array(comparison, "comparisons", context);
+    std::map<std::string, std::int64_t, std::less<>> actual_counts {
+        { "agreement", 0 },
+        { "disagreement", 0 },
+        { "inconclusive", 0 },
+        { "insufficient_support", 0 },
+    };
+    std::set<std::pair<std::string, std::string>, std::less<>> pairs;
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        const json& row = rows.at(index);
+        const std::string row_context
+            = context + ".comparisons[" + std::to_string(index) + "]";
+        const std::string& broader
+            = required_string(row, "broader_concept_id", row_context);
+        const std::string& narrower
+            = required_string(row, "narrower_concept_id", row_context);
+        require_canonical_entity(
+            entities, broader, "concept", row_context + ".broader_concept_id"
+        );
+        require_canonical_entity(
+            entities, narrower, "concept",
+            row_context + ".narrower_concept_id"
+        );
+        const auto broader_type = types.find(broader);
+        const auto narrower_type = types.find(narrower);
+        if (broader == narrower || broader_type == types.end()
+            || narrower_type == types.end()
+            || required_string(
+                   row, "broader_canonical_concept_type", row_context
+               )
+                != broader_type->second.family_type
+            || required_string(
+                   row, "narrower_canonical_concept_type", row_context
+               )
+                != narrower_type->second.family_type
+            || !pairs.emplace(broader, narrower).second) {
+            invalid_projection(
+                row_context
+                + " has invalid canonical types or a duplicate relation"
+            );
+        }
+        const json& provider_relation_id
+            = required_field(row, "provider_relation_id", row_context);
+        if (!provider_relation_id.is_null()
+            && (!provider_relation_id.is_string()
+                || provider_relation_id.get_ref<const std::string&>().empty())) {
+            invalid_projection(
+                row_context + ".provider_relation_id is invalid"
+            );
+        }
+        const std::int64_t broader_support = required_integer(
+            row, "broader_work_support", row_context, 0, maximum_count
+        );
+        const std::int64_t narrower_support = required_integer(
+            row, "narrower_work_support", row_context, 0, maximum_count
+        );
+        const std::int64_t shared_support = required_integer(
+            row, "shared_work_support", row_context, 0, maximum_count
+        );
+        if (shared_support > broader_support
+            || shared_support > narrower_support) {
+            invalid_projection(row_context + " has impossible work support");
+        }
+        const double narrower_inside_broader = required_finite_number(
+            row, "narrower_inside_broader", row_context
+        ).get<double>();
+        const double broader_inside_narrower = required_finite_number(
+            row, "broader_inside_narrower", row_context
+        ).get<double>();
+        const double margin = required_finite_number(
+            row, "directional_margin", row_context
+        ).get<double>();
+        const auto ratio = [](const std::int64_t numerator,
+                              const std::int64_t denominator) {
+            return denominator == 0
+                ? 0.0
+                : static_cast<double>(numerator)
+                    / static_cast<double>(denominator);
+        };
+        const double expected_forward
+            = ratio(shared_support, narrower_support);
+        const double expected_reverse
+            = ratio(shared_support, broader_support);
+        if (narrower_inside_broader < 0.0 || narrower_inside_broader > 1.0
+            || broader_inside_narrower < 0.0
+            || broader_inside_narrower > 1.0 || margin < -1.0
+            || margin > 1.0
+            || std::abs(narrower_inside_broader - expected_forward) > tolerance
+            || std::abs(broader_inside_narrower - expected_reverse) > tolerance
+            || std::abs(margin - (expected_forward - expected_reverse))
+                > tolerance) {
+            invalid_projection(row_context + " has inconsistent measurements");
+        }
+        std::string expected_classification;
+        if (broader_support < minimum_side_support
+            || narrower_support < minimum_side_support
+            || shared_support < minimum_shared_support) {
+            expected_classification = "insufficient_support";
+        } else if (expected_forward >= minimum_containment
+                   && expected_forward - expected_reverse >= minimum_margin) {
+            expected_classification = "agreement";
+        } else if (expected_reverse >= minimum_containment
+                   && expected_reverse - expected_forward >= minimum_margin) {
+            expected_classification = "disagreement";
+        } else {
+            expected_classification = "inconclusive";
+        }
+        const std::string& classification
+            = required_string(row, "classification", row_context);
+        if (classification != expected_classification
+            || required_boolean(
+                row, "classification_is_ground_truth", row_context
+            )
+            || required_boolean(
+                row, "canonical_relation_written", row_context
+            )) {
+            invalid_projection(
+                row_context + " has an invalid classification or policy"
+            );
+        }
+        ++actual_counts.at(classification);
+    }
+
+    const json& summary = required_object(comparison, "summary", context);
+    for (const auto& [classification, count] : actual_counts) {
+        if (required_integer(
+                summary, classification, context + ".summary", 0,
+                maximum_count
+            )
+            != count) {
+            invalid_projection(context + ".summary counts are inconsistent");
+        }
+    }
+    const std::string& status = required_string(comparison, "status", context);
+    const json& input = required_field(comparison, "input", context);
+    if (status == "not_supplied") {
+        if (!input.is_null() || !rows.empty()) {
+            invalid_projection(
+                context + " not_supplied output must contain no input or rows"
+            );
+        }
+    } else if (status == "compared") {
+        if (!input.is_object()
+            || required_string(input, "contract", context + ".input")
+                != "arachne_external_genre_hierarchy_v1"
+            || required_integer(
+                   input, "version", context + ".input", 1, 1
+               )
+                != 1) {
+            invalid_projection(context + ".input has an invalid contract");
+        }
+        static_cast<void>(required_string(
+            input, "provider", context + ".input"
+        ));
+        static_cast<void>(required_string(
+            input, "dataset_version", context + ".input"
+        ));
+        if (required_integer(
+                input, "relation_count", context + ".input", 0,
+                maximum_count
+            )
+            != static_cast<std::int64_t>(rows.size())) {
+            invalid_projection(context + ".input relation count is invalid");
+        }
+    } else {
+        invalid_projection(context + ".status is invalid");
+    }
+}
+
+void validate_external_classification_manifest(
+    const json& manifest, const json& comparison
+) {
+    const std::string context
+        = "analysis.manifest.external_classification_calibration";
+    const json& summary = required_object(
+        manifest, "external_classification_calibration", "analysis.manifest"
+    );
+    const std::string& status
+        = required_string(comparison, "status", "external comparison");
+    const bool supplied = status == "compared";
+    if (required_string(summary, "status", context) != status
+        || !required_boolean(summary, "optional", context)
+        || required_boolean(summary, "used_by_this_run", context) != supplied
+        || required_string(summary, "comparison_section", context)
+            != "external_classification_comparison"
+        || required_boolean(summary, "treated_as_ground_truth", context)
+        || required_boolean(summary, "used_to_calibrate_parameters", context)
+        || required_boolean(
+            summary, "popularity_or_platform_usage_used", context
+        )
+        || required_boolean(summary, "canonical_values_written", context)) {
+        invalid_projection(
+            context + " is inconsistent with the comparison policy"
+        );
+    }
+    static_cast<void>(required_string(summary, "policy", context));
+    if (supplied) {
+        const json& input
+            = required_object(comparison, "input", "external comparison");
+        if (required_string(summary, "provider", context)
+                != required_string(input, "provider", "external input")
+            || required_string(summary, "dataset_version", context)
+                != required_string(
+                    input, "dataset_version", "external input"
+                )
+            || required_integer(
+                   summary, "relation_count", context, 0,
+                   std::numeric_limits<std::int64_t>::max()
+               )
+                != required_integer(
+                    input, "relation_count", "external input", 0,
+                    std::numeric_limits<std::int64_t>::max()
+                )
+            || required_object(summary, "summary", context)
+                != required_object(
+                    comparison, "summary", "external comparison"
+                )) {
+            invalid_projection(
+                context + " does not summarize the comparison section"
+            );
+        }
+    }
+}
+
 void validate_analysis_entity_references(
     sqlite3* const sql, const json& analysis
 ) {
     const canonical_family_index entities = canonical_entity_families(sql);
+    const canonical_type_index types = canonical_entity_types(sql);
+    const canonical_work_date_index dates = canonical_work_dates(sql);
+    const canonical_concept_relation_index relations
+        = canonical_concept_relations(sql);
+    const canonical_internal_id_index evidence_ids = canonical_internal_ids(
+        sql, "SELECT CAST(id AS TEXT) FROM product.evidence"
+    );
+    const canonical_internal_id_index source_ids = canonical_internal_ids(
+        sql, "SELECT CAST(id AS TEXT) FROM product.sources"
+    );
+    const auto& algorithm_version
+        = required_string(analysis, "algorithm_version", "analysis");
+    const json& snapshot = required_object(analysis, "snapshot", "analysis");
     validate_observation_detail_references(
-        entities, analysis.at("observations")
+        entities, dates, relations, evidence_ids, source_ids,
+        analysis.at("observations")
     );
+    for (std::size_t index = 0; index < analysis.at("observations").size();
+         ++index) {
+        const json& value = analysis.at("observations").at(index);
+        const std::string context
+            = "analysis.observations[" + std::to_string(index) + "]";
+        validate_canonical_type_reference(
+            types, value, "left_id", "left_entity_type", "left_family_type",
+            context
+        );
+        validate_canonical_type_reference(
+            types, value, "right_id", "right_entity_type",
+            "right_family_type", context
+        );
+    }
     validate_work_quality_references(entities, analysis.at("work_quality"));
-    validate_sequence_references(entities, analysis.at("sequences"));
+    validate_sequence_references(entities, dates, analysis.at("sequences"));
+    for (std::size_t index = 0; index < analysis.at("sequences").size();
+         ++index) {
+        validate_canonical_type_reference(
+            types, analysis.at("sequences").at(index), "entity_id",
+            "canonical_entity_type", "canonical_family_type",
+            "analysis.sequences[" + std::to_string(index) + "]"
+        );
+    }
     validate_fingerprint_references(
-        entities, analysis.at("structural_fingerprints")
+        entities, dates, analysis.at("structural_fingerprints")
     );
+    for (std::size_t index = 0;
+         index < analysis.at("structural_fingerprints").size(); ++index) {
+        validate_canonical_type_reference(
+            types, analysis.at("structural_fingerprints").at(index),
+            "entity_id", "canonical_entity_type", "canonical_family_type",
+            "analysis.structural_fingerprints[" + std::to_string(index) + "]"
+        );
+    }
     validate_priority_references(entities, analysis.at("research_priorities"));
     validate_clustering_references(entities, analysis.at("clusterings"));
     validate_trajectory_references(
-        entities, analysis.at("trajectory_signatures")
+        entities, types, analysis.at("trajectory_signatures")
     );
     validate_ancestry_references(entities, analysis.at("ancestry"));
-    validate_view_references(entities, analysis.at("views"));
+    validate_view_references(entities, types, analysis.at("views"));
+    validate_cross_media_references(
+        entities, evidence_ids, source_ids, analysis.at("cross_media"),
+        algorithm_version, snapshot
+    );
+    validate_centrality_diagnostic_references(
+        entities, analysis.at("centrality_diagnostics"), algorithm_version,
+        snapshot
+    );
+    validate_genre_like_references(
+        entities, analysis.at("genre_like_signatures")
+    );
+    validate_mixed_family_references(
+        entities, analysis.at("mixed_family_structure")
+    );
+    validate_external_classification_comparison(
+        entities, types, analysis.at("external_classification_comparison"),
+        algorithm_version, snapshot
+    );
+    validate_external_classification_manifest(
+        analysis.at("manifest"),
+        analysis.at("external_classification_comparison")
+    );
+}
+
+[[nodiscard]] json stored_analysis_section(
+    sqlite3* const sql, const std::string_view section
+) {
+    statement query(
+        sql,
+        "SELECT payload_json FROM main.analysis_projections WHERE section=?"
+    );
+    query.bind(1, section);
+    if (!query.step()) {
+        throw merge_hint_store_error(
+            "structural analysis projection is missing required section "
+            + std::string(section)
+        );
+    }
+    json result = json::parse(query.text(0), nullptr, false);
+    if (result.is_discarded()) {
+        throw merge_hint_store_error(
+            "structural analysis projection contains invalid JSON in section "
+            + std::string(section)
+        );
+    }
+    return result;
+}
+
+void validate_stored_extended_analysis_references(sqlite3* const sql) {
+    const canonical_family_index entities = canonical_entity_families(sql);
+    const canonical_type_index types = canonical_entity_types(sql);
+    const canonical_internal_id_index evidence_ids = canonical_internal_ids(
+        sql, "SELECT CAST(id AS TEXT) FROM product.evidence"
+    );
+    const canonical_internal_id_index source_ids = canonical_internal_ids(
+        sql, "SELECT CAST(id AS TEXT) FROM product.sources"
+    );
+    const std::string algorithm_version
+        = metadata_value(sql, "structural_algorithm_version");
+    const json snapshot {
+        { "schema_version",
+          std::stoll(metadata_value(sql, "product_schema_version")) },
+        { "sha256", metadata_value(sql, "product_sha256") },
+    };
+    const json cross_media = stored_analysis_section(sql, "cross_media");
+    const json centrality
+        = stored_analysis_section(sql, "centrality_diagnostics");
+    const json genre_like
+        = stored_analysis_section(sql, "genre_like_signatures");
+    const json mixed
+        = stored_analysis_section(sql, "mixed_family_structure");
+    const json external = stored_analysis_section(
+        sql, "external_classification_comparison"
+    );
+    const json manifest = stored_analysis_section(sql, "manifest");
+    if (!cross_media.is_object() || !centrality.is_object()
+        || !genre_like.is_array() || !mixed.is_object()
+        || !external.is_object()) {
+        throw merge_hint_store_error(
+            "structural analysis extension sections have invalid types"
+        );
+    }
+    validate_cross_media_references(
+        entities, evidence_ids, source_ids, cross_media, algorithm_version,
+        snapshot
+    );
+    validate_centrality_diagnostic_references(
+        entities, centrality, algorithm_version, snapshot
+    );
+    validate_genre_like_references(entities, genre_like);
+    validate_mixed_family_references(entities, mixed);
+    validate_external_classification_comparison(
+        entities, types, external, algorithm_version, snapshot
+    );
+    validate_external_classification_manifest(manifest, external);
 }
 
 void validate_analysis_for_storage(const json& projection) {
@@ -1644,7 +2976,8 @@ void validate_analysis_for_storage(const json& projection) {
         = required_object(analysis, "snapshot", "analysis");
     for (const auto* section :
          { "work_quality", "sequences", "trajectory_signatures", "clusterings",
-           "structural_fingerprints", "research_priorities" }) {
+           "structural_fingerprints", "genre_like_signatures",
+           "research_priorities" }) {
         const json& payload = required_field(analysis, section, "analysis");
         if (!payload.is_array()) {
             invalid_projection(
@@ -1652,7 +2985,10 @@ void validate_analysis_for_storage(const json& projection) {
             );
         }
     }
-    for (const auto* section : { "ancestry", "views", "manifest" }) {
+    for (const auto* section :
+         { "ancestry", "views", "manifest", "cross_media",
+           "centrality_diagnostics", "mixed_family_structure",
+           "external_classification_comparison" }) {
         static_cast<void>(required_object(analysis, section, "analysis"));
     }
     const json& observations
@@ -1687,6 +3023,14 @@ void validate_analysis_for_storage(const json& projection) {
             = required_string(value, "left_family", context);
         const auto& right_family
             = required_string(value, "right_family", context);
+        static_cast<void>(required_string(value, "left_entity_type", context));
+        static_cast<void>(
+            required_string(value, "right_entity_type", context)
+        );
+        static_cast<void>(required_string(value, "left_family_type", context));
+        static_cast<void>(
+            required_string(value, "right_family_type", context)
+        );
         require_family(left_family, context);
         require_family(right_family, context);
         if (left == right) {
@@ -1930,12 +3274,37 @@ void require_derived_consistency(sqlite3* const sql) {
     );
     require_zero(
         "SELECT count(*) FROM ("
+        " SELECT left_id AS entity_id,"
+        " json_extract(extra_json,'$.left_entity_type') AS entity_type,"
+        " json_extract(extra_json,'$.left_family_type') AS family_type"
+        " FROM main.analytical_observations"
+        " UNION ALL SELECT right_id,"
+        " json_extract(extra_json,'$.right_entity_type'),"
+        " json_extract(extra_json,'$.right_family_type')"
+        " FROM main.analytical_observations"
+        ") r JOIN product.entities e ON e.id=r.entity_id"
+        " LEFT JOIN product.works w ON w.entity_id=e.id"
+        " LEFT JOIN product.concepts c ON c.entity_id=e.id"
+        " WHERE r.entity_type IS NOT e.entity_type"
+        " OR r.family_type IS NOT CASE"
+        " WHEN e.entity_type IN('person','organization','group')"
+        " THEN e.entity_type WHEN e.entity_type='work' THEN w.medium"
+        " WHEN e.entity_type='concept' THEN c.concept_type END",
+        "analytical observations do not preserve canonical entity types"
+    );
+    require_zero(
+        "SELECT count(*) FROM ("
         " SELECT 'contract' AS section UNION ALL SELECT 'version'"
         " UNION ALL SELECT 'algorithm_version' UNION ALL SELECT 'snapshot'"
         " UNION ALL SELECT 'work_quality' UNION ALL SELECT 'sequences'"
         " UNION ALL SELECT 'trajectory_signatures'"
         " UNION ALL SELECT 'clusterings'"
         " UNION ALL SELECT 'structural_fingerprints'"
+        " UNION ALL SELECT 'cross_media'"
+        " UNION ALL SELECT 'centrality_diagnostics'"
+        " UNION ALL SELECT 'genre_like_signatures'"
+        " UNION ALL SELECT 'mixed_family_structure'"
+        " UNION ALL SELECT 'external_classification_comparison'"
         " UNION ALL SELECT 'research_priorities'"
         " UNION ALL SELECT 'ancestry' UNION ALL SELECT 'views'"
         " UNION ALL SELECT 'manifest'"
@@ -1946,9 +3315,12 @@ void require_derived_consistency(sqlite3* const sql) {
     require_zero(
         "SELECT count(*) FROM main.analysis_projections WHERE"
         " (section IN('work_quality','sequences','trajectory_signatures',"
-        "  'clusterings','structural_fingerprints','research_priorities')"
+        "  'clusterings','structural_fingerprints','genre_like_signatures',"
+        "  'research_priorities')"
         "  AND json_type(payload_json)<>'array')"
-        " OR (section IN('snapshot','ancestry','views','manifest')"
+        " OR (section IN('snapshot','ancestry','views','manifest',"
+        "  'cross_media','centrality_diagnostics','mixed_family_structure',"
+        "  'external_classification_comparison')"
         "  AND json_type(payload_json)<>'object')"
         " OR (section IN('contract','algorithm_version')"
         "  AND (json_type(payload_json)<>'text'"
@@ -1966,6 +3338,15 @@ void require_derived_consistency(sqlite3* const sql) {
         "   CAST((SELECT value FROM main.metadata"
         "    WHERE key='product_schema_version') AS INTEGER)"
         "  OR json_extract(payload_json,'$.sha256') IS NOT"
+        "   (SELECT value FROM main.metadata WHERE key='product_sha256')))"
+        " OR (section='external_classification_comparison' AND ("
+        "  json_extract(payload_json,'$.algorithm_version') IS NOT"
+        "   (SELECT value FROM main.metadata"
+        "    WHERE key='structural_algorithm_version')"
+        "  OR json_extract(payload_json,'$.product_snapshot.schema_version')"
+        "   IS NOT CAST((SELECT value FROM main.metadata"
+        "    WHERE key='product_schema_version') AS INTEGER)"
+        "  OR json_extract(payload_json,'$.product_snapshot.sha256') IS NOT"
         "   (SELECT value FROM main.metadata WHERE key='product_sha256')))",
         "structural analysis projection has stale contract or snapshot binding"
     );
@@ -1982,6 +3363,7 @@ void require_derived_consistency(sqlite3* const sql) {
         "  WHERE key='structural_algorithm_version')",
         "structural analysis does not match the pinned algorithm version"
     );
+    validate_stored_extended_analysis_references(sql);
 }
 
 } // namespace
