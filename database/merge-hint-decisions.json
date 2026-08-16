@@ -1,1 +1,996 @@
-{"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[{"family":"work","left_id":"work-001289","right_id":"work-001292"},{"family":"work","left_id":"work-001436","right_id":"work-009784"},{"family":"work","left_id":"work-001452","right_id":"work-001453"},{"family":"work","left_id":"work-001598","right_id":"work-001599"},{"family":"work","left_id":"work-001858","right_id":"work-001859"},{"family":"work","left_id":"work-002340","right_id":"work-002341"},{"family":"work","left_id":"work-002482","right_id":"work-010635"},{"family":"work","left_id":"work-002550","right_id":"work-002551"},{"family":"work","left_id":"work-002563","right_id":"work-002564"},{"family":"work","left_id":"work-002705","right_id":"work-002713"},{"family":"work","left_id":"work-002713","right_id":"work-002714"},{"family":"work","left_id":"work-002718","right_id":"work-006968"},{"family":"work","left_id":"work-003405","right_id":"work-003406"},{"family":"work","left_id":"work-003410","right_id":"work-003411"},{"family":"work","left_id":"work-003460","right_id":"work-003461"},{"family":"work","left_id":"work-003809","right_id":"work-007885"},{"family":"work","left_id":"work-004707","right_id":"work-004708"},{"family":"work","left_id":"work-004853","right_id":"work-004854"},{"family":"work","left_id":"work-004853","right_id":"work-004855"},{"family":"work","left_id":"work-004854","right_id":"work-004855"},{"family":"work","left_id":"work-006467","right_id":"work-006469"},{"family":"work","left_id":"work-006510","right_id":"work-010877"},{"family":"work","left_id":"work-006535","right_id":"work-006536"},{"family":"work","left_id":"work-007063","right_id":"work-007064"}]}
+{
+  "artifact_type": "arachne_merge_hint_decisions_v1",
+  "format_version": 1,
+  "ignored_pairs": [
+    {
+      "family": "agent",
+      "left_id": "agent-000017",
+      "right_id": "agent-000723"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000022",
+      "right_id": "agent-000495"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000022",
+      "right_id": "agent-000497"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000022",
+      "right_id": "agent-000513"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000022",
+      "right_id": "agent-000514"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000086",
+      "right_id": "agent-001317"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000224",
+      "right_id": "agent-000822"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000273",
+      "right_id": "agent-011680"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000323",
+      "right_id": "agent-000571"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000382",
+      "right_id": "agent-000404"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000395",
+      "right_id": "agent-000707"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000417",
+      "right_id": "agent-001230"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000467",
+      "right_id": "agent-000573"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000469",
+      "right_id": "agent-000594"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000495",
+      "right_id": "agent-000497"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000497",
+      "right_id": "agent-000498"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000513",
+      "right_id": "agent-000514"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000540",
+      "right_id": "agent-011650"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000564",
+      "right_id": "agent-001338"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000821",
+      "right_id": "agent-001261"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-000884",
+      "right_id": "agent-000899"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-001113",
+      "right_id": "agent-001176"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-001151",
+      "right_id": "agent-001203"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-001299",
+      "right_id": "agent-001301"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-010422",
+      "right_id": "agent-010423"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-010440",
+      "right_id": "agent-010441"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-012104",
+      "right_id": "agent-012105"
+    },
+    {
+      "family": "agent",
+      "left_id": "agent-012108",
+      "right_id": "agent-012109"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000108",
+      "right_id": "work-008890"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000121",
+      "right_id": "work-000123"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000225",
+      "right_id": "work-007440"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000305",
+      "right_id": "work-000306"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000377",
+      "right_id": "work-000378"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000517",
+      "right_id": "work-000930"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000652",
+      "right_id": "work-000653"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000659",
+      "right_id": "work-000660"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000905",
+      "right_id": "work-000906"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000905",
+      "right_id": "work-000907"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000906",
+      "right_id": "work-000907"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000923",
+      "right_id": "work-002069"
+    },
+    {
+      "family": "work",
+      "left_id": "work-000996",
+      "right_id": "work-000997"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001143",
+      "right_id": "work-008279"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001263",
+      "right_id": "work-010491"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001276",
+      "right_id": "work-001277"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001289",
+      "right_id": "work-001292"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001364",
+      "right_id": "work-001367"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001436",
+      "right_id": "work-009784"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001452",
+      "right_id": "work-001453"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001598",
+      "right_id": "work-001599"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001603",
+      "right_id": "work-001604"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001731",
+      "right_id": "work-008010"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001858",
+      "right_id": "work-001859"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001929",
+      "right_id": "work-003045"
+    },
+    {
+      "family": "work",
+      "left_id": "work-001991",
+      "right_id": "work-001992"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002127",
+      "right_id": "work-002128"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002340",
+      "right_id": "work-002341"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002481",
+      "right_id": "work-002482"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002482",
+      "right_id": "work-010635"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002550",
+      "right_id": "work-002551"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002563",
+      "right_id": "work-002564"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002635",
+      "right_id": "work-004428"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002705",
+      "right_id": "work-002713"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002705",
+      "right_id": "work-002714"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002707",
+      "right_id": "work-015937"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002713",
+      "right_id": "work-002714"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002718",
+      "right_id": "work-002719"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002718",
+      "right_id": "work-006968"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002830",
+      "right_id": "work-009284"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002830",
+      "right_id": "work-009328"
+    },
+    {
+      "family": "work",
+      "left_id": "work-002907",
+      "right_id": "work-004813"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003002",
+      "right_id": "work-003003"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003102",
+      "right_id": "work-006593"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003373",
+      "right_id": "work-003378"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003405",
+      "right_id": "work-003406"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003410",
+      "right_id": "work-003411"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003460",
+      "right_id": "work-003461"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003480",
+      "right_id": "work-003484"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003761",
+      "right_id": "work-003762"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003809",
+      "right_id": "work-007885"
+    },
+    {
+      "family": "work",
+      "left_id": "work-003843",
+      "right_id": "work-003922"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004370",
+      "right_id": "work-006683"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004374",
+      "right_id": "work-004375"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004399",
+      "right_id": "work-004400"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004399",
+      "right_id": "work-004401"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004399",
+      "right_id": "work-004402"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004400",
+      "right_id": "work-004401"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004400",
+      "right_id": "work-004402"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004400",
+      "right_id": "work-004403"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004400",
+      "right_id": "work-004404"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004401",
+      "right_id": "work-004402"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004401",
+      "right_id": "work-004403"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004401",
+      "right_id": "work-004404"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004402",
+      "right_id": "work-004403"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004402",
+      "right_id": "work-004404"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004403",
+      "right_id": "work-004404"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004707",
+      "right_id": "work-004708"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004728",
+      "right_id": "work-004729"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004812",
+      "right_id": "work-015664"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004853",
+      "right_id": "work-004854"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004853",
+      "right_id": "work-004855"
+    },
+    {
+      "family": "work",
+      "left_id": "work-004854",
+      "right_id": "work-004855"
+    },
+    {
+      "family": "work",
+      "left_id": "work-005308",
+      "right_id": "work-006365"
+    },
+    {
+      "family": "work",
+      "left_id": "work-005319",
+      "right_id": "work-009314"
+    },
+    {
+      "family": "work",
+      "left_id": "work-005774",
+      "right_id": "work-015950"
+    },
+    {
+      "family": "work",
+      "left_id": "work-005790",
+      "right_id": "work-006953"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006197",
+      "right_id": "work-010876"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006346",
+      "right_id": "work-006347"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006467",
+      "right_id": "work-006469"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006478",
+      "right_id": "work-006479"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006510",
+      "right_id": "work-010877"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006535",
+      "right_id": "work-006536"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006659",
+      "right_id": "work-015850"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006702",
+      "right_id": "work-006703"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006718",
+      "right_id": "work-016102"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006790",
+      "right_id": "work-006792"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006816",
+      "right_id": "work-010147"
+    },
+    {
+      "family": "work",
+      "left_id": "work-006916",
+      "right_id": "work-010184"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007055",
+      "right_id": "work-007056"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007063",
+      "right_id": "work-007064"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007112",
+      "right_id": "work-008743"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007172",
+      "right_id": "work-008493"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007219",
+      "right_id": "work-007220"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007536",
+      "right_id": "work-007541"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007536",
+      "right_id": "work-007543"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007541",
+      "right_id": "work-007543"
+    },
+    {
+      "family": "work",
+      "left_id": "work-007769",
+      "right_id": "work-015849"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008111",
+      "right_id": "work-008982"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008151",
+      "right_id": "work-009017"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008258",
+      "right_id": "work-009030"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008285",
+      "right_id": "work-009074"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008522",
+      "right_id": "work-009034"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008674",
+      "right_id": "work-008883"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008708",
+      "right_id": "work-010108"
+    },
+    {
+      "family": "work",
+      "left_id": "work-008999",
+      "right_id": "work-009105"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009171",
+      "right_id": "work-009295"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009175",
+      "right_id": "work-009285"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009177",
+      "right_id": "work-009298"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009180",
+      "right_id": "work-009323"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009187",
+      "right_id": "work-009316"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009187",
+      "right_id": "work-009321"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009189",
+      "right_id": "work-009312"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009198",
+      "right_id": "work-009300"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009202",
+      "right_id": "work-009375"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009202",
+      "right_id": "work-009774"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009228",
+      "right_id": "work-009377"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009250",
+      "right_id": "work-009307"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009274",
+      "right_id": "work-009376"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009284",
+      "right_id": "work-009328"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009316",
+      "right_id": "work-009321"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009375",
+      "right_id": "work-009774"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009836",
+      "right_id": "work-010149"
+    },
+    {
+      "family": "work",
+      "left_id": "work-009994",
+      "right_id": "work-009995"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010145",
+      "right_id": "work-010573"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010197",
+      "right_id": "work-010198"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010229",
+      "right_id": "work-010321"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010385",
+      "right_id": "work-010394"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010385",
+      "right_id": "work-010396"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010385",
+      "right_id": "work-010397"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010385",
+      "right_id": "work-010398"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010385",
+      "right_id": "work-010401"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010385",
+      "right_id": "work-010407"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010393",
+      "right_id": "work-010397"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010394",
+      "right_id": "work-010396"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010394",
+      "right_id": "work-010397"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010394",
+      "right_id": "work-010398"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010394",
+      "right_id": "work-010401"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010394",
+      "right_id": "work-010407"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010396",
+      "right_id": "work-010397"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010396",
+      "right_id": "work-010398"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010396",
+      "right_id": "work-010401"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010396",
+      "right_id": "work-010407"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010397",
+      "right_id": "work-010398"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010397",
+      "right_id": "work-010401"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010397",
+      "right_id": "work-010407"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010398",
+      "right_id": "work-010401"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010398",
+      "right_id": "work-010407"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010399",
+      "right_id": "work-010402"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010401",
+      "right_id": "work-010407"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010469",
+      "right_id": "work-010508"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010501",
+      "right_id": "work-010502"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010549",
+      "right_id": "work-010553"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010553",
+      "right_id": "work-010582"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010561",
+      "right_id": "work-010562"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010898",
+      "right_id": "work-030735"
+    },
+    {
+      "family": "work",
+      "left_id": "work-010900",
+      "right_id": "work-030738"
+    },
+    {
+      "family": "work",
+      "left_id": "work-011414",
+      "right_id": "work-011415"
+    },
+    {
+      "family": "work",
+      "left_id": "work-011442",
+      "right_id": "work-011448"
+    },
+    {
+      "family": "work",
+      "left_id": "work-011701",
+      "right_id": "work-011705"
+    },
+    {
+      "family": "work",
+      "left_id": "work-014436",
+      "right_id": "work-014437"
+    },
+    {
+      "family": "work",
+      "left_id": "work-014483",
+      "right_id": "work-014484"
+    },
+    {
+      "family": "work",
+      "left_id": "work-015591",
+      "right_id": "work-015592"
+    },
+    {
+      "family": "work",
+      "left_id": "work-015657",
+      "right_id": "work-015661"
+    },
+    {
+      "family": "work",
+      "left_id": "work-015658",
+      "right_id": "work-015662"
+    },
+    {
+      "family": "work",
+      "left_id": "work-015661",
+      "right_id": "work-015662"
+    },
+    {
+      "family": "work",
+      "left_id": "work-016015",
+      "right_id": "work-016040"
+    },
+    {
+      "family": "work",
+      "left_id": "work-020231",
+      "right_id": "work-020232"
+    },
+    {
+      "family": "work",
+      "left_id": "work-020240",
+      "right_id": "work-020241"
+    },
+    {
+      "family": "work",
+      "left_id": "work-020248",
+      "right_id": "work-020249"
+    }
+  ]
+}
