@@ -37,7 +37,7 @@ jobs:
       - uses: ssciwr/doxygen-install@501e53b879da7648ab392ee226f5b90e42148449
         with:
           version: "1.15.0"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm

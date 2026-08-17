@@ -43,7 +43,7 @@ jobs:
     environment: arachne-publication
     runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Require persistent-state settings
         env:
           STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
@@ -54,7 +54,7 @@ jobs:
           test -n "${STATE_BASE_BRANCH}"
           test -n "${STATE_TOKEN}"
       - name: Checkout reviewed persistent state
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
           ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
@@ -109,7 +109,7 @@ jobs:
             viewer/public/data/wikidata-image-hints.json \
             --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
             --product-snapshot-control "${PRODUCT_SNAPSHOT_PATH}"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -147,7 +147,7 @@ jobs:
             --site-root "${ARACHNE_SITE}" \
             --github-output "${GITHUB_OUTPUT}"
       - name: Upload immutable Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: ${{ steps.bundle.outputs.path }}
 
@@ -160,4 +160,4 @@ jobs:
     steps:
       - name: Deploy reviewed site bundle
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
