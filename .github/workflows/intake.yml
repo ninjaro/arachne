@@ -23,7 +23,7 @@ jobs:
     outputs:
       valid: ${{ steps.parse.outcome == 'success' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Parse batch attachment request
         id: parse
         continue-on-error: true
@@ -60,7 +60,7 @@ jobs:
       vars.ARACHNE_OPERATIONS_ENABLED == 'true'
     runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           lfs: true
       - name: Require protected transport settings
@@ -73,7 +73,7 @@ jobs:
           test -n "${STATE_BASE_BRANCH}"
           test -n "${STATE_TOKEN}"
       - name: Checkout protected transport state
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
           ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}

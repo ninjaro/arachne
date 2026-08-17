@@ -63,7 +63,7 @@ jobs:
       group: intake-state-write
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Require decision and persistent-state settings
         env:
           ENVELOPE_ID: ${{ inputs.envelope_id }}
@@ -78,7 +78,7 @@ jobs:
           test -n "${STATE_BASE_BRANCH}"
           test -n "${STATE_TOKEN}"
       - name: Checkout protected persistent state
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
           ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
