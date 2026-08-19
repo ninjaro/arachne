@@ -651,9 +651,6 @@ template <typename T>
         result.preferred = preferred->get<bool>();
     }
     result.normalized = normalize_text(result.value);
-    if (result.normalized.ordered.empty()) {
-        invalid(std::string(context) + ".value has no normalized text");
-    }
     result.parsed_installment = parse_installment(result.normalized);
     return result;
 }
@@ -1336,6 +1333,10 @@ template <typename T>
         for (const auto& right_label : right.labels) {
             const auto& left_text = left_label.normalized;
             const auto& right_text = right_label.normalized;
+            if (left_text.folded_ordered.empty()
+                || right_text.folded_ordered.empty()) {
+                continue;
+            }
             const bool exact_ordered
                 = left_text.ordered == right_text.ordered;
             const bool exact_folded
@@ -1436,6 +1437,9 @@ build_blocks(const std::vector<entity_record>& entities) {
     std::map<block_key, std::set<std::string, std::less<>>, std::less<>> blocks;
     for (const auto& entity : entities) {
         for (const auto& label : entity.labels) {
+            if (label.normalized.folded_ordered.empty()) {
+                continue;
+            }
             const std::string partition = installment_partition(label);
             const std::string token_key = label_block_value(label);
             add_block(blocks, entity, "label_token_fingerprint", token_key);
@@ -1602,6 +1606,9 @@ using label_frequency_map = std::map<
         std::set<std::string, std::less<>>, std::less<>> members;
     for (const auto& entity : entities) {
         for (const auto& label : entity.labels) {
+            if (label.normalized.folded_ordered.empty()) {
+                continue;
+            }
             members[{ entity.family, label.normalized.folded_ordered }]
                 .emplace(entity.id);
         }

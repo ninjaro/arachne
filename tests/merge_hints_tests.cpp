@@ -196,6 +196,23 @@ TEST(AriadneMergeHints, StrictSubsetDoesNotBecomePerfectTextSimilarity) {
     EXPECT_FALSE(value.at("strong_identity"));
 }
 
+TEST(AriadneMergeHints, SymbolOnlyPreferredLabelUsesTextualAliasForMatching) {
+    auto left = work("work-000001", "****");
+    left["labels"].push_back(label("Four Stars", false));
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input({
+        std::move(left),
+        work("work-000002", "Four Stars"),
+    }));
+    const auto value = candidate(
+        projection, "work", "work-000001", "work-000002"
+    );
+
+    EXPECT_EQ(value.at("left_label"), "****");
+    EXPECT_EQ(value.at("signals").at("ordered_left"), "four stars");
+    EXPECT_EQ(value.at("signals").at("ordered_right"), "four stars");
+    EXPECT_EQ(value.at("text_basis_points"), 10'000);
+}
+
 TEST(AriadneMergeHints, InstallmentPartitionsSuppressDifferentSequels) {
     const json credit = {
         { "agent_id", "agent-000001" },

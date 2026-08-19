@@ -89,11 +89,6 @@
     },
     {
       "family": "agent",
-      "left_id": "agent-000540",
-      "right_id": "agent-011650"
-    },
-    {
-      "family": "agent",
       "left_id": "agent-000564",
       "right_id": "agent-001338"
     },
@@ -206,11 +201,6 @@
       "family": "work",
       "left_id": "work-000996",
       "right_id": "work-000997"
-    },
-    {
-      "family": "work",
-      "left_id": "work-001143",
-      "right_id": "work-008279"
     },
     {
       "family": "work",
@@ -631,31 +621,6 @@
       "family": "work",
       "left_id": "work-007769",
       "right_id": "work-015849"
-    },
-    {
-      "family": "work",
-      "left_id": "work-008111",
-      "right_id": "work-008982"
-    },
-    {
-      "family": "work",
-      "left_id": "work-008151",
-      "right_id": "work-009017"
-    },
-    {
-      "family": "work",
-      "left_id": "work-008258",
-      "right_id": "work-009030"
-    },
-    {
-      "family": "work",
-      "left_id": "work-008285",
-      "right_id": "work-009074"
-    },
-    {
-      "family": "work",
-      "left_id": "work-008522",
-      "right_id": "work-009034"
     },
     {
       "family": "work",
