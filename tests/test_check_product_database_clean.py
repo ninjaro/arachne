@@ -19,7 +19,7 @@ class ProductDatabaseCleanTests(unittest.TestCase):
         connection = sqlite3.connect(path)
         connection.executescript(
             """
-            PRAGMA user_version = 6;
+            PRAGMA user_version = 7;
             CREATE TABLE entities(id TEXT PRIMARY KEY);
             """
         )
@@ -96,7 +96,7 @@ class ProductDatabaseCleanTests(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             document = json.loads(result.stdout)
             self.assertEqual(document["schemaVersion"], 5)
-            self.assertEqual(document["expectedSchemaVersion"], 6)
+            self.assertEqual(document["expectedSchemaVersion"], 7)
 
     def test_rejects_foreign_key_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

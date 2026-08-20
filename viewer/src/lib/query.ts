@@ -404,6 +404,7 @@ function matchWorkTerm(work: Work, term: QueryTerm): boolean {
           concept.slug,
           concept.conceptType,
           concept.relationType,
+          concept.centralityScale,
           concept.historicalRole,
         ]),
         ...contributors.flatMap((contributor) => [

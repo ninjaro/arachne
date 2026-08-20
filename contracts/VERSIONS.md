@@ -107,11 +107,14 @@ members of the C++ `contract_name` enumeration:
   medium/year/evidence, soft-guidance, or UI-style data.
 
 Legacy normalized imports and unresolved JSONL formats are not active contracts.
-Routine inbox processing mutates product schema v6 directly and records only
-canonical product state, batch idempotency, and durable ingest issues. Merge
-hints are a disposable Ariadne projection with an explicit review artifact;
-only ignored-pair decisions are durable, and neither artifact is part of the
-product database contract.
+Routine inbox processing mutates product schema v7 directly and records only
+canonical product state, batch idempotency, and durable ingest issues. Its
+pair-local work-concept centrality scale is explicit: new assignments require a
+reviewed `binary`, `ordinal`, or `graded` mode, while `none` remains reserved for
+mechanically migrated, not-yet-reviewed assignments. Merge hints are a
+disposable Ariadne projection with an explicit review artifact; only
+ignored-pair decisions are durable, and neither artifact is part of the product
+database contract.
 
 ## Compatibility policy
 

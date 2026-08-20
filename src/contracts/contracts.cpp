@@ -1203,8 +1203,8 @@ namespace {
                 reject_unknown_fields(
                     item, item_path,
                     { "local_id", "work_id", "concept_id", "relation_type",
-                      "centrality", "historical_role", "confidence",
-                      "evidence" },
+                      "centrality", "centrality_scale", "historical_role",
+                      "confidence", "evidence" },
                     item_result
                 );
                 require_stable_id(item, "local_id", item_path, item_result);
@@ -1226,6 +1226,10 @@ namespace {
                 );
                 require_integer_range(
                     item, "centrality", item_path, 1, 100, item_result
+                );
+                require_enum(
+                    item, "centrality_scale", item_path,
+                    { "binary", "ordinal", "graded" }, item_result
                 );
                 optional_enum(
                     item, "historical_role", item_path,
@@ -1413,7 +1417,7 @@ namespace {
         reject_unknown_fields(
             update, path,
             { "agents", "works", "concepts", "manifestations", "sources",
-              "delete" },
+              "work_concepts", "delete" },
             result
         );
         validate_optional_object_array(
@@ -1602,6 +1606,76 @@ namespace {
                     && unset->empty()) {
                     add(item_result, item_path, "min_operations",
                         "update must set or unset at least one field");
+                }
+            }
+        );
+        validate_optional_object_array(
+            update, "work_concepts", path, result,
+            [](const json& item, const std::string& item_path,
+               validation_result& item_result) {
+                reject_unknown_fields(
+                    item, item_path, { "id", "set", "unset" }, item_result
+                );
+                require_integer_range(
+                    item, "id", item_path, 1,
+                    std::numeric_limits<std::int64_t>::max(), item_result
+                );
+                const json* set
+                    = require_object(item, "set", item_path, item_result);
+                const json* unset
+                    = require_array(item, "unset", item_path, item_result);
+                const std::string set_path = child_path(item_path, "set");
+                if (set != nullptr) {
+                    reject_unknown_fields(
+                        *set, set_path,
+                        { "centrality", "centrality_scale",
+                          "historical_role", "confidence" },
+                        item_result
+                    );
+                    optional_integer_range(
+                        *set, "centrality", set_path, 1, 100, item_result
+                    );
+                    optional_enum(
+                        *set, "centrality_scale", set_path,
+                        { "binary", "ordinal", "graded" }, item_result
+                    );
+                    optional_enum(
+                        *set, "historical_role", set_path,
+                        { "formative", "canonical", "transitional", "hybrid",
+                          "revival", "late_derivative", "peripheral",
+                          "precursor" },
+                        item_result
+                    );
+                    optional_number_range(
+                        *set, "confidence", set_path, 0.0, 1.0, item_result
+                    );
+                }
+                if (unset != nullptr) {
+                    const std::string unset_path
+                        = child_path(item_path, "unset");
+                    validate_unique_items(*unset, unset_path, item_result);
+                    for (std::size_t index = 0; index < unset->size();
+                         ++index) {
+                        const json& value = (*unset)[index];
+                        if (!value.is_string()
+                            || (value != "historical_role"
+                                && value != "confidence")) {
+                            add(
+                                item_result,
+                                unset_path + "/" + std::to_string(index),
+                                "enum",
+                                "field cannot be removed from a work-concept "
+                                "assignment"
+                            );
+                        }
+                    }
+                }
+                if (set != nullptr && unset != nullptr && set->empty()
+                    && unset->empty()) {
+                    add(
+                        item_result, item_path, "min_operations",
+                        "update must set or unset at least one field"
+                    );
                 }
             }
         );

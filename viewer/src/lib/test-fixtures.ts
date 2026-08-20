@@ -13,6 +13,7 @@ export function fixtureConcept(id: string, label = id): ConceptAssignment {
     slug: id.toLowerCase(),
     relationType: "associated_with",
     centrality: 50,
+    centralityScale: "none",
     historicalRole: null,
     confidence: 1,
   };
@@ -55,6 +56,9 @@ export function fixtureWork({
     concepts: tags.map((tag) =>
       typeof tag === "string" ? fixtureConcept(tag) : fixtureConcept(tag.id, tag.label),
     ),
+    conceptAssignmentCount: tags.length,
+    missingCentralityScaleCount: tags.length,
+    missingCentralityScaleFraction: tags.length ? 1 : 0,
     contributors: [],
     advisories: [],
     measurements: [],

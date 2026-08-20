@@ -77,7 +77,7 @@ falls back to stale bytes.
 | Remainders | Arachne | Reserved for future untransferred portions; currently unused because no schema exists |
 | Operational state | Arachne | Queue/run coordination; permanent per-batch audit metadata is not required |
 | Product inbox | Penelope | Strict JSON files at repository `inbox/`; successful files are removed only after commit and rejected files move to `inbox/rejected/` |
-| Product SQLite | Penelope | `database/art-islands.sqlite`; schema v6 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, and ingest issues, with no disposable merge-hint state |
+| Product SQLite | Penelope | `database/art-islands.sqlite`; schema v7 keeps readable canonical entity IDs, compact integer internal keys, batch idempotency, ingest issues, and pair-local centrality-scale semantics, with no disposable merge-hint state |
 | Hint analysis | Ariadne | `.arachne/tmp/merge-hints.sqlite` is the primary local, queryable store for disposable identity candidates and structural observations; `.arachne/merge-hints-review.json` is an ignored, bounded identity-only review projection; `database/merge-hint-decisions.json` durably preserves only human decisions |
 | Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
@@ -128,12 +128,25 @@ the inbox file is deleted. A rejected batch is recorded as structured
 `ingest_issues` rows and moved to `inbox/rejected/`. A previously applied,
 structurally valid batch is not replayed.
 
-Schema v6 stores readable `agent-*`, `work-*`, `concept-*`, and
+Schema v7 stores readable `agent-*`, `work-*`, `concept-*`, and
 `manifestation-*` IDs. Internal and relationship rows use integer primary keys
 with natural uniqueness constraints. It has no redirect, canonical-ID alias,
 source-URL alias, remote-asset, source-archive, or legacy-ID mapping tables.
 It also has no merge-hint candidates, blocks, or block memberships. A normal
 batch transaction never performs similarity calculations or hint maintenance.
+
+Each work-concept row stores its own `centrality_scale`: `binary`, `ordinal`,
+or `graded` records a human-reviewed interpretation for that specific pair,
+while `none` identifies a legacy numeric value not yet reviewed under those
+semantics. The v6-to-v7 migration is representation-only: it preserves every
+numeric centrality and assigns `none` without inspecting concept types,
+distributions, sources, graph structure, or analytical output. `none` is not a
+zero, irrelevance, binary, or unknown-centrality marker. Existing consumers may
+continue using the stored number as a documented compatibility fallback, but
+that fallback is not evidence that the number is semantically calibrated, and
+consumers must keep the missing semantic review visible. Later scale and numeric
+corrections are semantic product changes and therefore require normal
+human-authored batches; derived analysis never writes them back.
 
 Merge hints are an explicit Ariadne projection. Rebuild opens a disposable
 SQLite database as writable `main`, attaches the canonical product database
@@ -230,6 +243,10 @@ Python or React implementation. Static publication derives research data from
 the canonical product snapshot alone. A local research build may explicitly
 add a snapshot-bound identity review together with its matching durable
 decisions; neither surface consumes structural observations implicitly.
+Every product research report also carries deterministic corpus totals and one
+centrality-scale coverage row per work, including fully reviewed works that no
+longer need a quality-gap item. The coverage records the stored numeric fallback
+for `none` without inferring a semantic mode or writing canonical data.
 
 ## Remote state and concurrency
 

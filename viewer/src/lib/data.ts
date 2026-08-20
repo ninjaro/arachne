@@ -60,6 +60,21 @@ function isWorkRelation(value: unknown): value is WorkRelation {
   );
 }
 
+const CENTRALITY_SCALES = new Set(["none", "binary", "ordinal", "graded"]);
+
+function isConceptAssignment(value: unknown): value is ConceptAssignment {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    record.id.length > 0 &&
+    typeof record.centralityScale === "string" &&
+    CENTRALITY_SCALES.has(record.centralityScale) &&
+    (record.centrality === null ||
+      (typeof record.centrality === "number" && Number.isFinite(record.centrality)))
+  );
+}
+
 export function isCatalog(value: unknown): value is Catalog {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
@@ -80,8 +95,24 @@ export function isCatalog(value: unknown): value is Catalog {
 
   return record.works.every((work) => {
     if (!work || typeof work !== "object") return false;
-    const contributors = (work as Record<string, unknown>).contributors;
+    const workRecord = work as Record<string, unknown>;
+    const contributors = workRecord.contributors;
+    const concepts = workRecord.concepts;
+    const missing = Array.isArray(concepts)
+      ? concepts.filter(
+          (concept) =>
+            isConceptAssignment(concept) && concept.centralityScale === "none",
+        ).length
+      : -1;
     return (
+      Array.isArray(concepts) &&
+      concepts.every(isConceptAssignment) &&
+      workRecord.conceptAssignmentCount === concepts.length &&
+      workRecord.missingCentralityScaleCount === missing &&
+      typeof workRecord.missingCentralityScaleFraction === "number" &&
+      Number.isFinite(workRecord.missingCentralityScaleFraction) &&
+      workRecord.missingCentralityScaleFraction ===
+        (concepts.length === 0 ? 0 : missing / concepts.length) &&
       Array.isArray(contributors) &&
       contributors.every((contributor) => {
         if (!isAgent(contributor)) return false;
@@ -115,9 +146,61 @@ export function isResearchData(value: unknown): value is ResearchData {
     /^[a-f0-9]{64}$/u.test(
       (snapshot as Record<string, unknown>).sha256 as string,
     ) &&
+    isCentralityScaleCoverage(record.centrality_scale_coverage) &&
     record.summary !== null &&
     typeof record.summary === "object" &&
     Array.isArray(record.items)
+  );
+}
+
+function isCentralityScaleCoverage(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const coverage = value as Record<string, unknown>;
+  if (!Array.isArray(coverage.works)) return false;
+  const ids = new Set<string>();
+  let assignmentCount = 0;
+  let missingCount = 0;
+  for (const value of coverage.works) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const work = value as Record<string, unknown>;
+    if (
+      typeof work.work_id !== "string" ||
+      work.work_id.length === 0 ||
+      ids.has(work.work_id) ||
+      !Number.isInteger(work.concept_assignment_count) ||
+      (work.concept_assignment_count as number) < 0 ||
+      !Number.isInteger(work.missing_centrality_scale_count) ||
+      (work.missing_centrality_scale_count as number) < 0 ||
+      (work.missing_centrality_scale_count as number) >
+        (work.concept_assignment_count as number) ||
+      typeof work.missing_centrality_scale_fraction !== "number" ||
+      !Number.isFinite(work.missing_centrality_scale_fraction) ||
+      work.missing_centrality_scale_fraction !==
+        ((work.concept_assignment_count as number) === 0
+          ? 0
+          : (work.missing_centrality_scale_count as number) /
+            (work.concept_assignment_count as number)) ||
+      work.semantic_review_missing !==
+        ((work.missing_centrality_scale_count as number) > 0)
+    ) {
+      return false;
+    }
+    ids.add(work.work_id);
+    assignmentCount += work.concept_assignment_count as number;
+    missingCount += work.missing_centrality_scale_count as number;
+  }
+  return (
+    coverage.centrality_scale_scope === "work_concept_assignment" &&
+    coverage.concept_assignment_count === assignmentCount &&
+    coverage.missing_centrality_scale_count === missingCount &&
+    coverage.missing_centrality_scale_fraction ===
+      (assignmentCount === 0 ? 0 : missingCount / assignmentCount) &&
+    coverage.none_is_missing_semantic_review === true &&
+    coverage.none_numeric_compatibility_fallback ===
+      "stored_centrality_unchanged" &&
+    coverage.fallback_is_proof_of_numeric_calibration === false &&
+    coverage.centrality_scale_inferred === false &&
+    coverage.canonical_values_written === false
   );
 }
 

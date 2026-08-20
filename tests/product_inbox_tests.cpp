@@ -29,8 +29,8 @@ public:
         fs::create_directories(root_ / "database");
         fs::create_directories(root_ / "schema");
         fs::copy_file(
-            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v6.sql",
-            root_ / "schema" / "product_v6.sql"
+            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v7.sql",
+            root_ / "schema" / "product_v7.sql"
         );
         const auto initialized = arachne::penelope::apply_product_inbox(root_);
         if (!initialized.ok) {
@@ -182,6 +182,31 @@ private:
     return text;
 }
 
+void seed_work_concept_dependencies(
+    const inbox_fixture& fixture, const bool legacy_assignment
+) {
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES"
+        "('work-000001','work'),('concept-000001','concept');"
+        "INSERT INTO works(entity_id,medium) VALUES('work-000001','film');"
+        "INSERT INTO concepts(entity_id,concept_type,slug) "
+        "VALUES('concept-000001','theme','scale-review-theme');"
+        "INSERT INTO sources(id,source_type,url) "
+        "VALUES(1,'book','https://example.test/scale-review');"
+        "INSERT INTO evidence(id,source_id,exact_quote,stance) "
+        "VALUES(1,1,'Pair-level evidence.','supports');"
+    );
+    if (legacy_assignment) {
+        fixture.execute(
+            "INSERT INTO work_concepts("
+            "id,work_id,concept_id,relation_type,centrality,centrality_scale) "
+            "VALUES(1,'work-000001','concept-000001','exemplifies',73,'none');"
+            "INSERT INTO work_concept_evidence(id,assertion_id,evidence_id) "
+            "VALUES(1,1,1);"
+        );
+    }
+}
+
 TEST(ProductInbox, RejectsUnknownFieldsAndDoesNotWriteDuringCheck) {
     inbox_fixture fixture;
     json batch = empty_batch("strict-001");
@@ -206,11 +231,11 @@ TEST(ProductInbox, RefusesCurrentSchemaMissingNaturalUniquenessIndex) {
 
     try {
         (void)arachne::penelope::check_product_inbox(fixture.root());
-        FAIL() << "schema-v6 database without names_logical_unique was accepted";
+        FAIL() << "schema-v7 database without names_logical_unique was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
             std::string(error.what()),
-            "product database index set does not match schema version 6"
+            "product database index set does not match schema version 7"
         );
     }
 }
@@ -221,11 +246,11 @@ TEST(ProductInbox, RefusesCurrentSchemaMissingInvariantTrigger) {
 
     try {
         (void)arachne::penelope::check_product_inbox(fixture.root());
-        FAIL() << "schema-v6 database without works_entity_type was accepted";
+        FAIL() << "schema-v7 database without works_entity_type was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
             std::string(error.what()),
-            "product database trigger set does not match schema version 6"
+            "product database trigger set does not match schema version 7"
         );
     }
 }
@@ -328,9 +353,10 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
           ) },
         { "work_concepts",
           json::array(
-              { { { "local_id", "wc" }, { "work_id", "w" },
+                  { { { "local_id", "wc" }, { "work_id", "w" },
                   { "concept_id", "c" }, { "relation_type", "exemplifies" },
-                  { "centrality", 90 }, { "evidence", json::array({ "e" }) } } }
+                  { "centrality", 90 }, { "centrality_scale", "graded" },
+                  { "evidence", json::array({ "e" }) } } }
           ) },
     };
     fixture.write("create.json", batch);
@@ -355,6 +381,10 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
         3
     );
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 1);
+    EXPECT_EQ(
+        fixture.text("SELECT centrality_scale FROM work_concepts WHERE id=1"),
+        "graded"
+    );
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM applied_batches"), 1);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0);
     EXPECT_THROW(
@@ -374,6 +404,146 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
     ASSERT_TRUE(cleaned.ok) << issues_text(cleaned);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 0);
+}
+
+TEST(ProductInbox, NewWorkConceptRequiresReviewedCentralityScale) {
+    inbox_fixture fixture;
+    seed_work_concept_dependencies(fixture, false);
+    json batch = empty_batch("new-scale-required");
+    batch["create"]["work_concepts"] = json::array(
+        { { { "local_id", "new-assignment" },
+            { "work_id", "work-000001" },
+            { "concept_id", "concept-000001" },
+            { "relation_type", "exemplifies" },
+            { "centrality", 73 },
+            { "evidence", json::array({ 1 }) } } }
+    );
+    fixture.write("missing.json", batch);
+
+    const auto missing
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(missing.ok);
+    EXPECT_NE(issues_text(missing).find("/centrality_scale"), std::string::npos);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
+
+    fs::remove(fixture.root() / "inbox" / "missing.json");
+    batch["batch_id"] = "new-scale-none";
+    batch["create"]["work_concepts"][0]["centrality_scale"] = "none";
+    fixture.write("none.json", batch);
+    const auto none = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(none.ok);
+    EXPECT_NE(issues_text(none).find("unknown_enum"), std::string::npos);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
+}
+
+TEST(ProductInbox, UnrelatedLegacyAssignmentUpdateMayLeaveScaleUnreviewed) {
+    inbox_fixture fixture;
+    seed_work_concept_dependencies(fixture, true);
+    json batch = empty_batch("legacy-unrelated-update");
+    batch["update"]["work_concepts"] = json::array(
+        { { { "id", 1 }, { "set", { { "confidence", 0.75 } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("update.json", batch);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(result.ok) << issues_text(result);
+    EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 73);
+    EXPECT_EQ(
+        fixture.text("SELECT centrality_scale FROM work_concepts"), "none"
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT CAST(confidence * 100 AS INTEGER) FROM work_concepts"
+        ),
+        75
+    );
+}
+
+TEST(ProductInbox, LegacyCentralityChangeRequiresReviewedScaleInSameBatch) {
+    inbox_fixture fixture;
+    seed_work_concept_dependencies(fixture, true);
+    json batch = empty_batch("legacy-centrality-without-scale");
+    batch["update"]["work_concepts"] = json::array(
+        { { { "id", 1 }, { "set", { { "centrality", 80 } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("invalid.json", batch);
+
+    const auto rejected
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(rejected.ok);
+    EXPECT_NE(
+        issues_text(rejected).find("centrality_scale_required"),
+        std::string::npos
+    );
+    EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 73);
+    EXPECT_EQ(
+        fixture.text("SELECT centrality_scale FROM work_concepts"), "none"
+    );
+
+    fs::remove(fixture.root() / "inbox" / "invalid.json");
+    batch["batch_id"] = "legacy-centrality-reviewed";
+    batch["update"]["work_concepts"][0]["set"]["centrality_scale"]
+        = "ordinal";
+    fixture.write("valid.json", batch);
+    const auto applied
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 80);
+    EXPECT_EQ(
+        fixture.text("SELECT centrality_scale FROM work_concepts"), "ordinal"
+    );
+}
+
+TEST(ProductInbox, ScaleOnlyLegacyReviewPreservesStoredCentrality) {
+    inbox_fixture fixture;
+    seed_work_concept_dependencies(fixture, true);
+    json batch = empty_batch("legacy-scale-only-review");
+    batch["update"]["work_concepts"] = json::array(
+        { { { "id", 1 },
+            { "set", { { "centrality_scale", "graded" } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("update.json", batch);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(result.ok) << issues_text(result);
+    EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 73);
+    EXPECT_EQ(
+        fixture.text("SELECT centrality_scale FROM work_concepts"), "graded"
+    );
+}
+
+TEST(ProductInbox, ReviewedAssignmentCanReviseCentralityWithoutNewDebt) {
+    inbox_fixture fixture;
+    seed_work_concept_dependencies(fixture, true);
+    fixture.execute(
+        "UPDATE work_concepts SET centrality_scale='binary' WHERE id=1"
+    );
+    json batch = empty_batch("reviewed-centrality-update");
+    batch["update"]["work_concepts"] = json::array(
+        { { { "id", 1 }, { "set", { { "centrality", 100 } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("update.json", batch);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_TRUE(result.ok) << issues_text(result);
+    EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 100);
+    EXPECT_EQ(
+        fixture.text("SELECT centrality_scale FROM work_concepts"), "binary"
+    );
 }
 
 TEST(ProductInbox, AllocatesDistinctIdsAcrossAllPendingBatches) {
@@ -414,6 +584,7 @@ TEST(ProductInbox, AllocatesDistinctIdsAcrossAllPendingBatches) {
                       { "concept_id", "concept-local" },
                       { "relation_type", "exemplifies" },
                       { "centrality", 50 },
+                      { "centrality_scale", "ordinal" },
                       { "evidence",
                         json::array({ "evidence-local" }) } } }
               ) },
@@ -498,6 +669,7 @@ TEST(ProductInbox, EvidenceDeleteCannotOrphanNewAssertion) {
             { "concept_id", "concept-000001" },
             { "relation_type", "exemplifies" },
             { "centrality", 75 },
+            { "centrality_scale", "graded" },
             { "evidence", json::array({ 1 }) } } }
     );
     conflict["update"]["delete"] = { { "evidence", json::array({ 1 }) } };
@@ -521,6 +693,7 @@ TEST(ProductInbox, EvidenceDeleteCannotOrphanNewAssertion) {
             { "concept_id", "concept-000001" },
             { "relation_type", "exemplifies" },
             { "centrality", 75 },
+            { "centrality_scale", "graded" },
             { "evidence", json::array({ 1, 2 }) } } }
     );
     mixed["update"]["delete"] = { { "evidence", json::array({ 1 }) } };
@@ -1073,12 +1246,14 @@ TEST(ProductInbox, ConceptMergeDeduplicatesAssertionsAndPreservesEvidence) {
                   { "concept_id", "concept-one" },
                   { "relation_type", "exemplifies" },
                   { "centrality", 80 },
+                  { "centrality_scale", "graded" },
                   { "evidence", json::array({ "evidence-one" }) } },
                 { { "local_id", "assertion-two" },
                   { "work_id", "work-local" },
                   { "concept_id", "concept-two" },
                   { "relation_type", "exemplifies" },
                   { "centrality", 80 },
+                  { "centrality_scale", "graded" },
                   { "evidence", json::array({ "evidence-two" }) } } }
           ) },
     };
@@ -1106,6 +1281,54 @@ TEST(ProductInbox, ConceptMergeDeduplicatesAssertionsAndPreservesEvidence) {
         2
     );
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+TEST(ProductInbox, ConceptMergeNeverChoosesBetweenDifferentPairScales) {
+    inbox_fixture fixture;
+    seed_work_concept_dependencies(fixture, false);
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) "
+        "VALUES('concept-000002','concept');"
+        "INSERT INTO concepts(entity_id,concept_type,slug) "
+        "VALUES('concept-000002','theme','scale-review-theme-two');"
+        "INSERT INTO evidence(id,source_id,exact_quote,stance) "
+        "VALUES(2,1,'Second pair-level passage.','supports');"
+        "INSERT INTO work_concepts("
+        "id,work_id,concept_id,relation_type,centrality,centrality_scale) "
+        "VALUES"
+        "(1,'work-000001','concept-000001','exemplifies',80,'binary'),"
+        "(2,'work-000001','concept-000002','exemplifies',80,'graded');"
+        "INSERT INTO work_concept_evidence(id,assertion_id,evidence_id) "
+        "VALUES(1,1,1),(2,2,2);"
+    );
+    json merge = empty_batch("scale-conflict-merge");
+    merge["merge"]["concepts"] = json::array(
+        { { { "target", "concept-000001" },
+            { "members", json::array({ "concept-000002" }) },
+            { "set", { { "slug", "scale-review-theme" } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("merge.json", merge);
+
+    const auto result
+        = arachne::penelope::apply_product_inbox(fixture.root());
+
+    ASSERT_FALSE(result.ok);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 2);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(DISTINCT centrality_scale) FROM work_concepts"
+        ),
+        2
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM applied_batches "
+            "WHERE batch_id='scale-conflict-merge'"
+        ),
+        0
+    );
 }
 
 TEST(ProductInbox, MalformedJsonWithoutBatchIdStaysInPlace) {

@@ -2,6 +2,7 @@ export type EntityId = string;
 export type RatingValue = -1 | 1;
 export type Ratings = Record<EntityId, RatingValue>;
 export type RatingFamily = "work" | "agent" | "concept";
+export type CentralityScale = "none" | "binary" | "ordinal" | "graded";
 
 export interface EntityOpenContext {
   kind: "recommendation";
@@ -26,6 +27,7 @@ export interface ConceptAssignment {
   slug: string;
   relationType: string;
   centrality: number | null;
+  centralityScale: CentralityScale;
   historicalRole: string | null;
   confidence: number | null;
 }
@@ -104,6 +106,9 @@ export interface Work {
   countryCode: string | null;
   productionInfo: unknown;
   concepts: ConceptAssignment[];
+  conceptAssignmentCount: number;
+  missingCentralityScaleCount: number;
+  missingCentralityScaleFraction: number;
   contributors: Contributor[];
   advisories: Advisory[];
   measurements: Measurement[];
@@ -152,6 +157,9 @@ export interface ResearchItem {
   workId?: EntityId;
   workLabel?: string;
   score?: number;
+  conceptAssignmentCount?: number;
+  missingCentralityScaleCount?: number;
+  missingCentralityScaleFraction?: number;
   details?: string[];
   batchId?: string;
   jsonPath?: string;
@@ -178,6 +186,27 @@ export interface ResearchSummary {
   info: number;
 }
 
+export interface WorkCentralityScaleCoverage {
+  work_id: EntityId;
+  concept_assignment_count: number;
+  missing_centrality_scale_count: number;
+  missing_centrality_scale_fraction: number;
+  semantic_review_missing: boolean;
+}
+
+export interface CentralityScaleCoverage {
+  centrality_scale_scope: "work_concept_assignment";
+  concept_assignment_count: number;
+  missing_centrality_scale_count: number;
+  missing_centrality_scale_fraction: number;
+  none_is_missing_semantic_review: true;
+  none_numeric_compatibility_fallback: "stored_centrality_unchanged";
+  fallback_is_proof_of_numeric_calibration: false;
+  centrality_scale_inferred: false;
+  canonical_values_written: false;
+  works: WorkCentralityScaleCoverage[];
+}
+
 export interface ResearchData {
   artifact_type: "product_research_report_v1";
   format_version: 1;
@@ -187,6 +216,7 @@ export interface ResearchData {
   };
   formatVersion: 1;
   productSnapshotId: string;
+  centrality_scale_coverage: CentralityScaleCoverage;
   summary: ResearchSummary;
   items: ResearchItem[];
 }

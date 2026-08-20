@@ -129,7 +129,11 @@ Names require an explicit `is_preferred` boolean. Financial facts require an
 explicit `is_estimate` boolean. Evidence requires a source, a non-empty
 `exact_quote`, and an explicit canonical `stance`. Every work-concept,
 concept-relation, and parent-guide assertion requires a non-empty `evidence`
-array. No stance, preference, assertion weight, or boolean is inferred.
+array. A new work-concept assignment also requires a pair-local
+`centrality_scale` of `binary`, `ordinal`, or `graded`; `none` is canonical
+storage for mechanically migrated, not-yet-reviewed legacy rows and is not
+valid for a new assignment. No stance, preference, assertion weight, scale, or
+boolean is inferred.
 
 General product facts that the database models directly, including work dates,
 measurements, and budgets, do not require assertion evidence.
@@ -165,7 +169,18 @@ works
 concepts
 manifestations
 sources
+work_concepts
 ```
+
+Work-concept updates use the positive integer assertion row ID. They may change
+`centrality`, `centrality_scale`, `historical_role`, or `confidence`; only the
+optional historical role and confidence may be unset. A legacy row may remain
+`none` during unrelated work or assertion updates. Changing its numeric
+`centrality`, however, requires setting `centrality_scale` to `binary`,
+`ordinal`, or `graded` in the same update. Changing `none` to a reviewed mode is
+a human semantic decision and must arrive through this ordinary batch path.
+Neither intake nor analytical output chooses a scale from concept type,
+centrality, neighboring assignments, or corpus-wide distributions.
 
 Relationship and internal-row deletion is explicit under `update.delete`.
 Each array contains positive integer database row IDs:
@@ -186,6 +201,18 @@ Deleting a row may not leave a required relationship dangling or a semantic
 assertion without evidence. New relationship rows are inserted through the
 corresponding `create` array; omission from a batch never means replacement or
 deletion.
+
+The four stored scale values have deliberately different meanings:
+
+- `none`: the existing numeric value has not been reviewed under pair-level
+  scale semantics; it is not zero, irrelevance, binary presence, or unknown
+  centrality;
+- `binary`: presence/absence is the meaningful distinction for this pair;
+- `ordinal`: only a small number of ordered salience levels are meaningful;
+- `graded`: a substantially continuous `1–100` distinction is meaningful.
+
+The scale belongs to the work × concept row, remains independent of confidence
+and historical role, and may differ for the same concept on different works.
 
 ## Explicit merges
 

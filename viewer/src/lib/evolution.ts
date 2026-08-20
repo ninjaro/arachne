@@ -16,10 +16,8 @@ import type {
 } from "./types";
 import {
   aggregateTagStrength,
-  inferTagStrengthScale,
   weightedTagMembership,
   type AggregateTagStrength,
-  type TagStrengthScale,
   type WeightedTagMembership,
 } from "./evolution-strength";
 
@@ -63,8 +61,8 @@ export interface EvolutionIndex {
   tagsByWorkId: Map<EntityId, EvolutionTag[]>;
   workIdsByTagId: Map<EntityId, EntityId[]>;
   bucketsByTagId: Map<EntityId, IndexedTemporalBucket[]>;
-  /** Inferred once for the complete domain projection. */
-  strengthScale: TagStrengthScale;
+  /** Fixed numeric denominator; semantic scales remain pair-local metadata. */
+  strengthScale: 100;
   weightedAssignmentByMembershipKey: Map<
     string,
     IndexedWeightedTagMembership
@@ -261,6 +259,7 @@ export interface VisibleMembership extends DirectionalReachInfo {
   workId: EntityId;
   strength: number | null;
   rawStrength: number | null;
+  centralityScale: ConceptAssignment["centralityScale"];
   historicalRole: string | null;
   confidence: number | null;
 }
@@ -561,9 +560,7 @@ export function buildEvolutionIndex(domain: Domain): EvolutionIndex {
     EntityId,
     Map<string, { temporal: EvolutionDate; workIds: Set<EntityId> }>
   >();
-  const strengthScale = inferTagStrengthScale(
-    domain.works.flatMap((work) => work.concepts),
-  );
+  const strengthScale = 100 as const;
   const weightedAssignmentByMembershipKey = new Map<
     string,
     IndexedWeightedTagMembership
@@ -585,7 +582,6 @@ export function buildEvolutionIndex(domain: Domain): EvolutionIndex {
         assignment,
         work.id,
         "",
-        strengthScale,
       );
       weightedAssignmentByMembershipKey.set(
         membershipKey(assignment.id, work.id),
@@ -915,6 +911,7 @@ function buildAggregateProjection(
         stationId: station.id,
         strength: membership.strength,
         rawStrength: membership.rawStrength,
+        centralityScale: membership.centralityScale,
         historicalRole: membership.historicalRole,
         confidence: membership.confidence,
       }));
@@ -2011,14 +2008,18 @@ export function buildVisibleEvolution(
     const workId = key.slice(separator + 1);
     if (tagReach.get(tagId) === undefined || workReach.get(workId) === undefined) continue;
     const assignment = index.weightedAssignmentByMembershipKey.get(key);
+    if (!assignment) {
+      throw new Error(`visible membership has no canonical assignment: ${tagId} × ${workId}`);
+    }
     memberships.push({
       key,
       tagId,
       workId,
-      strength: assignment?.strength ?? null,
-      rawStrength: assignment?.rawStrength ?? null,
-      historicalRole: assignment?.historicalRole ?? null,
-      confidence: assignment?.confidence ?? null,
+      strength: assignment.strength,
+      rawStrength: assignment.rawStrength,
+      centralityScale: assignment.centralityScale,
+      historicalRole: assignment.historicalRole,
+      confidence: assignment.confidence,
       ...freezeDirectionalReach(reach),
     });
   }

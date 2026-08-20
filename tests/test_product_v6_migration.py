@@ -18,6 +18,9 @@ from scripts.migrate_product_v5_to_v6 import (
     _validate_structure,
     migrate_database,
 )
+from scripts.migrate_product_v6_to_v7 import (
+    migrate_database as migrate_database_to_v7,
+)
 from viewer.scripts.build_catalog import build_catalog
 
 
@@ -440,8 +443,9 @@ class ProductV6MigrationTests(unittest.TestCase):
             summary.rows,
             {name: len(rows) for name, rows in before.items()},
         )
+        migrate_database_to_v7(self.database)
         catalog = build_catalog(self.database)
-        self.assertEqual(catalog["databaseUserVersion"], 6)
+        self.assertEqual(catalog["databaseUserVersion"], 7)
         self.assertEqual(
             [work["id"] for work in catalog["works"]],
             ["work-000001"],

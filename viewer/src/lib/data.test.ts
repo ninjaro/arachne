@@ -89,4 +89,27 @@ describe("catalog agents", () => {
   it("accepts a generated-shape catalog", () => {
     expect(isCatalog(catalog())).toBe(true);
   });
+
+  it("requires closed pair-level centrality scales and exact debt counts", () => {
+    const invalidScale = catalog();
+    invalidScale.works[0].concepts = [
+      {
+        ...fixtureWork({ id: "unused", year: 2001, tags: ["concept-a"] })
+          .concepts[0],
+        centralityScale: "binary",
+      },
+    ];
+    invalidScale.works[0].conceptAssignmentCount = 1;
+    invalidScale.works[0].missingCentralityScaleCount = 0;
+    invalidScale.works[0].missingCentralityScaleFraction = 0;
+    expect(isCatalog(invalidScale)).toBe(true);
+
+    (invalidScale.works[0].concepts[0] as unknown as Record<string, unknown>)
+      .centralityScale = "continuous";
+    expect(isCatalog(invalidScale)).toBe(false);
+
+    const staleCount = catalog();
+    staleCount.works[0].conceptAssignmentCount = 1;
+    expect(isCatalog(staleCount)).toBe(false);
+  });
 });

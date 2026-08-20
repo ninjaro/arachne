@@ -242,6 +242,52 @@ json fixture_input() {
     };
 }
 
+json v7_scale_fixture_input() {
+    json result = fixture_input();
+    result["product_snapshot"]["schema_version"] = 7;
+    for (auto& entity : result["entities"]) {
+        if (entity.at("family") != "concept") {
+            continue;
+        }
+        for (auto& assignment : entity["concept"]["assertions"]) {
+            assignment["centrality"] = 73;
+            assignment["centrality_scale"] = "none";
+        }
+    }
+    const auto set_scale = [&](const std::string_view concept_id,
+                               const std::string_view work_id,
+                               const std::string_view scale) {
+        for (auto& entity : result["entities"]) {
+            if (entity.at("id") != concept_id) {
+                continue;
+            }
+            for (auto& assignment : entity["concept"]["assertions"]) {
+                if (assignment.at("work_id") == work_id) {
+                    assignment["centrality_scale"] = scale;
+                    return;
+                }
+            }
+        }
+        throw std::logic_error("scale fixture assignment does not exist");
+    };
+    set_scale("concept-000001", "work-000001", "binary");
+    set_scale("concept-000002", "work-000001", "ordinal");
+    set_scale("concept-000001", "work-000002", "graded");
+
+    /* A repeated credit must not duplicate the work's assignment debt in the
+     * agent-oriented research priority. */
+    for (auto& entity : result["entities"]) {
+        if (entity.at("id") == "agent-000001") {
+            entity["agent"]["credits"].push_back(
+                { { "work_id", "work-000001" },
+                  { "role", "producer" },
+                  { "importance", "supporting" } }
+            );
+        }
+    }
+    return result;
+}
+
 json cross_media_fixture_input() {
     json result = fixture_input();
     for (auto& entity : result["entities"]) {
@@ -591,7 +637,7 @@ TEST(StructuralHints, ObservationSchemaIsDeterministicAndSnapshotBound) {
         manifest.at("evidence_semantics")
             .at("historical_acceptance_vs_scene_or_community_usage")
             .at("canonical_schema_support"),
-        "not_represented_in_product_v6"
+        "not_represented_in_product_v7"
     );
     EXPECT_EQ(
         manifest.at("evidence_semantics")
@@ -1754,6 +1800,132 @@ TEST(
              "cross_media_bridge_agent", "cross_media_bridge_work" }) {
         EXPECT_TRUE(kinds.contains(kind)) << kind;
     }
+}
+
+TEST(
+    StructuralHints,
+    PairLevelCentralityScalesExposeCoverageDebtAndDeduplicatedPriorities
+) {
+    const json analysis = arachne::ariadne::structural_hint_planner::build(
+        v7_scale_fixture_input()
+    );
+    EXPECT_EQ(
+        analysis.at("algorithm_version"), "ariadne-structural-hints-2.3.0"
+    );
+    const auto& diagnostics = analysis.at("centrality_diagnostics");
+    EXPECT_FALSE(diagnostics.at("centrality_scale_inferred"));
+    const auto& coverage = diagnostics.at("scale_coverage");
+    EXPECT_EQ(coverage.at("concept_assignment_count"), 7U);
+    EXPECT_EQ(coverage.at("missing_centrality_scale_count"), 4U);
+    EXPECT_DOUBLE_EQ(
+        coverage.at("missing_centrality_scale_fraction").get<double>(),
+        4.0 / 7.0
+    );
+    EXPECT_EQ(coverage.at("reviewed_centrality_scale_count"), 3U);
+    EXPECT_EQ(
+        coverage.at("none_numeric_compatibility_fallback_count"), 4U
+    );
+    EXPECT_EQ(coverage.at("centrality_scale_counts").at("none"), 4U);
+    EXPECT_EQ(coverage.at("centrality_scale_counts").at("binary"), 1U);
+    EXPECT_EQ(coverage.at("centrality_scale_counts").at("ordinal"), 1U);
+    EXPECT_EQ(coverage.at("centrality_scale_counts").at("graded"), 1U);
+
+    const auto& scale_sensitive
+        = diagnostics.at("scale_sensitive_analysis");
+    EXPECT_EQ(scale_sensitive.at("status"), "partial");
+    EXPECT_EQ(scale_sensitive.at("eligible_assignment_count"), 3U);
+    EXPECT_EQ(scale_sensitive.at("excluded_assignment_count"), 4U);
+    EXPECT_TRUE(scale_sensitive.at("restricted_to_reviewed_assignments"));
+    EXPECT_FALSE(
+        scale_sensitive.at("cross_scale_numeric_comparisons_performed")
+    );
+    EXPECT_FALSE(scale_sensitive.at("missing_scales_imputed"));
+    EXPECT_EQ(
+        scale_sensitive.at("reviewed_distributions_by_scale")
+            .at("binary")
+            .at("assignment_count"),
+        1U
+    );
+    const auto& compatibility
+        = diagnostics.at("compatibility_numeric_analysis");
+    EXPECT_TRUE(compatibility.at("none_uses_stored_numeric_fallback"));
+    EXPECT_FALSE(compatibility.at("fallback_is_proof_of_calibration"));
+    EXPECT_FALSE(compatibility.at("scale_modes_inferred"));
+    EXPECT_FALSE(compatibility.at("canonical_values_written"));
+
+    const auto& work_three = row_by_key(
+        diagnostics.at("work_assignment_scale_coverage"), "work_id",
+        "work-000003"
+    );
+    EXPECT_EQ(work_three.at("concept_assignment_count"), 2U);
+    EXPECT_EQ(work_three.at("missing_centrality_scale_count"), 2U);
+    EXPECT_DOUBLE_EQ(
+        work_three.at("missing_centrality_scale_fraction").get<double>(), 1.0
+    );
+    const auto none_experiment = std::ranges::find_if(
+        diagnostics.at("normalization_experiments"), [](const json& row) {
+            return row.value("centrality_scale", "") == "none";
+        }
+    );
+    ASSERT_NE(
+        none_experiment, diagnostics.at("normalization_experiments").end()
+    );
+    EXPECT_DOUBLE_EQ(
+        none_experiment->at("raw_canonical_centrality").get<double>(), 73.0
+    );
+    EXPECT_TRUE(none_experiment->at("compatibility_numeric_fallback_used"));
+    EXPECT_FALSE(none_experiment->at("centrality_scale_inferred"));
+
+    const auto work_priority = std::ranges::find_if(
+        analysis.at("research_priorities"), [](const json& row) {
+            return row.at("kind") == "weakly_mined_work"
+                && row.at("entity_id") == "work-000003";
+        }
+    );
+    ASSERT_NE(work_priority, analysis.at("research_priorities").end());
+    EXPECT_EQ(
+        work_priority->at("details").at("missing_centrality_scale_count"),
+        2U
+    );
+    EXPECT_TRUE(
+        work_priority->at("details").at("raw_count_retained_for_ranking")
+    );
+    const auto agent_priority = std::ranges::find_if(
+        analysis.at("research_priorities"), [](const json& row) {
+            return row.at("kind") == "weakly_mined_trajectory_agent"
+                && row.at("entity_id") == "agent-000001";
+        }
+    );
+    ASSERT_NE(agent_priority, analysis.at("research_priorities").end());
+    const auto& agent_details = agent_priority->at("details");
+    EXPECT_TRUE(agent_details.at("credited_works_deduplicated"));
+    EXPECT_EQ(agent_details.at("work_count"), 3U);
+    EXPECT_EQ(agent_details.at("concept_assignment_count"), 6U);
+    EXPECT_EQ(agent_details.at("missing_centrality_scale_count"), 3U);
+    EXPECT_EQ(agent_details.at("credited_work_scale_debt").size(), 3U);
+}
+
+TEST(StructuralHints, ProductV7ScaleInputFailsClosedWithoutExplicitMode) {
+    json source = v7_scale_fixture_input();
+    source["entities"][4]["concept"]["assertions"][0].erase(
+        "centrality_scale"
+    );
+    EXPECT_THROW(
+        static_cast<void>(
+            arachne::ariadne::structural_hint_planner::build(source)
+        ),
+        std::invalid_argument
+    );
+
+    source = v7_scale_fixture_input();
+    source["entities"][4]["concept"]["assertions"][0]["centrality_scale"]
+        = "inferred";
+    EXPECT_THROW(
+        static_cast<void>(
+            arachne::ariadne::structural_hint_planner::build(source)
+        ),
+        std::invalid_argument
+    );
 }
 
 TEST(StructuralHints, IdentityCandidatesRemainADedicatedSubset) {

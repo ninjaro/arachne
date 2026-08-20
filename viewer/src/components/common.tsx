@@ -7,7 +7,7 @@ import type {
   Ratings,
   Work,
 } from "../lib/types";
-import { dateLabel, humanize } from "../lib/format";
+import { centralityScaleLabel, dateLabel, humanize } from "../lib/format";
 
 export type OpenHandler = (
   id: EntityId,
@@ -89,26 +89,29 @@ export function ConceptChips({
 
   return (
     <div className="chips">
-      {visible.map((concept) =>
-        onFilter ? (
-          <button
-            type="button"
-            className="chip chip-button"
-            key={concept.id}
-            title={`${humanize(concept.conceptType)} · filter by this concept`}
-            onClick={(event) => {
-              event.stopPropagation();
-              onFilter(concept);
-            }}
-          >
-            {concept.label}
-          </button>
-        ) : (
-          <span className="chip" key={concept.id} title={humanize(concept.conceptType)}>
-            {concept.label}
-          </span>
-        ),
-      )}
+      {visible.map((concept) => {
+        const title = `${humanize(concept.conceptType)} · centrality ${concept.centrality ?? "unknown"} · ${centralityScaleLabel(concept.centralityScale)}`;
+        return (
+          onFilter ? (
+            <button
+              type="button"
+              className="chip chip-button"
+              key={concept.id}
+              title={`${title} · filter by this concept`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onFilter(concept);
+              }}
+            >
+              {concept.label}
+            </button>
+          ) : (
+            <span className="chip" key={concept.id} title={title}>
+              {concept.label}
+            </span>
+          )
+        );
+      })}
       {concepts.length > visible.length ? (
         <span className="chip muted-chip">+{concepts.length - visible.length}</span>
       ) : null}

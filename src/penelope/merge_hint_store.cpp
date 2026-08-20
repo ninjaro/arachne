@@ -26,7 +26,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-constexpr int product_schema_version = 6;
+constexpr int product_schema_version = 7;
 constexpr int hint_store_schema_version = 3;
 constexpr std::uintmax_t maximum_decisions_bytes = 8U * 1024U * 1024U;
 
@@ -311,7 +311,7 @@ void attach_product_read_only(database& hints, const fs::path& path) {
     statement version(hints.native(), "PRAGMA product.user_version");
     if (!version.step() || version.integer(0) != product_schema_version) {
         throw merge_hint_store_error(
-            "merge-hint rebuild requires product schema version 6"
+            "merge-hint rebuild requires product schema version 7"
         );
     }
 }
@@ -455,7 +455,9 @@ void initialize_store(
         metadata.bind(2, value);
         metadata.execute();
     };
-    insert_metadata("product_schema_version", "6");
+    insert_metadata(
+        "product_schema_version", std::to_string(product_schema_version)
+    );
     insert_metadata("product_sha256", product_sha256);
     insert_metadata("hint_store_schema_version", "3");
     insert_metadata("generator_version", generator_version);
@@ -493,7 +495,8 @@ void require_current_store(
             "unsupported disposable merge-hint schema version"
         );
     }
-    if (metadata_value(hints.native(), "product_schema_version") != "6"
+    if (metadata_value(hints.native(), "product_schema_version")
+            != std::to_string(product_schema_version)
         || metadata_value(hints.native(), "hint_store_schema_version") != "3") {
         throw merge_hint_store_error(
             "disposable merge-hint metadata uses an unsupported version"
@@ -805,8 +808,8 @@ void require_current_store(
     std::map<std::int64_t, assertion_location> assertion_locations;
     statement assertions(
         hints.native(),
-        "SELECT id,work_id,concept_id,relation_type,centrality,confidence,"
-        "historical_role"
+        "SELECT id,work_id,concept_id,relation_type,centrality,"
+        "centrality_scale,confidence,historical_role"
         " FROM product.work_concepts ORDER BY concept_id,work_id,id"
     );
     while (assertions.step()) {
@@ -825,15 +828,16 @@ void require_current_store(
                 { "work_id", assertions.text(1) },
                 { "relation_type", assertions.text(3) },
                 { "centrality", assertions.integer(4) },
+                { "centrality_scale", assertions.text(5) },
                 { "evidence_ids", json::array() },
                 { "source_ids", json::array() },
                 { "evidence", json::array() },
             };
-            if (!assertions.is_null(5)) {
-                value["confidence"] = assertions.real(5);
-            }
             if (!assertions.is_null(6)) {
-                value["historical_role"] = assertions.text(6);
+                value["confidence"] = assertions.real(6);
+            }
+            if (!assertions.is_null(7)) {
+                value["historical_role"] = assertions.text(7);
             }
             values.push_back(std::move(value));
             assertion_locations.emplace(
@@ -2104,6 +2108,19 @@ void validate_centrality_diagnostic_references(
                               "historical_role_distribution" }) {
         static_cast<void>(required_object(diagnostics, field, context));
     }
+    const json& scale_coverage = required_array(
+        diagnostics, "work_assignment_scale_coverage", context
+    );
+    for (std::size_t index = 0; index < scale_coverage.size(); ++index) {
+        const std::string row_context = std::string(context)
+            + ".work_assignment_scale_coverage[" + std::to_string(index)
+            + "]";
+        require_canonical_entity(
+            entities,
+            required_string(scale_coverage.at(index), "work_id", row_context),
+            "work", row_context + ".work_id"
+        );
+    }
     const json& saturation
         = required_array(diagnostics, "concept_saturation", context);
     for (std::size_t index = 0; index < saturation.size(); ++index) {
@@ -2272,6 +2289,22 @@ void validate_priority_detail_references(
                     );
                 }
             }
+        }
+    }
+    if (details.contains("credited_work_scale_debt")) {
+        const json& rows = required_array(
+            details, "credited_work_scale_debt",
+            std::string(context) + ".details"
+        );
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+            const std::string row_context = std::string(context)
+                + ".details.credited_work_scale_debt["
+                + std::to_string(index) + "]";
+            require_canonical_entity(
+                entities,
+                required_string(rows.at(index), "work_id", row_context),
+                "work", row_context + ".work_id"
+            );
         }
     }
 }
@@ -2921,6 +2954,8 @@ void validate_stored_extended_analysis_references(sqlite3* const sql) {
     const json cross_media = stored_analysis_section(sql, "cross_media");
     const json centrality
         = stored_analysis_section(sql, "centrality_diagnostics");
+    const json priorities
+        = stored_analysis_section(sql, "research_priorities");
     const json genre_like
         = stored_analysis_section(sql, "genre_like_signatures");
     const json mixed
@@ -2930,7 +2965,8 @@ void validate_stored_extended_analysis_references(sqlite3* const sql) {
     );
     const json manifest = stored_analysis_section(sql, "manifest");
     if (!cross_media.is_object() || !centrality.is_object()
-        || !genre_like.is_array() || !mixed.is_object()
+        || !priorities.is_array() || !genre_like.is_array()
+        || !mixed.is_object()
         || !external.is_object()) {
         throw merge_hint_store_error(
             "structural analysis extension sections have invalid types"
@@ -2943,6 +2979,7 @@ void validate_stored_extended_analysis_references(sqlite3* const sql) {
     validate_centrality_diagnostic_references(
         entities, centrality, algorithm_version, snapshot
     );
+    validate_priority_references(entities, priorities);
     validate_genre_like_references(entities, genre_like);
     validate_mixed_family_references(entities, mixed);
     validate_external_classification_comparison(

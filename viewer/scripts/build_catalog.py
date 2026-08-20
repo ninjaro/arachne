@@ -89,8 +89,8 @@ def export_local_product_jsonl(database: Path, output: Path) -> int:
         integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
         if integrity != "ok":
             raise RuntimeError(f"database quick_check failed: {integrity}")
-        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 6:
-            raise RuntimeError("local product export requires schema version 6")
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 7:
+            raise RuntimeError("local product export requires schema version 7")
         tables = [
             str(row[0])
             for row in connection.execute(
@@ -185,9 +185,9 @@ def build_catalog(database: Path) -> dict[str, Any]:
         raise RuntimeError(f"database quick_check failed: {integrity}")
 
     user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if user_version != 6:
+    if user_version != 7:
         raise RuntimeError(
-            f"unsupported product schema version {user_version}; expected 6"
+            f"unsupported product schema version {user_version}; expected 7"
         )
 
     preferred_names: dict[str, str] = {}
@@ -231,7 +231,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
         connection,
         """
         SELECT id, work_id, concept_id, relation_type, centrality,
-               historical_role, confidence
+               centrality_scale, historical_role, confidence
         FROM work_concepts
         ORDER BY work_id, centrality DESC, concept_id
         """,
@@ -244,6 +244,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
                 **concept,
                 "relationType": row["relation_type"],
                 "centrality": row["centrality"],
+                "centralityScale": row["centrality_scale"],
                 "historicalRole": row["historical_role"],
                 "confidence": row["confidence"],
             }
@@ -437,6 +438,11 @@ def build_catalog(database: Path) -> dict[str, Any]:
         """,
     ):
         work_id = row["entity_id"]
+        assignments = concept_assignments.get(work_id, [])
+        missing_centrality_scales = sum(
+            assignment["centralityScale"] == "none"
+            for assignment in assignments
+        )
         works.append(
             {
                 "id": work_id,
@@ -451,7 +457,14 @@ def build_catalog(database: Path) -> dict[str, Any]:
                 "languageCode": row["language_code"],
                 "countryCode": row["country_code"],
                 "productionInfo": parse_json(row["production_info_json"]),
-                "concepts": concept_assignments.get(work_id, []),
+                "concepts": assignments,
+                "conceptAssignmentCount": len(assignments),
+                "missingCentralityScaleCount": missing_centrality_scales,
+                "missingCentralityScaleFraction": (
+                    missing_centrality_scales / len(assignments)
+                    if assignments
+                    else 0.0
+                ),
                 "contributors": contributors.get(work_id, []),
                 "advisories": advisories.get(work_id, []),
                 "measurements": measurements.get(work_id, []),

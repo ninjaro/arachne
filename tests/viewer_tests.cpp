@@ -65,11 +65,15 @@ nlohmann::json product_export() {
           { { { "id", 1 },
               { "work_id", "work-a" },
               { "concept_id", "concept-a" },
-              { "relation_type", "anticipates" } },
+              { "relation_type", "anticipates" },
+              { "centrality", 37 },
+              { "centrality_scale", "ordinal" } },
             { { "id", 2 },
               { "work_id", "work-b" },
               { "concept_id", "concept-a" },
-              { "relation_type", "associated_with" } } } },
+              { "relation_type", "associated_with" },
+              { "centrality", 100 },
+              { "centrality_scale", "none" } } } },
         { "work_relations",
           { { { "id", 2 },
               { "subject_work_id", "work-b" },
@@ -170,6 +174,7 @@ TEST(AriadneViewer, ProjectionCannotConfuseDerivedAndHumanEdges) {
     bool found_similarity = false;
     bool found_suggestion = false;
     bool found_source_link = false;
+    bool found_unreviewed_assignment = false;
     for (const auto& edge : projection.at("edges")) {
         if (edge.at("edge_id") == "suggestion-1") {
             found_suggestion = true;
@@ -217,6 +222,20 @@ TEST(AriadneViewer, ProjectionCannotConfuseDerivedAndHumanEdges) {
             EXPECT_FALSE(edge.at("attributes").at("derived").get<bool>());
             EXPECT_EQ(edge.at("provenance").at("origin"), "human_authored");
             EXPECT_EQ(edge.at("attributes").at("evidence").at(0), "evidence:1");
+            EXPECT_EQ(edge.at("attributes").at("centrality"), 37);
+            EXPECT_EQ(edge.at("attributes").at("centrality_scale"), "ordinal");
+            EXPECT_FALSE(
+                edge.at("attributes").at("semantic_review_missing").get<bool>()
+            );
+        } else if (
+            edge.at("attributes").value("assertion_id", "") == "work-concept:2"
+        ) {
+            found_unreviewed_assignment = true;
+            EXPECT_EQ(edge.at("attributes").at("centrality"), 100);
+            EXPECT_EQ(edge.at("attributes").at("centrality_scale"), "none");
+            EXPECT_TRUE(
+                edge.at("attributes").at("semantic_review_missing").get<bool>()
+            );
         } else if (edge.at("edge_type") == "documents_evidence") {
             found_source_link = true;
             EXPECT_EQ(edge.at("source"), "source:1");
@@ -230,6 +249,7 @@ TEST(AriadneViewer, ProjectionCannotConfuseDerivedAndHumanEdges) {
     EXPECT_TRUE(found_similarity);
     EXPECT_TRUE(found_suggestion);
     EXPECT_TRUE(found_source_link);
+    EXPECT_TRUE(found_unreviewed_assignment);
     bool found_source_node = false;
     bool found_evidence_node = false;
     for (const auto& node : projection.at("nodes")) {
@@ -365,6 +385,23 @@ TEST(AriadneViewer, CatalogPublishesFirstClassAgentsWithIdentifiers) {
     EXPECT_TRUE(agent.at("identifiers").at(0).at("url").is_null());
 
     const auto& first_work = catalog.at("works").at(0);
+    ASSERT_EQ(first_work.at("concepts").size(), 1U);
+    EXPECT_EQ(first_work.at("concepts").at(0).at("centrality"), 37);
+    EXPECT_EQ(first_work.at("concepts").at(0).at("centralityScale"), "ordinal");
+    EXPECT_EQ(first_work.at("conceptAssignmentCount"), 1);
+    EXPECT_EQ(first_work.at("missingCentralityScaleCount"), 0);
+    EXPECT_DOUBLE_EQ(
+        first_work.at("missingCentralityScaleFraction").get<double>(), 0.0
+    );
+    const auto& second_work = catalog.at("works").at(1);
+    ASSERT_EQ(second_work.at("concepts").size(), 1U);
+    EXPECT_EQ(second_work.at("concepts").at(0).at("centrality"), 100);
+    EXPECT_EQ(second_work.at("concepts").at(0).at("centralityScale"), "none");
+    EXPECT_EQ(second_work.at("conceptAssignmentCount"), 1);
+    EXPECT_EQ(second_work.at("missingCentralityScaleCount"), 1);
+    EXPECT_DOUBLE_EQ(
+        second_work.at("missingCentralityScaleFraction").get<double>(), 1.0
+    );
     ASSERT_EQ(first_work.at("contributors").size(), 1U);
     const auto& contributor = first_work.at("contributors").at(0);
     EXPECT_EQ(contributor.at("id"), agent.at("id"));
@@ -384,6 +421,26 @@ TEST(AriadneViewer, CatalogPublishesFirstClassAgentsWithIdentifiers) {
     EXPECT_EQ(second_relation.at("subjectId"), "work-b");
     EXPECT_EQ(second_relation.at("objectId"), "work-a");
     EXPECT_EQ(second_relation.at("relationType"), "influenced_by");
+}
+
+TEST(AriadneViewer, RejectsMissingOrInvalidPairCentralityScale) {
+    auto missing = product_export();
+    missing["work_concepts"][0].erase("centrality_scale");
+    EXPECT_THROW(
+        static_cast<void>(
+            arachne::ariadne::viewer_builder::catalog(missing, "product-1")
+        ),
+        std::invalid_argument
+    );
+
+    auto invalid = product_export();
+    invalid["work_concepts"][0]["centrality_scale"] = "continuous";
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::project(
+            invalid, candidate_export(), "product-1", "candidate-1"
+        )),
+        std::invalid_argument
+    );
 }
 
 TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
@@ -427,6 +484,28 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
         { "product_snapshot",
           { { "snapshot_id", "product-1" },
             { "sha256", product_content_sha256 } } },
+        { "centrality_scale_coverage",
+          { { "centrality_scale_scope", "work_concept_assignment" },
+            { "concept_assignment_count", 2 },
+            { "missing_centrality_scale_count", 1 },
+            { "missing_centrality_scale_fraction", 0.5 },
+            { "none_is_missing_semantic_review", true },
+            { "none_numeric_compatibility_fallback",
+              "stored_centrality_unchanged" },
+            { "fallback_is_proof_of_numeric_calibration", false },
+            { "centrality_scale_inferred", false },
+            { "canonical_values_written", false },
+            { "works",
+              { { { "work_id", "work-a" },
+                  { "concept_assignment_count", 1 },
+                  { "missing_centrality_scale_count", 0 },
+                  { "missing_centrality_scale_fraction", 0.0 },
+                  { "semantic_review_missing", false } },
+                { { "work_id", "work-b" },
+                  { "concept_assignment_count", 1 },
+                  { "missing_centrality_scale_count", 1 },
+                  { "missing_centrality_scale_fraction", 1.0 },
+                  { "semantic_review_missing", true } } } } } },
         { "items", nlohmann::json::array() },
     };
     const nlohmann::ordered_json taste_index {
@@ -470,6 +549,43 @@ TEST(AriadneViewer, StaticBundleIsDeterministicAndIdentifiesSnapshots) {
             projection, catalog, template_root,
             temporary.path() / "invalid-site-stale-taste",
             "2026-07-18T05:45:00Z", research, stale_taste_index,
+            product_content_sha256
+        )),
+        std::invalid_argument
+    );
+
+    auto missing_scale_coverage = research;
+    missing_scale_coverage.erase("centrality_scale_coverage");
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::build_site(
+            projection, catalog, template_root,
+            temporary.path() / "invalid-site-missing-scale-coverage",
+            "2026-07-18T05:45:00Z", missing_scale_coverage, taste_index,
+            product_content_sha256
+        )),
+        std::invalid_argument
+    );
+
+    auto missing_scale_coverage_row = research;
+    missing_scale_coverage_row["centrality_scale_coverage"]["works"].erase(1);
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::build_site(
+            projection, catalog, template_root,
+            temporary.path() / "invalid-site-missing-scale-coverage-row",
+            "2026-07-18T05:45:00Z", missing_scale_coverage_row, taste_index,
+            product_content_sha256
+        )),
+        std::invalid_argument
+    );
+
+    auto tampered_scale_coverage = research;
+    tampered_scale_coverage["centrality_scale_coverage"]["works"][0]
+                           ["missing_centrality_scale_count"] = 1;
+    EXPECT_THROW(
+        static_cast<void>(arachne::ariadne::viewer_builder::build_site(
+            projection, catalog, template_root,
+            temporary.path() / "invalid-site-tampered-scale-coverage",
+            "2026-07-18T05:45:00Z", tampered_scale_coverage, taste_index,
             product_content_sha256
         )),
         std::invalid_argument

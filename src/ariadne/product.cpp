@@ -231,6 +231,15 @@ namespace {
     std::optional<ordered_json> quality_item(const json& work) {
         int score = 100;
         ordered_json details = ordered_json::array();
+        const std::size_t concept_assignment_count
+            = work.value("conceptAssignmentCount", std::size_t { 0 });
+        const std::size_t missing_centrality_scale_count
+            = work.value("missingCentralityScaleCount", std::size_t { 0 });
+        const double missing_centrality_scale_fraction
+            = concept_assignment_count == 0U
+            ? 0.0
+            : static_cast<double>(missing_centrality_scale_count)
+                / static_cast<double>(concept_assignment_count);
         const auto date_text = work.find("dateStartText");
         const bool missing_date_text = date_text == work.end()
             || date_text->is_null()
@@ -306,8 +315,23 @@ namespace {
                 + (uncertain == 1 ? "" : "s")
             );
         }
+        const int score_before_centrality_scale_debt = score;
+        constexpr int maximum_centrality_scale_penalty = 18;
+        const int centrality_scale_penalty
+            = missing_centrality_scale_count >= 9U
+            ? maximum_centrality_scale_penalty
+            : static_cast<int>(missing_centrality_scale_count) * 2;
+        score -= centrality_scale_penalty;
+        if (missing_centrality_scale_count > 0U) {
+            details.push_back(
+                std::to_string(missing_centrality_scale_count)
+                + " concept assignment"
+                + (missing_centrality_scale_count == 1U ? " has" : "s have")
+                + " unresolved centrality-scale semantics"
+            );
+        }
         score = std::max(0, score);
-        if (score >= 82) {
+        if (score >= 82 && missing_centrality_scale_count == 0U) {
             return std::nullopt;
         }
         const std::string severity
@@ -322,7 +346,58 @@ namespace {
             { "workId", work.at("id") },
             { "workLabel", work.at("label") },
             { "score", score },
+            { "scoreBeforeCentralityScaleDebt",
+              score_before_centrality_scale_debt },
+            { "conceptAssignmentCount", concept_assignment_count },
+            { "missingCentralityScaleCount", missing_centrality_scale_count },
+            { "missingCentralityScaleFraction",
+              missing_centrality_scale_fraction },
+            { "centralityScaleQualityPenalty", centrality_scale_penalty },
+            { "centralityScaleQualityPenaltyCap",
+              maximum_centrality_scale_penalty },
+            { "centralityScaleInferred", false },
             { "details", std::move(details) },
+        };
+    }
+
+    ordered_json research_centrality_scale_coverage(const json& catalog) {
+        ordered_json works = ordered_json::array();
+        std::size_t assignment_count = 0U;
+        std::size_t missing_count = 0U;
+        for (const auto& work : catalog.at("works")) {
+            const std::size_t work_assignment_count
+                = work.at("conceptAssignmentCount").get<std::size_t>();
+            const std::size_t work_missing_count
+                = work.at("missingCentralityScaleCount").get<std::size_t>();
+            assignment_count += work_assignment_count;
+            missing_count += work_missing_count;
+            works.push_back(
+                { { "work_id", work.at("id") },
+                  { "concept_assignment_count", work_assignment_count },
+                  { "missing_centrality_scale_count", work_missing_count },
+                  { "missing_centrality_scale_fraction",
+                    work_assignment_count == 0U
+                        ? 0.0
+                        : static_cast<double>(work_missing_count)
+                            / static_cast<double>(work_assignment_count) },
+                  { "semantic_review_missing", work_missing_count > 0U } }
+            );
+        }
+        return {
+            { "centrality_scale_scope", "work_concept_assignment" },
+            { "concept_assignment_count", assignment_count },
+            { "missing_centrality_scale_count", missing_count },
+            { "missing_centrality_scale_fraction",
+              assignment_count == 0U ? 0.0
+                                     : static_cast<double>(missing_count)
+                      / static_cast<double>(assignment_count) },
+            { "none_is_missing_semantic_review", true },
+            { "none_numeric_compatibility_fallback",
+              "stored_centrality_unchanged" },
+            { "fallback_is_proof_of_numeric_calibration", false },
+            { "centrality_scale_inferred", false },
+            { "canonical_values_written", false },
+            { "works", std::move(works) },
         };
     }
 
@@ -348,6 +423,20 @@ namespace {
         return value != item.end() && value->is_number_integer()
             ? value->get<int>()
             : 101;
+    }
+
+    std::size_t missing_centrality_scale_count(const ordered_json& item) {
+        const auto value = item.find("missingCentralityScaleCount");
+        if (value == item.end()) {
+            return 0U;
+        }
+        if (value->is_number_unsigned()) {
+            return value->get<std::size_t>();
+        }
+        if (value->is_number_integer() && value->get<long long>() >= 0) {
+            return static_cast<std::size_t>(value->get<long long>());
+        }
+        return 0U;
     }
 
     ordered_json research_summary(const ordered_json& items) {
@@ -552,65 +641,76 @@ namespace {
 
 namespace {
 
-ordered_json build_research_report(
-    const json& product_export, ordered_json hints,
-    std::string product_snapshot_id, std::string product_sha256
-) {
-    require_snapshot_identity(product_snapshot_id, product_sha256);
-    ordered_json items = issue_items(product_export);
-    for (auto& hint : hints) {
-        items.push_back(std::move(hint));
-    }
-    const json catalog
-        = viewer_builder::catalog(product_export, product_snapshot_id);
-    for (const auto& work : catalog.at("works")) {
-        if (auto item = quality_item(work)) {
-            items.push_back(std::move(*item));
+    ordered_json build_research_report(
+        const json& product_export, ordered_json hints,
+        std::string product_snapshot_id, std::string product_sha256
+    ) {
+        require_snapshot_identity(product_snapshot_id, product_sha256);
+        ordered_json items = issue_items(product_export);
+        for (auto& hint : hints) {
+            items.push_back(std::move(hint));
         }
-    }
-    auto sorted_items = items.get<std::vector<ordered_json>>();
-    std::ranges::sort(
-        sorted_items, [](const ordered_json& left, const ordered_json& right) {
-            if (severity_rank(left) != severity_rank(right)) {
-                return severity_rank(left) < severity_rank(right);
+        const json catalog
+            = viewer_builder::catalog(product_export, product_snapshot_id);
+        for (const auto& work : catalog.at("works")) {
+            if (auto item = quality_item(work)) {
+                items.push_back(std::move(*item));
             }
-            const std::string left_kind = left.value("kind", "");
-            const std::string right_kind = right.value("kind", "");
-            if (left_kind != right_kind) {
-                return left_kind < right_kind;
-            }
-            const double left_similarity = similarity_score(left);
-            const double right_similarity = similarity_score(right);
-            if (left_similarity < right_similarity
-                || right_similarity < left_similarity) {
-                return left_similarity > right_similarity;
-            }
-            if (quality_score(left) != quality_score(right)) {
-                return quality_score(left) < quality_score(right);
-            }
-            const std::string left_title = left.value("title", "");
-            const std::string right_title = right.value("title", "");
-            if (left_title != right_title) {
-                return left_title < right_title;
-            }
-            return left.value("id", "") < right.value("id", "");
         }
-    );
-    items = std::move(sorted_items);
+        auto sorted_items = items.get<std::vector<ordered_json>>();
+        std::ranges::sort(
+            sorted_items,
+            [](const ordered_json& left, const ordered_json& right) {
+                if (severity_rank(left) != severity_rank(right)) {
+                    return severity_rank(left) < severity_rank(right);
+                }
+                const std::string left_kind = left.value("kind", "");
+                const std::string right_kind = right.value("kind", "");
+                if (left_kind != right_kind) {
+                    return left_kind < right_kind;
+                }
+                const double left_similarity = similarity_score(left);
+                const double right_similarity = similarity_score(right);
+                if (left_similarity < right_similarity
+                    || right_similarity < left_similarity) {
+                    return left_similarity > right_similarity;
+                }
+                if (quality_score(left) != quality_score(right)) {
+                    return quality_score(left) < quality_score(right);
+                }
+                const auto left_scale_debt
+                    = missing_centrality_scale_count(left);
+                const auto right_scale_debt
+                    = missing_centrality_scale_count(right);
+                if (left_scale_debt != right_scale_debt) {
+                    return left_scale_debt > right_scale_debt;
+                }
+                const std::string left_title = left.value("title", "");
+                const std::string right_title = right.value("title", "");
+                if (left_title != right_title) {
+                    return left_title < right_title;
+                }
+                return left.value("id", "") < right.value("id", "");
+            }
+        );
+        items = std::move(sorted_items);
 
-    return {
-        { "artifact_type", "product_research_report_v1" },
-        { "format_version", 1 },
-        { "product_snapshot",
-          snapshot_identity(product_snapshot_id, product_sha256) },
-        // Compatibility keys let the current static viewer consume the same
-        // physical report while it migrates to the explicit artifact envelope.
-        { "formatVersion", 1 },
-        { "productSnapshotId", product_snapshot_id },
-        { "summary", research_summary(items) },
-        { "items", std::move(items) },
-    };
-}
+        return {
+            { "artifact_type", "product_research_report_v1" },
+            { "format_version", 1 },
+            { "product_snapshot",
+              snapshot_identity(product_snapshot_id, product_sha256) },
+            // Compatibility keys let the current static viewer consume the same
+            // physical report while it migrates to the explicit artifact
+            // envelope.
+            { "formatVersion", 1 },
+            { "productSnapshotId", product_snapshot_id },
+            { "centrality_scale_coverage",
+              research_centrality_scale_coverage(catalog) },
+            { "summary", research_summary(items) },
+            { "items", std::move(items) },
+        };
+    }
 
 } // namespace
 
@@ -821,6 +921,43 @@ ordered_json product_projection_builder::taste_index(
     require_snapshot_identity(product_snapshot_id, product_sha256);
     const json catalog
         = viewer_builder::catalog(product_export, product_snapshot_id);
+
+    struct scale_coverage final {
+        std::size_t concept_assignment_count {};
+        std::size_t missing_centrality_scale_count {};
+    };
+
+    std::map<std::string, scale_coverage, std::less<>> work_scale_coverage;
+    ordered_json work_scale_coverage_rows = ordered_json::array();
+    std::size_t total_assignment_count = 0U;
+    std::size_t total_missing_scale_count = 0U;
+    for (const auto& work : catalog.at("works")) {
+        const std::string work_id = work.at("id").get<std::string>();
+        const scale_coverage coverage {
+            .concept_assignment_count
+            = work.value("conceptAssignmentCount", std::size_t { 0 }),
+            .missing_centrality_scale_count
+            = work.value("missingCentralityScaleCount", std::size_t { 0 }),
+        };
+        work_scale_coverage.emplace(work_id, coverage);
+        total_assignment_count += coverage.concept_assignment_count;
+        total_missing_scale_count += coverage.missing_centrality_scale_count;
+        work_scale_coverage_rows.push_back(
+            { { "work_id", work_id },
+              { "concept_assignment_count", coverage.concept_assignment_count },
+              { "missing_centrality_scale_count",
+                coverage.missing_centrality_scale_count },
+              { "missing_centrality_scale_fraction",
+                coverage.concept_assignment_count == 0U
+                    ? 0.0
+                    : static_cast<double>(
+                          coverage.missing_centrality_scale_count
+                      )
+                        / static_cast<double>(
+                            coverage.concept_assignment_count
+                        ) } }
+        );
+    }
     std::map<std::string, std::vector<feature>, std::less<>> base;
     std::map<std::string, std::size_t, std::less<>> frequencies;
     for (const auto& work : catalog.at("works")) {
@@ -875,6 +1012,20 @@ ordered_json product_projection_builder::taste_index(
             { "family", "work" },
             { "features", std::move(features) },
             { "norm", std::sqrt(squared) },
+            { "centrality_scale_coverage",
+              { { "concept_assignment_count",
+                  work_scale_coverage.at(id).concept_assignment_count },
+                { "missing_centrality_scale_count",
+                  work_scale_coverage.at(id).missing_centrality_scale_count },
+                { "missing_centrality_scale_fraction",
+                  work_scale_coverage.at(id).concept_assignment_count == 0U
+                      ? 0.0
+                      : static_cast<double>(work_scale_coverage.at(id)
+                                                .missing_centrality_scale_count)
+                          / static_cast<double>(
+                              work_scale_coverage.at(id)
+                                  .concept_assignment_count
+                          ) } } },
         };
     }
 
@@ -888,6 +1039,8 @@ ordered_json product_projection_builder::taste_index(
     std::map<
         std::string, std::map<std::string, double, std::less<>>, std::less<>>
         scores_by_agent;
+    std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
+        credited_works_by_agent;
     for (const auto& credit : array_or_empty(product_export, "credits")) {
         if (!credit.is_object()) {
             continue;
@@ -897,6 +1050,7 @@ ordered_json product_projection_builder::taste_index(
         if (agent_id.empty() || work == work_by_id.end()) {
             continue;
         }
+        credited_works_by_agent[agent_id].emplace(credit.value("work_id", ""));
         const double credit_weight
             = importance_multiplier(credit.value("importance", ""));
         auto& scores = scores_by_agent[agent_id];
@@ -907,6 +1061,7 @@ ordered_json product_projection_builder::taste_index(
             scores[concept_row.at("id").get<std::string>()] += weight;
         }
     }
+    ordered_json agent_scale_coverage_rows = ordered_json::array();
     for (const auto& agent : catalog.at("agents")) {
         const std::string agent_id = agent.at("id").get<std::string>();
         const auto score_map = scores_by_agent.find(agent_id);
@@ -981,11 +1136,52 @@ ordered_json product_projection_builder::taste_index(
             postings[key].emplace_back(id, weight);
             squared += weight * weight;
         }
+        scale_coverage coverage;
+        const auto credited = credited_works_by_agent.find(id);
+        if (credited != credited_works_by_agent.end()) {
+            for (const auto& work_id : credited->second) {
+                const auto work_coverage = work_scale_coverage.find(work_id);
+                if (work_coverage == work_scale_coverage.end()) {
+                    continue;
+                }
+                coverage.concept_assignment_count
+                    += work_coverage->second.concept_assignment_count;
+                coverage.missing_centrality_scale_count
+                    += work_coverage->second.missing_centrality_scale_count;
+            }
+        }
+        const double missing_fraction = coverage.concept_assignment_count == 0U
+            ? 0.0
+            : static_cast<double>(coverage.missing_centrality_scale_count)
+                / static_cast<double>(coverage.concept_assignment_count);
         entities[id] = {
             { "family", "agent" },
             { "features", std::move(features) },
             { "norm", std::sqrt(squared) },
+            { "centrality_scale_coverage",
+              { { "credited_work_count",
+                  credited == credited_works_by_agent.end()
+                      ? 0U
+                      : credited->second.size() },
+                { "concept_assignment_count",
+                  coverage.concept_assignment_count },
+                { "missing_centrality_scale_count",
+                  coverage.missing_centrality_scale_count },
+                { "missing_centrality_scale_fraction", missing_fraction },
+                { "credited_works_deduplicated", true } } },
         };
+        agent_scale_coverage_rows.push_back(
+            { { "agent_id", id },
+              { "credited_work_count",
+                credited == credited_works_by_agent.end()
+                    ? 0U
+                    : credited->second.size() },
+              { "concept_assignment_count", coverage.concept_assignment_count },
+              { "missing_centrality_scale_count",
+                coverage.missing_centrality_scale_count },
+              { "missing_centrality_scale_fraction", missing_fraction },
+              { "credited_works_deduplicated", true } }
+        );
     }
 
     ordered_json posting_lists = ordered_json::object();
@@ -1003,6 +1199,25 @@ ordered_json product_projection_builder::taste_index(
           { { "snapshot_id", product_snapshot_id },
             { "content_sha256", product_sha256 } } },
         { "features", std::move(metadata) },
+        { "centrality_weighting_policy",
+          { { "centrality_scale_scope", "work_concept_assignment" },
+            { "none_scale_behavior",
+              "stored_numeric_centrality_divided_by_100_compatibility_"
+              "fallback" },
+            { "none_scale_is_proof_of_numeric_calibration", false },
+            { "centrality_scale_inferred", false },
+            { "cross_assignment_scale_equivalence_assumed", false },
+            { "canonical_values_written", false } } },
+        { "centrality_scale_coverage",
+          { { "concept_assignment_count", total_assignment_count },
+            { "missing_centrality_scale_count", total_missing_scale_count },
+            { "missing_centrality_scale_fraction",
+              total_assignment_count == 0U
+                  ? 0.0
+                  : static_cast<double>(total_missing_scale_count)
+                      / static_cast<double>(total_assignment_count) },
+            { "works", std::move(work_scale_coverage_rows) },
+            { "agents", std::move(agent_scale_coverage_rows) } } },
         { "entities", std::move(entities) },
         { "postings", std::move(posting_lists) },
     };

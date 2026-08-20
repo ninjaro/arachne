@@ -258,6 +258,23 @@
         "associated_with"
       ]
     },
+    "centrality_scale": {
+      "type": "string",
+      "enum": [
+        "none",
+        "binary",
+        "ordinal",
+        "graded"
+      ]
+    },
+    "reviewed_centrality_scale": {
+      "type": "string",
+      "enum": [
+        "binary",
+        "ordinal",
+        "graded"
+      ]
+    },
     "historical_role": {
       "type": "string",
       "enum": [
@@ -783,6 +800,7 @@
         "concept_id",
         "relation_type",
         "centrality",
+        "centrality_scale",
         "evidence"
       ],
       "properties": {
@@ -802,6 +820,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100
+        },
+        "centrality_scale": {
+          "$ref": "#/$defs/reviewed_centrality_scale"
         },
         "historical_role": {
           "$ref": "#/$defs/historical_role"
@@ -956,6 +977,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/update_source"
+          }
+        },
+        "work_concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/update_work_concept"
           }
         },
         "delete": {
@@ -1283,6 +1310,74 @@
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/source_unset_field"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "set": {
+              "minProperties": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "unset": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "work_concept_update_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "centrality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "centrality_scale": {
+          "$ref": "#/$defs/reviewed_centrality_scale"
+        },
+        "historical_role": {
+          "$ref": "#/$defs/historical_role"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        }
+      }
+    },
+    "work_concept_unset_field": {
+      "type": "string",
+      "enum": [
+        "historical_role",
+        "confidence"
+      ]
+    },
+    "update_work_concept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "set": {
+          "$ref": "#/$defs/work_concept_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/work_concept_unset_field"
           }
         }
       },

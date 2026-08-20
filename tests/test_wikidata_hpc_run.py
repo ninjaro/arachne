@@ -307,7 +307,7 @@ print("12345678;claix")
         with sqlite3.connect(database) as connection:
             connection.executescript(
                 """
-                PRAGMA user_version=6;
+                PRAGMA user_version=7;
                 CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
                 INSERT INTO records(value) VALUES('example');
                 """

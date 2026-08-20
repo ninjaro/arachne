@@ -19,6 +19,14 @@ current Arachne product database.
 - concepts, content-guide assertions, measurements, work identifiers,
   manifestations and financial facts from the current database
 
+Work-concept projections retain both the raw `1–100` centrality and the
+pair-local `centralityScale`. The viewer labels `none` as an unreviewed semantic
+scale while retaining the stored numeric value; it does not reinterpret it as
+binary, zero, or irrelevance. Viewer weighting uses that unchanged numeric
+value on its canonical range as a compatibility fallback, not as evidence that
+the number is semantically calibrated, and never infers a scale from the
+concept, neighboring works, or catalog-wide distributions.
+
 ## Local development
 
 From `viewer/`:

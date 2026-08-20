@@ -113,6 +113,24 @@ exactly one strict, plain UTF-8 `arachne_batch_v2` object per `.json` file and
 moves it into repository `inbox/`. ZIP files, sidecars, old mining variants, and
 arbitrary metadata are rejected.
 
+### One-way schema v6 to v7 migration
+
+Run the fixed migration once from the repository root before using current
+product commands against a schema-v6 database:
+
+```sh
+python3 scripts/migrate_product_v6_to_v7.py
+```
+
+The migration atomically rebuilds `database/art-islands.sqlite`, preserves
+every numeric `work_concepts.centrality` exactly, assigns
+`centrality_scale = none` to every existing assignment, validates integrity and
+foreign keys, and runs `VACUUM` before replacement. It does not infer a scale
+from any product or analytical data. Here `none` means the stored numeric value
+has not received pair-level semantic review; it does not mean binary,
+irrelevant, zero, or unknown centrality. Later corrections use normal
+miner-authored batches.
+
 ## Product inbox
 
 The product paths are part of the repository contract:

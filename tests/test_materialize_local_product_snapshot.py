@@ -26,7 +26,7 @@ def digest(path: Path) -> str:
 
 def create_database(path: Path, *, stable_primary_keys: bool = True) -> None:
     with sqlite3.connect(path) as connection:
-        connection.execute("PRAGMA user_version = 6")
+        connection.execute("PRAGMA user_version = 7")
         if stable_primary_keys:
             connection.executescript(
                 """
@@ -134,7 +134,7 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         self.assertEqual(control["format_version"], 1)
         self.assertRegex(control["snapshot_id"], STABLE_ID)
         self.assertRegex(control["run_id"], STABLE_ID)
-        self.assertEqual(control["graph_version"], "canonical-schema-v6")
+        self.assertEqual(control["graph_version"], "canonical-schema-v7")
         self.assertEqual(control["content_sha256"], digest(self.database))
         dt.datetime.fromisoformat(control["activated_at"].replace("Z", "+00:00"))
         self.assertEqual(

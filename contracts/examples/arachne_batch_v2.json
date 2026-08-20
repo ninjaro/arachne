@@ -132,6 +132,7 @@
         "concept_id": "concept-light-art",
         "relation_type": "exemplifies",
         "centrality": 95,
+        "centrality_scale": "graded",
         "historical_role": "canonical",
         "confidence": 0.9,
         "evidence": [
@@ -192,6 +193,16 @@
         "unset": [
           "author_text"
         ]
+      }
+    ],
+    "work_concepts": [
+      {
+        "id": 73,
+        "set": {
+          "centrality": 80,
+          "centrality_scale": "ordinal"
+        },
+        "unset": []
       }
     ],
     "delete": {

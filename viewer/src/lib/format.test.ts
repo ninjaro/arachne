@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { externalUrl, schemeLabel } from "./format";
+import { centralityScaleLabel, externalUrl, schemeLabel } from "./format";
+
+describe("pair-level centrality scale formatting", () => {
+  it("identifies none as missing review without implying absent importance", () => {
+    expect(centralityScaleLabel("none")).toBe(
+      "Centrality scale unreviewed (stored centrality retained)",
+    );
+    expect(centralityScaleLabel("ordinal")).toBe("Ordinal centrality scale");
+  });
+});
 
 describe("external identifier formatting", () => {
   it("uses the provider registry for labels and derived links", () => {

@@ -1,4 +1,4 @@
-import type { Work } from "./types";
+import type { CentralityScale, Work } from "./types";
 import {
   externalSchemeInfo,
   registeredExternalUrl,
@@ -9,6 +9,12 @@ export function humanize(value: string): string {
     .replaceAll("_", " ")
     .replaceAll("-", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+export function centralityScaleLabel(scale: CentralityScale): string {
+  return scale === "none"
+    ? "Centrality scale unreviewed (stored centrality retained)"
+    : `${humanize(scale)} centrality scale`;
 }
 
 export function dateLabel(work: Work): string {

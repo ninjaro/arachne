@@ -34,8 +34,8 @@ public:
             R"({"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[]})"
         );
         fs::copy_file(
-            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v6.sql",
-            root_ / "schema" / "product_v6.sql"
+            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v7.sql",
+            root_ / "schema" / "product_v7.sql"
         );
         const auto initialized
             = arachne::penelope::apply_product_inbox(root_);
@@ -75,11 +75,11 @@ public:
             "(2,2,'Alpha and beta occur in the second work.','contextualizes'),"
             "(10,2,'A second relation source.','contextualizes');"
             "INSERT INTO work_concepts(id,work_id,concept_id,relation_type,"
-            "centrality,confidence,historical_role) VALUES"
-            "(1,'work-000001','concept-000001','contains',100,0.9,'formative'),"
-            "(2,'work-000001','concept-000002','contains',80,1.0,NULL),"
-            "(3,'work-000002','concept-000001','contains',100,1.0,NULL),"
-            "(4,'work-000002','concept-000002','contains',80,1.0,NULL);"
+            "centrality,centrality_scale,confidence,historical_role) VALUES"
+            "(1,'work-000001','concept-000001','contains',100,'none',0.9,'formative'),"
+            "(2,'work-000001','concept-000002','contains',80,'binary',1.0,NULL),"
+            "(3,'work-000002','concept-000001','contains',100,'ordinal',1.0,NULL),"
+            "(4,'work-000002','concept-000002','contains',80,'graded',1.0,NULL);"
             "INSERT INTO concept_relations(id,subject_concept_id,relation_type,"
             "object_concept_id,strength,from_year,to_year,region_code,"
             "confidence) VALUES"
@@ -194,7 +194,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
             fixture.root(), arachne::ariadne::merge_hint_generator_version
         );
     EXPECT_EQ(input.at("product_snapshot").at("sha256"), before);
-    EXPECT_EQ(input.at("product_snapshot").at("schema_version"), 6);
+    EXPECT_EQ(input.at("product_snapshot").at("schema_version"), 7);
     EXPECT_EQ(input.at("entities").size(), 6U);
     const auto input_work = std::ranges::find_if(
         input.at("entities"), [](const nlohmann::json& value) {
@@ -249,6 +249,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     );
     const auto& assertion
         = input_concept->at("concept").at("assertions").front();
+    EXPECT_EQ(assertion.at("centrality_scale"), "none");
     EXPECT_DOUBLE_EQ(assertion.at("confidence").get<double>(), 0.9);
     EXPECT_EQ(assertion.at("historical_role"), "formative");
     ASSERT_EQ(assertion.at("evidence").size(), 1U);
@@ -256,6 +257,34 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     EXPECT_EQ(assertion.at("evidence").front().at("source_id"), "1");
     EXPECT_EQ(assertion.at("evidence").front().at("stance"), "supports");
     EXPECT_FALSE(assertion.at("evidence").front().contains("exact_quote"));
+    ASSERT_EQ(input_concept->at("concept").at("assertions").size(), 2U);
+    EXPECT_EQ(
+        input_concept->at("concept").at("assertions").at(1).at(
+            "centrality_scale"
+        ),
+        "ordinal"
+    );
+    const auto input_second_concept = std::ranges::find_if(
+        input.at("entities"), [](const nlohmann::json& value) {
+            return value.at("id") == "concept-000002";
+        }
+    );
+    ASSERT_NE(input_second_concept, input.at("entities").end());
+    ASSERT_EQ(
+        input_second_concept->at("concept").at("assertions").size(), 2U
+    );
+    EXPECT_EQ(
+        input_second_concept->at("concept").at("assertions").at(0).at(
+            "centrality_scale"
+        ),
+        "binary"
+    );
+    EXPECT_EQ(
+        input_second_concept->at("concept").at("assertions").at(1).at(
+            "centrality_scale"
+        ),
+        "graded"
+    );
     ASSERT_EQ(input_concept->at("concept").at("neighbors").size(), 1U);
     const auto& relation
         = input_concept->at("concept").at("neighbors").front();
@@ -390,7 +419,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
         fixture.store_integer(
             "SELECT count(*) FROM metadata WHERE"
             " key='structural_algorithm_version'"
-            " AND value='ariadne-structural-hints-2.2.0'"
+            " AND value='ariadne-structural-hints-2.3.0'"
         ),
         1
     );
@@ -1162,6 +1191,32 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
         ASSERT_FALSE(experiments.empty());
         experiments[0]["work_id"] = "work-999999";
     });
+    expect_rejected(
+        "centrality scale coverage work", [](nlohmann::json& analysis) {
+            auto& coverage = analysis["centrality_diagnostics"]
+                                     ["work_assignment_scale_coverage"];
+            ASSERT_FALSE(coverage.empty());
+            coverage[0]["work_id"] = "work-999999";
+        }
+    );
+    expect_rejected(
+        "credited work scale debt", [](nlohmann::json& analysis) {
+            const auto priority = std::ranges::find_if(
+                analysis["research_priorities"],
+                [](const nlohmann::json& row) {
+                    return row.at("details").contains(
+                        "credited_work_scale_debt"
+                    );
+                }
+            );
+            ASSERT_NE(priority, analysis["research_priorities"].end());
+            ASSERT_FALSE(
+                (*priority)["details"]["credited_work_scale_debt"].empty()
+            );
+            (*priority)["details"]["credited_work_scale_debt"][0]["work_id"]
+                = "work-999999";
+        }
+    );
     expect_rejected("genre-like signature", [](nlohmann::json& analysis) {
         ASSERT_FALSE(analysis["genre_like_signatures"].empty());
         analysis["genre_like_signatures"][0]["concept_id"]
@@ -1239,6 +1294,55 @@ TEST(MergeHintStore, ExportRejectsTamperedCrossMediaProjectionEntity) {
         "UPDATE analysis_projections SET payload_json=json_set("
         " payload_json,'$.concept_medium_profiles[0].concept_id',"
         " 'concept-999999') WHERE section='cross_media'"
+    );
+
+    EXPECT_THROW(
+        static_cast<void>(arachne::penelope::load_merge_hint_export(
+            fixture.root(), arachne::ariadne::merge_hint_generator_version
+        )),
+        arachne::penelope::merge_hint_store_error
+    );
+}
+
+TEST(MergeHintStore, ExportRejectsTamperedScaleCoverageWork) {
+    merge_hint_store_fixture fixture;
+    const auto input = arachne::penelope::prepare_merge_hint_rebuild(
+        fixture.root(), arachne::ariadne::merge_hint_generator_version
+    );
+    const auto projection
+        = arachne::ariadne::merge_hint_planner::build(input);
+    arachne::penelope::store_merge_hint_projection(
+        fixture.root(), projection
+    );
+    fixture.execute_store(
+        "UPDATE analysis_projections SET payload_json=json_set("
+        " payload_json,'$.work_assignment_scale_coverage[0].work_id',"
+        " 'work-999999') WHERE section='centrality_diagnostics'"
+    );
+
+    EXPECT_THROW(
+        static_cast<void>(arachne::penelope::load_merge_hint_export(
+            fixture.root(), arachne::ariadne::merge_hint_generator_version
+        )),
+        arachne::penelope::merge_hint_store_error
+    );
+}
+
+TEST(MergeHintStore, ExportRejectsTamperedCreditedWorkScaleDebt) {
+    merge_hint_store_fixture fixture;
+    const auto input = arachne::penelope::prepare_merge_hint_rebuild(
+        fixture.root(), arachne::ariadne::merge_hint_generator_version
+    );
+    const auto projection
+        = arachne::ariadne::merge_hint_planner::build(input);
+    arachne::penelope::store_merge_hint_projection(
+        fixture.root(), projection
+    );
+    fixture.execute_store(
+        "UPDATE analysis_projections SET payload_json=json_set("
+        " payload_json,'$[0].details.credited_work_scale_debt',"
+        " json_array(json_object('work_id','work-999999'))) "
+        "WHERE section='research_priorities'"
     );
 
     EXPECT_THROW(

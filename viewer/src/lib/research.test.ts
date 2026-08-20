@@ -16,6 +16,18 @@ function report(): ResearchData {
     },
     formatVersion: 1,
     productSnapshotId: "product-test",
+    centrality_scale_coverage: {
+      centrality_scale_scope: "work_concept_assignment",
+      concept_assignment_count: 0,
+      missing_centrality_scale_count: 0,
+      missing_centrality_scale_fraction: 0,
+      none_is_missing_semantic_review: true,
+      none_numeric_compatibility_fallback: "stored_centrality_unchanged",
+      fallback_is_proof_of_numeric_calibration: false,
+      centrality_scale_inferred: false,
+      canonical_values_written: false,
+      works: [],
+    },
     summary: {
       total: 0,
       qualityGaps: 0,
@@ -61,5 +73,21 @@ describe("native research report contract", () => {
       content_sha256: SHA256,
     };
     expect(isResearchData(value)).toBe(false);
+  });
+
+  it("rejects incomplete or internally inconsistent per-work scale coverage", () => {
+    const missing = report() as unknown as Record<string, unknown>;
+    delete missing.centrality_scale_coverage;
+    expect(isResearchData(missing)).toBe(false);
+
+    const inconsistent = report();
+    inconsistent.centrality_scale_coverage.works.push({
+      work_id: "work-000001",
+      concept_assignment_count: 2,
+      missing_centrality_scale_count: 1,
+      missing_centrality_scale_fraction: 0.5,
+      semantic_review_missing: true,
+    });
+    expect(isResearchData(inconsistent)).toBe(false);
   });
 });

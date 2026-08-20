@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -31,6 +33,24 @@ namespace {
             );
         }
         return document.at(field);
+    }
+
+    std::string pair_centrality_scale(const nlohmann::json& assignment) {
+        const auto value = assignment.find("centrality_scale");
+        if (value == assignment.end() || !value->is_string()) {
+            throw std::invalid_argument(
+                "work-concept centrality_scale must be explicit"
+            );
+        }
+        const std::string scale = value->get<std::string>();
+        if (scale != "none" && scale != "binary" && scale != "ordinal"
+            && scale != "graded") {
+            throw std::invalid_argument(
+                "work-concept centrality_scale is outside the closed "
+                "vocabulary"
+            );
+        }
+        return scale;
     }
 
     std::optional<std::string> projection_identifier(
@@ -156,7 +176,8 @@ namespace {
     void append_human_edge(
         nlohmann::ordered_json& edges, std::string from, std::string to,
         std::string type, std::string assertion_id, std::string snapshot_id,
-        const nlohmann::json& evidence = nlohmann::json::array()
+        const nlohmann::json& evidence = nlohmann::json::array(),
+        const nlohmann::json& assertion_attributes = nlohmann::json::object()
     ) {
         nlohmann::ordered_json source_ids = nlohmann::ordered_json::array();
         nlohmann::ordered_json evidence_ids = nlohmann::ordered_json::array();
@@ -187,16 +208,23 @@ namespace {
               "Accepted human-authored research relation with "
               "assertion-specific evidence." },
         };
+        nlohmann::json attributes {
+            { "derived", false },
+            { "assertion_id", assertion_id },
+            { "evidence", std::move(evidence_ids) },
+        };
+        if (assertion_attributes.is_object()) {
+            for (const auto& [key, value] : assertion_attributes.items()) {
+                attributes[key] = value;
+            }
+        }
         edges.push_back(
             { { "edge_id", edge_id(from, to, type, assertion_id) },
               { "source", std::move(from) },
               { "target", std::move(to) },
               { "edge_type", std::move(type) },
               { "provenance", std::move(provenance) },
-              { "attributes",
-                { { "derived", false },
-                  { "assertion_id", assertion_id },
-                  { "evidence", std::move(evidence_ids) } } } }
+              { "attributes", std::move(attributes) } }
         );
     }
 
@@ -333,6 +361,24 @@ namespace {
         );
     }
 
+    std::optional<std::uint64_t>
+    nonnegative_json_count(const nlohmann::json& value) {
+        if (value.is_number_unsigned()) {
+            return value.get<std::uint64_t>();
+        }
+        if (value.is_number_integer()) {
+            const auto count = value.get<std::int64_t>();
+            if (count >= 0) {
+                return static_cast<std::uint64_t>(count);
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool valid_nonnegative_catalog_count(const nlohmann::json& value) {
+        return nonnegative_json_count(value).has_value();
+    }
+
     void validate_viewer_catalog(const nlohmann::json& catalog) {
         if (!catalog.is_object() || catalog.value("formatVersion", 0) != 1
             || !catalog.contains("productSnapshotId")
@@ -363,10 +409,58 @@ namespace {
         }
 
         for (const auto& work : catalog.at("works")) {
-            if (!work.is_object() || !work.contains("contributors")
+            if (!work.is_object() || !work.contains("concepts")
+                || !work.at("concepts").is_array()
+                || !work.contains("conceptAssignmentCount")
+                || !valid_nonnegative_catalog_count(
+                    work.at("conceptAssignmentCount")
+                )
+                || !work.contains("missingCentralityScaleCount")
+                || !valid_nonnegative_catalog_count(
+                    work.at("missingCentralityScaleCount")
+                )
+                || !work.contains("missingCentralityScaleFraction")
+                || !work.at("missingCentralityScaleFraction").is_number()
+                || !work.contains("contributors")
                 || !work.at("contributors").is_array()) {
                 throw std::invalid_argument(
                     "viewer catalog contains a malformed work"
+                );
+            }
+            std::size_t missing_centrality_scales = 0U;
+            for (const auto& concept_assignment : work.at("concepts")) {
+                if (!concept_assignment.is_object()) {
+                    throw std::invalid_argument(
+                        "viewer catalog contains a malformed concept assignment"
+                    );
+                }
+                if (pair_centrality_scale(
+                        { { "centrality_scale",
+                            concept_assignment.value("centralityScale", "") } }
+                    )
+                    == "none") {
+                    ++missing_centrality_scales;
+                }
+            }
+            const std::size_t assignment_count = work.at("concepts").size();
+            const double missing_fraction = assignment_count == 0U
+                ? 0.0
+                : static_cast<double>(missing_centrality_scales)
+                    / static_cast<double>(assignment_count);
+            if (work.at("conceptAssignmentCount").get<std::size_t>()
+                    != assignment_count
+                || work.at("missingCentralityScaleCount").get<std::size_t>()
+                    != missing_centrality_scales
+                || !std::isfinite(
+                    work.at("missingCentralityScaleFraction").get<double>()
+                )
+                || std::abs(
+                       work.at("missingCentralityScaleFraction").get<double>()
+                       - missing_fraction
+                   ) > 1e-12) {
+                throw std::invalid_argument(
+                    "viewer catalog contains inconsistent centrality-scale "
+                    "coverage"
                 );
             }
             for (const auto& contributor : work.at("contributors")) {
@@ -389,6 +483,162 @@ namespace {
                     );
                 }
             }
+        }
+    }
+
+    void validate_research_centrality_scale_coverage(
+        const nlohmann::json& research, const nlohmann::json& catalog
+    ) {
+        if (research.is_null()) {
+            return;
+        }
+        const auto coverage = research.find("centrality_scale_coverage");
+        if (coverage == research.end() || !coverage->is_object()
+            || coverage->value("centrality_scale_scope", "")
+                != "work_concept_assignment"
+            || coverage->find("none_is_missing_semantic_review")
+                == coverage->end()
+            || coverage->at("none_is_missing_semantic_review") != true
+            || coverage->value("none_numeric_compatibility_fallback", "")
+                != "stored_centrality_unchanged"
+            || coverage->find("fallback_is_proof_of_numeric_calibration")
+                == coverage->end()
+            || coverage->at("fallback_is_proof_of_numeric_calibration") != false
+            || coverage->find("centrality_scale_inferred") == coverage->end()
+            || coverage->at("centrality_scale_inferred") != false
+            || coverage->find("canonical_values_written") == coverage->end()
+            || coverage->at("canonical_values_written") != false
+            || !coverage->contains("works")
+            || !coverage->at("works").is_array()) {
+            throw std::invalid_argument(
+                "viewer research has malformed centrality-scale coverage"
+            );
+        }
+
+        struct expected_work_coverage final {
+            std::uint64_t assignments {};
+            std::uint64_t missing {};
+            double fraction {};
+        };
+
+        std::map<std::string, expected_work_coverage, std::less<>>
+            expected_by_work;
+        for (const auto& work : catalog.at("works")) {
+            if (!work.contains("id") || !work.at("id").is_string()
+                || work.at("id").get_ref<const std::string&>().empty()) {
+                throw std::invalid_argument(
+                    "viewer catalog contains a malformed work identity"
+                );
+            }
+            const auto assignments
+                = nonnegative_json_count(work.at("conceptAssignmentCount"));
+            const auto missing = nonnegative_json_count(
+                work.at("missingCentralityScaleCount")
+            );
+            if (!assignments || !missing) {
+                throw std::invalid_argument(
+                    "viewer catalog contains malformed centrality-scale counts"
+                );
+            }
+            const std::string id = work.at("id").get<std::string>();
+            if (!expected_by_work
+                     .emplace(
+                         id,
+                         expected_work_coverage {
+                             .assignments = *assignments,
+                             .missing = *missing,
+                             .fraction
+                             = work.at("missingCentralityScaleFraction")
+                                   .get<double>(),
+                         }
+                     )
+                     .second) {
+                throw std::invalid_argument(
+                    "viewer catalog contains duplicate work identities"
+                );
+            }
+        }
+
+        std::uint64_t assignment_total = 0U;
+        std::uint64_t missing_total = 0U;
+        std::set<std::string, std::less<>> seen;
+        for (const auto& row : coverage->at("works")) {
+            if (!row.is_object() || !row.contains("work_id")
+                || !row.at("work_id").is_string()
+                || row.at("work_id").get_ref<const std::string&>().empty()
+                || !row.contains("concept_assignment_count")
+                || !row.contains("missing_centrality_scale_count")
+                || !row.contains("missing_centrality_scale_fraction")
+                || !row.at("missing_centrality_scale_fraction").is_number()
+                || !row.contains("semantic_review_missing")
+                || !row.at("semantic_review_missing").is_boolean()) {
+                throw std::invalid_argument(
+                    "viewer research has a malformed work scale-coverage row"
+                );
+            }
+            const std::string work_id = row.at("work_id").get<std::string>();
+            const auto expected = expected_by_work.find(work_id);
+            const auto assignments
+                = nonnegative_json_count(row.at("concept_assignment_count"));
+            const auto missing = nonnegative_json_count(
+                row.at("missing_centrality_scale_count")
+            );
+            const double fraction
+                = row.at("missing_centrality_scale_fraction").get<double>();
+            if (expected == expected_by_work.end()
+                || !seen.emplace(work_id).second || !assignments || !missing
+                || *assignments != expected->second.assignments
+                || *missing != expected->second.missing
+                || !std::isfinite(fraction)
+                || std::abs(fraction - expected->second.fraction) > 1e-12
+                || row.at("semantic_review_missing").get<bool>()
+                    != (*missing > 0U)) {
+                throw std::invalid_argument(
+                    "viewer research centrality-scale coverage differs from "
+                    "catalog"
+                );
+            }
+            if (std::numeric_limits<std::uint64_t>::max() - assignment_total
+                    < *assignments
+                || std::numeric_limits<std::uint64_t>::max() - missing_total
+                    < *missing) {
+                throw std::invalid_argument(
+                    "viewer research centrality-scale coverage overflows"
+                );
+            }
+            assignment_total += *assignments;
+            missing_total += *missing;
+        }
+        const auto reported_assignments
+            = coverage->find("concept_assignment_count");
+        const auto reported_missing
+            = coverage->find("missing_centrality_scale_count");
+        const auto reported_fraction
+            = coverage->find("missing_centrality_scale_fraction");
+        if (seen.size() != expected_by_work.size()
+            || reported_assignments == coverage->end()
+            || reported_missing == coverage->end()
+            || reported_fraction == coverage->end()
+            || !reported_fraction->is_number()
+            || nonnegative_json_count(*reported_assignments)
+                != std::optional<std::uint64_t>(assignment_total)
+            || nonnegative_json_count(*reported_missing)
+                != std::optional<std::uint64_t>(missing_total)) {
+            throw std::invalid_argument(
+                "viewer research centrality-scale totals differ from catalog"
+            );
+        }
+        const double fraction = reported_fraction->get<double>();
+        const double expected_fraction = assignment_total == 0U
+            ? 0.0
+            : static_cast<double>(missing_total)
+                / static_cast<double>(assignment_total);
+        if (!std::isfinite(fraction)
+            || std::abs(fraction - expected_fraction) > 1e-12) {
+            throw std::invalid_argument(
+                "viewer research centrality-scale fraction differs from "
+                "catalog"
+            );
         }
     }
 
@@ -642,10 +892,18 @@ nlohmann::ordered_json viewer_builder::project(
             : evidence_by_assertion.contains(assertion_id)
             ? evidence_by_assertion.at(assertion_id)
             : nlohmann::json::array();
+        const std::string centrality_scale = pair_centrality_scale(assertion);
+        nlohmann::ordered_json attributes {
+            { "centrality_scale", centrality_scale },
+            { "semantic_review_missing", centrality_scale == "none" },
+        };
+        if (assertion.contains("centrality")) {
+            attributes["centrality"] = assertion.at("centrality");
+        }
         append_human_edge(
             edges, from, to,
             assertion.value("relation_type", "associated_with"), assertion_id,
-            product_snapshot_for_provenance, evidence
+            product_snapshot_for_provenance, evidence, attributes
         );
     }
     for (const auto& relation :
@@ -1104,6 +1362,9 @@ nlohmann::ordered_json viewer_builder::catalog(
             }
         }
         item["concepts"] = nlohmann::ordered_json::array();
+        item["conceptAssignmentCount"] = std::size_t { 0U };
+        item["missingCentralityScaleCount"] = std::size_t { 0U };
+        item["missingCentralityScaleFraction"] = 0.0;
         item["contributors"] = nlohmann::ordered_json::array();
         item["advisories"] = nlohmann::ordered_json::array();
         item["measurements"] = nlohmann::ordered_json::array();
@@ -1144,12 +1405,20 @@ nlohmann::ordered_json viewer_builder::catalog(
             continue;
         }
         auto item = concept_it->second;
+        const std::string centrality_scale = pair_centrality_scale(assignment);
         item["relationType"]
             = assignment.value("relation_type", "associated_with");
         copy_field(item, "centrality", assignment, "centrality");
+        item["centralityScale"] = centrality_scale;
         copy_field(item, "historicalRole", assignment, "historical_role");
         copy_field(item, "confidence", assignment, "confidence");
         work->second["concepts"].push_back(std::move(item));
+        auto& assignment_count = work->second["conceptAssignmentCount"];
+        assignment_count = assignment_count.get<std::size_t>() + 1U;
+        if (centrality_scale == "none") {
+            auto& missing_count = work->second["missingCentralityScaleCount"];
+            missing_count = missing_count.get<std::size_t>() + 1U;
+        }
     }
 
     for (const auto& credit : array_or_empty(product_export, "credits")) {
@@ -1305,6 +1574,13 @@ nlohmann::ordered_json viewer_builder::catalog(
     nlohmann::ordered_json work_array = nlohmann::ordered_json::array();
     for (auto& [id, work] : works) {
         static_cast<void>(id);
+        const auto assignments
+            = work.at("conceptAssignmentCount").get<std::size_t>();
+        const auto missing
+            = work.at("missingCentralityScaleCount").get<std::size_t>();
+        work["missingCentralityScaleFraction"] = assignments == 0U
+            ? 0.0
+            : static_cast<double>(missing) / static_cast<double>(assignments);
         work_array.push_back(std::move(work));
     }
     nlohmann::ordered_json agent_array = nlohmann::ordered_json::array();
@@ -1424,6 +1700,7 @@ nlohmann::ordered_json viewer_builder::build_site(
     validate_product_projection(
         research_data, "product_research_report_v1", "sha256"
     );
+    validate_research_centrality_scale_coverage(research_data, catalog_data);
     validate_product_projection(
         taste_index, "taste_index_v1", "content_sha256"
     );

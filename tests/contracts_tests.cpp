@@ -367,6 +367,33 @@ TEST(Contracts, ArachneBatchRequiresExplicitEvidenceSemantics) {
     EXPECT_TRUE(has_code(result, "min_items"));
 }
 
+TEST(Contracts, ArachneBatchRequiresReviewedPairLevelCentralityScale) {
+    json document = example("arachne_batch_v2");
+    document["create"]["work_concepts"][0].erase("centrality_scale");
+    validation_result result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "required"));
+
+    document = example("arachne_batch_v2");
+    document["create"]["work_concepts"][0]["centrality_scale"] = "none";
+    result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "enum"));
+
+    document = example("arachne_batch_v2");
+    document["update"]["work_concepts"][0]["set"]["centrality_scale"]
+        = "continuous";
+    result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "enum"));
+}
+
 TEST(Contracts, ArachneBatchReservesCanonicalEntityIds) {
     json document = example("arachne_batch_v2");
     document["create"]["works"][0]["local_id"] = "work-000001";

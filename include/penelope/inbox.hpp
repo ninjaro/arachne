@@ -62,7 +62,7 @@ check_product_inbox(const std::filesystem::path& repository_root);
 
 /**
  * Validate every pending batch first, then apply valid batches directly to the
- * schema-v6 product database, one BEGIN IMMEDIATE transaction per batch.
+ * schema-v7 product database, one BEGIN IMMEDIATE transaction per batch.
  */
 [[nodiscard]] inbox_result
 apply_product_inbox(const std::filesystem::path& repository_root);

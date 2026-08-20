@@ -1,7 +1,7 @@
-import type { ConceptAssignment, EntityId } from "./types";
+import type { CentralityScale, ConceptAssignment, EntityId } from "./types";
 
-/** Centrality scales currently found in product snapshots. */
-export type TagStrengthScale = 1 | 10 | 100;
+/** Canonical centrality remains numeric on the fixed inclusive 1..100 range. */
+export const CANONICAL_CENTRALITY_DENOMINATOR = 100;
 
 export interface WeightedTagMembership {
   tagId: EntityId;
@@ -11,6 +11,8 @@ export interface WeightedTagMembership {
   strength: number | null;
   /** Unmodified source centrality, retained for inspection. */
   rawStrength: number | null;
+  /** Pair-local semantic interpretation; never inferred by the viewer. */
+  centralityScale: CentralityScale;
   historicalRole: string | null;
   confidence: number | null;
 }
@@ -51,32 +53,13 @@ function finiteStrength(value: number | null): number | null {
   return value === null || !Number.isFinite(value) ? null : clamp01(value);
 }
 
-/**
- * Infer one scale for a domain projection. Values outside the supported ranges
- * select the widest scale and are subsequently clamped. Missing and non-finite
- * values never influence the scale.
- */
-export function inferTagStrengthScale(
-  assignments: Iterable<Pick<ConceptAssignment, "centrality">>,
-): TagStrengthScale {
-  let maximum = 0;
-  for (const assignment of assignments) {
-    const value = assignment.centrality;
-    if (value === null || !Number.isFinite(value)) continue;
-    maximum = Math.max(maximum, value);
-  }
-  if (maximum > 10) return 100;
-  if (maximum > 1) return 10;
-  return 1;
-}
-
-/** Normalize without mutating the source assignment. */
+/** Normalize the stored numeric value without interpreting its semantic mode. */
 export function normalizeTagStrength(
   rawStrength: number | null,
-  scale: TagStrengthScale,
+  denominator = CANONICAL_CENTRALITY_DENOMINATOR,
 ): number | null {
   if (rawStrength === null || !Number.isFinite(rawStrength)) return null;
-  return clamp01(rawStrength / scale);
+  return clamp01(rawStrength / denominator);
 }
 
 /** Semantic display band kept separate from tag color and confidence. */
@@ -92,14 +75,14 @@ export function weightedTagMembership(
   assignment: ConceptAssignment,
   workId: EntityId,
   stationId: string,
-  scale: TagStrengthScale,
 ): WeightedTagMembership {
   return {
     tagId: assignment.id,
     workId,
     stationId,
-    strength: normalizeTagStrength(assignment.centrality, scale),
+    strength: normalizeTagStrength(assignment.centrality),
     rawStrength: assignment.centrality,
+    centralityScale: assignment.centralityScale,
     historicalRole: assignment.historicalRole,
     confidence: assignment.confidence,
   };

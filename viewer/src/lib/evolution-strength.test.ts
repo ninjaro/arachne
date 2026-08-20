@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ConceptAssignment } from "./types";
 import {
+  CANONICAL_CENTRALITY_DENOMINATOR,
   MAX_TRAJECTORY_SEGMENT_WIDTH,
   MIN_TRAJECTORY_SEGMENT_WIDTH,
   UNKNOWN_TRAJECTORY_SEGMENT_WIDTH,
   aggregateTagStrength,
   buildTagTrajectorySegments,
-  inferTagStrengthScale,
   normalizeTagStrength,
   tagStrengthBand,
   trajectorySegmentWidth,
@@ -21,23 +21,20 @@ function assignment(centrality: number | null): ConceptAssignment {
     slug: "a",
     relationType: "about",
     centrality,
+    centralityScale: "none",
     historicalRole: "defining",
     confidence: 0.8,
   };
 }
 
 describe("tag strength normalization", () => {
-  it.each([
-    [[0, 0.25, 1], 1, [0, 0.25, 1]],
-    [[0, 2.5, 10], 10, [0, 0.25, 1]],
-    [[0, 25, 100], 100, [0, 0.25, 1]],
-  ] as const)("normalizes a supported domain scale", (values, scale, expected) => {
-    const source = values.map((centrality) => assignment(centrality));
-    const inferred = inferTagStrengthScale(source);
-    expect(inferred).toBe(scale);
-    expect(source.map((item) => normalizeTagStrength(item.centrality, inferred))).toEqual(
-      expected,
-    );
+  it("uses the fixed canonical numeric range without corpus-wide inference", () => {
+    expect(CANONICAL_CENTRALITY_DENOMINATOR).toBe(100);
+    expect([1, 10, 100].map((value) => normalizeTagStrength(value))).toEqual([
+      0.01,
+      0.1,
+      1,
+    ]);
   });
 
   it("clamps out-of-range values and keeps unknown distinct from weak", () => {
@@ -53,23 +50,13 @@ describe("tag strength normalization", () => {
     expect(tagStrengthBand(1)).toBe("strong");
   });
 
-  it("ignores unknown values while selecting deterministic scale boundaries", () => {
-    expect(inferTagStrengthScale([
-      assignment(Number.NaN),
-      assignment(Number.POSITIVE_INFINITY),
-      assignment(1),
-    ])).toBe(1);
-    expect(inferTagStrengthScale([assignment(1.000_001)])).toBe(10);
-    expect(inferTagStrengthScale([assignment(10)])).toBe(10);
-    expect(inferTagStrengthScale([assignment(10.000_001)])).toBe(100);
-  });
-
   it("does not mutate source assignments", () => {
     const source = assignment(75);
     const snapshot = structuredClone(source);
-    expect(weightedTagMembership(source, "work-a", "station-a", 100)).toMatchObject({
+    expect(weightedTagMembership(source, "work-a", "station-a")).toMatchObject({
       strength: 0.75,
       rawStrength: 75,
+      centralityScale: "none",
       historicalRole: "defining",
       confidence: 0.8,
     });
@@ -80,10 +67,10 @@ describe("tag strength normalization", () => {
 describe("aggregate station strength", () => {
   it("uses maximum visibility while preserving range, median, sources, and ties", () => {
     const memberships = [
-      weightedTagMembership(assignment(20), "work-c", "station-a", 100),
-      weightedTagMembership(assignment(null), "work-d", "station-a", 100),
-      weightedTagMembership(assignment(90), "work-b", "station-a", 100),
-      weightedTagMembership(assignment(90), "work-a", "station-a", 100),
+      weightedTagMembership(assignment(20), "work-c", "station-a"),
+      weightedTagMembership(assignment(null), "work-d", "station-a"),
+      weightedTagMembership(assignment(90), "work-b", "station-a"),
+      weightedTagMembership(assignment(90), "work-a", "station-a"),
     ];
     const summary = aggregateTagStrength(memberships);
     expect(summary).toMatchObject({
@@ -104,7 +91,7 @@ describe("aggregate station strength", () => {
 
   it("preserves an all-unknown aggregate as unknown", () => {
     const summary = aggregateTagStrength([
-      weightedTagMembership(assignment(null), "work-a", "station-a", 100),
+      weightedTagMembership(assignment(null), "work-a", "station-a"),
     ]);
     expect(summary.displayStrength).toBeNull();
     expect(summary.minStrength).toBeNull();
@@ -116,7 +103,6 @@ describe("aggregate station strength", () => {
       assignment(100),
       "work-a",
       "station-a",
-      100,
     );
     const summary = aggregateTagStrength([
       { ...duplicatedProvider, strength: 2 },

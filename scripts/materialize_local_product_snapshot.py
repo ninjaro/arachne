@@ -185,7 +185,7 @@ def verify_existing_snapshot(
         or control.get("format_version") != 1
         or control.get("snapshot_id") != snapshot_id
         or control.get("run_id") != f"product-materialize-{database_hash[:16]}"
-        or control.get("graph_version") != "canonical-schema-v6"
+        or control.get("graph_version") != "canonical-schema-v7"
         or control.get("content_sha256") != database_hash
         or not valid_timestamp(control.get("activated_at"))
         or control.get("extensions")
@@ -232,7 +232,7 @@ def verify_existing_snapshot(
     )
     if (
         report.get("status") != "clean"
-        or report.get("schemaVersion") != 6
+        or report.get("schemaVersion") != 7
         or report.get("integrityCheck") != ["ok"]
         or report.get("foreignKeyErrors") != []
         or report.get("disposableTables") != []
@@ -358,7 +358,7 @@ def main() -> int:
                 "format_version": 1,
                 "snapshot_id": snapshot_id,
                 "run_id": f"product-materialize-{database_hash[:16]}",
-                "graph_version": "canonical-schema-v6",
+                "graph_version": "canonical-schema-v7",
                 "content_sha256": database_hash,
                 "database": artifact(
                     staged_database,

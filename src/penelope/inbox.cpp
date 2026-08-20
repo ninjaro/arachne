@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 constexpr std::uintmax_t maximum_batch_bytes = 32U * 1024U * 1024U;
-constexpr int current_product_schema = 6;
+constexpr int current_product_schema = 7;
 
 class database_error final : public inbox_error {
 public:
@@ -209,7 +209,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_tables != expected_tables) {
         throw database_error(
-            "product database table set does not match schema version 6"
+            "product database table set does not match schema version 7"
         );
     }
 
@@ -242,7 +242,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_indexes != expected_indexes) {
         throw database_error(
-            "product database index set does not match schema version 6"
+            "product database index set does not match schema version 7"
         );
     }
 
@@ -267,7 +267,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_triggers != expected_triggers) {
         throw database_error(
-            "product database trigger set does not match schema version 6"
+            "product database trigger set does not match schema version 7"
         );
     }
 }
@@ -294,7 +294,7 @@ public:
         statement version(value_, "PRAGMA user_version");
         if (!version.step() || version.integer(0) != current_product_schema) {
             throw database_error(
-                "product database must use schema version 6"
+                "product database must use schema version 7"
             );
         }
         require_current_product_structure(value_);
@@ -806,6 +806,9 @@ const std::set<std::string, std::less<>> concept_relation_types {
 const std::set<std::string, std::less<>> work_concept_types {
     "exemplifies", "contains", "anticipates", "influenced_by", "influences",
     "revives", "parodies", "deconstructs", "associated_with"
+};
+const std::set<std::string, std::less<>> reviewed_centrality_scales {
+    "binary", "ordinal", "graded"
 };
 const std::set<std::string, std::less<>> historical_roles {
     "formative", "canonical", "transitional", "hybrid", "revival",
@@ -1342,9 +1345,9 @@ void validate_create_work_concept(
     check_keys(
         batch, value, path,
         { "local_id", "work_id", "concept_id", "relation_type", "centrality",
-          "historical_role", "confidence", "evidence" },
+          "centrality_scale", "historical_role", "confidence", "evidence" },
         { "local_id", "work_id", "concept_id", "relation_type", "centrality",
-          "evidence" }
+          "centrality_scale", "evidence" }
     );
     if (!value.is_object()) {
         return;
@@ -1356,6 +1359,9 @@ void validate_create_work_concept(
         batch, value, "relation_type", path, work_concept_types
     );
     require_integer_range(batch, value, "centrality", path, 1, 100);
+    require_enum(
+        batch, value, "centrality_scale", path, reviewed_centrality_scales
+    );
     if (value.contains("historical_role")) {
         require_enum(
             batch, value, "historical_role", path, historical_roles
@@ -1670,6 +1676,12 @@ const std::map<std::string, value_kind, std::less<>> source_mutable {
     { "isbn", value_kind::string },
     { "language_code", value_kind::string },
 };
+const std::map<std::string, value_kind, std::less<>> work_concept_mutable {
+    { "centrality", value_kind::integer },
+    { "centrality_scale", value_kind::string },
+    { "historical_role", value_kind::string },
+    { "confidence", value_kind::number },
+};
 
 const std::map<
     std::string, std::set<std::string, std::less<>>, std::less<>>
@@ -1700,6 +1712,12 @@ const std::map<
     std::string, std::set<std::string, std::less<>>, std::less<>>
     source_update_enums {
         { "source_type", source_types },
+    };
+const std::map<
+    std::string, std::set<std::string, std::less<>>, std::less<>>
+    work_concept_update_enums {
+        { "centrality_scale", reviewed_centrality_scales },
+        { "historical_role", historical_roles },
     };
 
 void validate_delete_object(
@@ -2055,7 +2073,8 @@ void validate_document_shape(parsed_batch& batch) {
 
     auto& update = batch.document["update"];
     const std::set<std::string, std::less<>> update_keys {
-        "agents", "works", "concepts", "manifestations", "sources", "delete"
+        "agents", "works", "concepts", "manifestations", "sources",
+        "work_concepts", "delete"
     };
     check_keys(batch, update, "/update", update_keys);
     validate_array(
@@ -2105,9 +2124,35 @@ void validate_document_shape(parsed_batch& batch) {
             );
         }
     );
+    validate_array(
+        batch, update, "work_concepts", "/update",
+        [](parsed_batch& target, const json& value, const std::string& path) {
+            validate_update_record(
+                target, value, path, "work_concept", work_concept_mutable,
+                { "centrality", "centrality_scale" },
+                work_concept_update_enums, false, true
+            );
+            if (!value.is_object() || !value.contains("set")
+                || !value["set"].is_object()) {
+                return;
+            }
+            const auto& set = value["set"];
+            if (set.contains("centrality")) {
+                require_integer_range(
+                    target, set, "centrality", path + "/set", 1, 100
+                );
+            }
+            if (set.contains("confidence")) {
+                require_number_range(
+                    target, set, "confidence", path + "/set", 0.0, 1.0
+                );
+            }
+        }
+    );
     validate_delete_object(batch, update, "/update");
     for (const auto collection : {
-             "agents", "works", "concepts", "manifestations", "sources" }) {
+             "agents", "works", "concepts", "manifestations", "sources",
+             "work_concepts" }) {
         const auto rows = update.find(collection);
         if (rows == update.end() || !rows->is_array()) {
             continue;
@@ -2545,6 +2590,44 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                     indexed_path("/update/sources", index),
                     "source update would remove every strong or fallback identity",
                     &row
+                );
+            }
+        }
+    }
+    const auto work_concept_updates = update.find("work_concepts");
+    if (work_concept_updates != update.end()
+        && work_concept_updates->is_array()) {
+        for (std::size_t index = 0; index < work_concept_updates->size();
+             ++index) {
+            const auto& row = (*work_concept_updates)[index];
+            if (!row.is_object() || !row.contains("id")
+                || !(row["id"].is_number_integer()
+                     || row["id"].is_number_unsigned())) {
+                continue;
+            }
+            const std::string path
+                = indexed_path("/update/work_concepts", index);
+            statement current(
+                sql, "SELECT centrality_scale FROM work_concepts WHERE id=?"
+            );
+            current.bind_json_value(1, row["id"]);
+            if (!current.step()) {
+                add_issue(
+                    batch, "unknown_canonical_id", path + "/id",
+                    "work-concept assignment does not exist", &row["id"]
+                );
+                continue;
+            }
+            const auto set = row.find("set");
+            if (current.text(0) == "none" && set != row.end()
+                && set->is_object() && set->contains("centrality")
+                && !set->contains("centrality_scale")) {
+                add_issue(
+                    batch, "centrality_scale_required",
+                    path + "/set/centrality_scale",
+                    "changing centrality on an unreviewed legacy assignment "
+                    "also requires binary, ordinal, or graded scale",
+                    &*set
                 );
             }
         }
@@ -3338,15 +3421,17 @@ void create_assertions(parsed_batch& batch, sqlite3* const sql) {
                 sql,
                 "INSERT INTO work_concepts("
                 "id,work_id,concept_id,relation_type,centrality,"
-                "historical_role,confidence) VALUES(?,?,?,?,?,?,?)"
+                "centrality_scale,historical_role,confidence) "
+                "VALUES(?,?,?,?,?,?,?,?)"
             );
             insert.bind(1, id);
             insert.bind(2, resolve_entity(batch, row.at("work_id")));
             insert.bind(3, resolve_entity(batch, row.at("concept_id")));
             insert.bind_json_value(4, row.at("relation_type"));
             insert.bind_json_value(5, row.at("centrality"));
-            bind_optional(insert, 6, row, "historical_role");
-            bind_optional(insert, 7, row, "confidence");
+            insert.bind_json_value(6, row.at("centrality_scale"));
+            bind_optional(insert, 7, row, "historical_role");
+            bind_optional(insert, 8, row, "confidence");
             insert.execute();
             attach_evidence(
                 batch, sql, "work_concept_evidence", id, row.at("evidence")
@@ -3511,6 +3596,16 @@ void apply_updates(parsed_batch& batch, sqlite3* const sql) {
                 batch, indexed_path("/update/sources", index), row
             );
             update_row(sql, "sources", "id", row);
+        }
+    }
+    if (const auto rows = update.find("work_concepts");
+        rows != update.end() && rows->is_array()) {
+        for (std::size_t index = 0; index < rows->size(); ++index) {
+            const auto& row = (*rows)[index];
+            set_application_context(
+                batch, indexed_path("/update/work_concepts", index), row
+            );
+            update_row(sql, "work_concepts", "id", row);
         }
     }
 }
@@ -3833,6 +3928,7 @@ void merge_work_concepts(
         sql,
         "SELECT m.id,t.id,"
         "(m.centrality=t.centrality "
+        "AND m.centrality_scale=t.centrality_scale "
         "AND m.historical_role IS t.historical_role "
         "AND m.confidence IS t.confidence) "
         "FROM work_concepts m JOIN work_concepts t "
@@ -4385,7 +4481,7 @@ void ensure_product_database(
     try {
         char* error = nullptr;
         const std::string schema = read_schema(
-            repository_root / "schema" / "product_v6.sql"
+            repository_root / "schema" / "product_v7.sql"
         );
         if (sqlite3_exec(
                 raw, schema.c_str(), nullptr, nullptr, &error

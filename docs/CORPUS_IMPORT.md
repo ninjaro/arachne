@@ -6,8 +6,10 @@ and migration-only normalization tools are no longer part of the active
 repository.
 
 Retained one-way migration utilities are offline recovery tools only. The
-runtime product interface targets schema v6 and has no compatibility mapping or
-alternate legacy-ingest path.
+runtime product interface targets schema v7 and has no compatibility mapping or
+alternate legacy-ingest path. Schema v7 adds pair-local
+`work_concepts.centrality_scale`; the one-way v6 migration assigns `none` to
+every existing row without changing any stored `centrality` value.
 
 Current product changes use one format and a fixed ordered task queue:
 

@@ -69,7 +69,7 @@ import type {
   MetroStation,
 } from "../lib/timenets";
 import type { Domain, EntityId, Ratings } from "../lib/types";
-import { humanize } from "../lib/format";
+import { centralityScaleLabel, humanize } from "../lib/format";
 import {
   deterministicTasteSeedTags,
   inferConceptTaste,
@@ -2278,6 +2278,7 @@ export function EvolutionView({
                     <strong>{assignment.label}</strong> on {workLabel(index, assignment.workId)}
                     <small>
                       Raw {assignment.rawStrength ?? "unknown"} · {tagStrengthBand(assignment.strength)} · {strengthValueLabel(assignment.strength)}
+                      {` · ${centralityScaleLabel(assignment.centralityScale)}`}
                       {assignment.historicalRole ? ` · ${humanize(assignment.historicalRole)}` : ""}
                       {assignment.confidence !== null ? ` · confidence ${Math.round(assignment.confidence * 100)}%` : " · confidence unknown"}
                     </small>

@@ -10,7 +10,7 @@ import sqlite3
 import sys
 
 
-PRODUCT_SCHEMA_VERSION = 6
+PRODUCT_SCHEMA_VERSION = 7
 DEFAULT_DATABASE = (
     Path(__file__).resolve().parents[1] / "database" / "art-islands.sqlite"
 )

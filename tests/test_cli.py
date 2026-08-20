@@ -359,6 +359,7 @@ class OperationsCliTests(unittest.TestCase):
                     "concept_id": "concept-000001",
                     "relation_type": "exemplifies",
                     "centrality": 90,
+                    "centrality_scale": "none",
                     "historical_role": "canonical",
                     "confidence": 0.9,
                 },

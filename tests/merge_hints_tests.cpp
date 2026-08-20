@@ -21,7 +21,7 @@ json input(std::initializer_list<json> entities) {
         { "artifact_type", "merge_hint_input_v1" },
         { "format_version", 1 },
         { "product_snapshot",
-          { { "schema_version", 6 }, { "sha256", std::string(64, 'a') } } },
+          { { "schema_version", 7 }, { "sha256", std::string(64, 'a') } } },
         { "decisions_snapshot",
           { { "sha256", std::string(64, 'b') },
             { "ignored_pair_count", 0 } } },
@@ -309,6 +309,7 @@ TEST(AriadneMergeHints, ConceptProvenanceCorroboratesNearSpelling) {
     const json assertion = {
         { "work_id", "work-000001" },
         { "relation_type", "contains" },
+        { "centrality_scale", "none" },
         { "evidence_ids", json::array({ "evidence-42" }) },
         { "source_ids", json::array({ "source-7" }) },
     };
@@ -329,6 +330,27 @@ TEST(AriadneMergeHints, ConceptProvenanceCorroboratesNearSpelling) {
     EXPECT_TRUE(has_support(value, "matching_assertion_source"));
     EXPECT_TRUE(value.at("strong_identity"));
     EXPECT_TRUE(value.at("selected"));
+}
+
+TEST(AriadneMergeHints, RejectsUnknownPairLevelCentralityScale) {
+    const json assertion = {
+        { "work_id", "work-000001" },
+        { "relation_type", "contains" },
+        { "centrality", 75 },
+        { "centrality_scale", "continuous" },
+        { "evidence_ids", json::array() },
+        { "source_ids", json::array() },
+    };
+    const auto source = input({ concept_entity(
+        "concept-000001", "Scale validation", json::array({ assertion })
+    ) });
+
+    EXPECT_THROW(
+        static_cast<void>(
+            arachne::ariadne::merge_hint_planner::build(source)
+        ),
+        std::invalid_argument
+    );
 }
 
 TEST(AriadneMergeHints, TrustedExternalIdentifiersApplyToEveryFamily) {

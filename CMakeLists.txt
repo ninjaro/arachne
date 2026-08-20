@@ -284,6 +284,11 @@ if(BUILD_TESTS)
             tests.test_product_v6_migration -v
     )
     add_test(
+        NAME product_v7_migration_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_product_v7_migration -v
+    )
+    add_test(
         NAME operations_cli_tests
         COMMAND ${CMAKE_COMMAND} -E env
             ARACHNE_TEST_BINARY=$<TARGET_FILE:arachne_app>
@@ -295,6 +300,7 @@ if(BUILD_TESTS)
         wikidata_hpc_worker_tests wikidata_hpc_run_tests
         local_product_snapshot_materializer_tests source_refresh_tests
         product_v5_migration_tests product_v6_migration_tests
+        product_v7_migration_tests
         operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )

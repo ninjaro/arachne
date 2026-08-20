@@ -81,6 +81,7 @@ struct assertion_record final {
     std::string work_id;
     std::string relation_type;
     std::optional<int> centrality;
+    std::optional<std::string> centrality_scale;
     std::set<std::string, std::less<>> evidence_ids;
     std::set<std::string, std::less<>> source_ids;
 };
@@ -727,7 +728,8 @@ template <typename T>
     require_only_fields(
         value,
         { "work_id", "relation_type", "centrality", "evidence_ids",
-          "source_ids", "confidence", "historical_role", "evidence" },
+          "source_ids", "confidence", "historical_role", "evidence",
+          "centrality_scale" },
         context
     );
     const auto centrality = optional_integer<int>(
@@ -735,6 +737,23 @@ template <typename T>
     );
     if (centrality && (*centrality < 1 || *centrality > 100)) {
         invalid(std::string(context) + ".centrality must be between 1 and 100");
+    }
+    std::optional<std::string> centrality_scale;
+    if (const auto scale = value.find("centrality_scale");
+        scale != value.end() && !scale->is_null()) {
+        if (!scale->is_string()) {
+            invalid(
+                std::string(context) + ".centrality_scale must be a string"
+            );
+        }
+        const std::string candidate = scale->get<std::string>();
+        if (candidate != "none" && candidate != "binary"
+            && candidate != "ordinal" && candidate != "graded") {
+            invalid(
+                std::string(context) + ".centrality_scale is invalid"
+            );
+        }
+        centrality_scale = candidate;
     }
     if (const auto confidence = value.find("confidence");
         confidence != value.end() && !confidence->is_null()
@@ -786,6 +805,7 @@ template <typename T>
         .work_id = required_string(value, "work_id", context),
         .relation_type = value.value("relation_type", ""),
         .centrality = centrality,
+        .centrality_scale = std::move(centrality_scale),
         .evidence_ids = string_array(value, "evidence_ids", context),
         .source_ids = string_array(value, "source_ids", context),
     };
