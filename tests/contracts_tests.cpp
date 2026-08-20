@@ -19,7 +19,7 @@ using json = nlohmann::json;
 
 constexpr std::array<std::pair<std::string_view, contract_name>, 10> contracts {
     {
-        { "arachne_batch_v2", contract_name::arachne_batch },
+        { "arachne_batch", contract_name::arachne_batch },
         { "batch_envelope_v1", contract_name::batch_envelope },
         { "fetch_plan_v1", contract_name::fetch_plan },
         { "fetch_request_v1", contract_name::fetch_request },
@@ -163,8 +163,7 @@ TEST(Contracts, ReferencedArtifactSchemasAndExamplesAreResolvableDataFormats) {
     const std::filesystem::path artifacts
         = repository_root() / "contracts" / "artifacts";
     for (const std::string_view name :
-         { "external_candidate_source_graph_v1",
-           "wikidata_image_hints_v1",
+         { "external_candidate_source_graph_v1", "wikidata_image_hints_v1",
            "research_candidate_graph_materialization_v1",
            "viewer_projection_data_v1" }) {
         SCOPED_TRACE(name);
@@ -339,7 +338,7 @@ TEST(Contracts, InvalidCocoonStateIsRejected) {
 }
 
 TEST(Contracts, ArachneBatchIsClosedAtEveryOperationLevel) {
-    json document = example("arachne_batch_v2");
+    json document = example("arachne_batch");
     document["notes"] = "not operationally necessary";
     document["create"]["works"][0]["production_info"] = "{}";
     document["update"]["works"][0]["set"]["language"] = "de";
@@ -354,7 +353,7 @@ TEST(Contracts, ArachneBatchIsClosedAtEveryOperationLevel) {
 }
 
 TEST(Contracts, ArachneBatchRequiresExplicitEvidenceSemantics) {
-    json document = example("arachne_batch_v2");
+    json document = example("arachne_batch");
     document["create"]["evidence"][0].erase("exact_quote");
     document["create"]["evidence"][0].erase("stance");
     document["create"]["names"][0].erase("is_preferred");
@@ -368,7 +367,7 @@ TEST(Contracts, ArachneBatchRequiresExplicitEvidenceSemantics) {
 }
 
 TEST(Contracts, ArachneBatchRequiresReviewedPairLevelCentralityScale) {
-    json document = example("arachne_batch_v2");
+    json document = example("arachne_batch");
     document["create"]["work_concepts"][0].erase("centrality_scale");
     validation_result result = arachnespace::contracts::validate(
         contract_name::arachne_batch, document
@@ -376,7 +375,7 @@ TEST(Contracts, ArachneBatchRequiresReviewedPairLevelCentralityScale) {
     EXPECT_FALSE(result.valid());
     EXPECT_TRUE(has_code(result, "required"));
 
-    document = example("arachne_batch_v2");
+    document = example("arachne_batch");
     document["create"]["work_concepts"][0]["centrality_scale"] = "none";
     result = arachnespace::contracts::validate(
         contract_name::arachne_batch, document
@@ -384,7 +383,7 @@ TEST(Contracts, ArachneBatchRequiresReviewedPairLevelCentralityScale) {
     EXPECT_FALSE(result.valid());
     EXPECT_TRUE(has_code(result, "enum"));
 
-    document = example("arachne_batch_v2");
+    document = example("arachne_batch");
     document["update"]["work_concepts"][0]["set"]["centrality_scale"]
         = "continuous";
     result = arachnespace::contracts::validate(
@@ -394,8 +393,112 @@ TEST(Contracts, ArachneBatchRequiresReviewedPairLevelCentralityScale) {
     EXPECT_TRUE(has_code(result, "enum"));
 }
 
+TEST(Contracts, ArachneBatchRejectsUnknownDiscriminatorAndNegotiationField) {
+    json document = example("arachne_batch");
+    document["format"] = "unknown_batch";
+
+    validation_result result = arachnespace::contracts::validate(document);
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "unknown_contract"));
+    EXPECT_FALSE(
+        arachnespace::contracts::parse_contract_name("unknown_batch")
+            .has_value()
+    );
+
+    document = example("arachne_batch");
+    document["format_version"] = 1;
+    result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "unknown_field"));
+}
+
+TEST(Contracts, ArachneBatchValidatesCurrentProductRelationshipShapes) {
+    const json valid = example("arachne_batch");
+    EXPECT_TRUE(
+        arachnespace::contracts::validate(contract_name::arachne_batch, valid)
+            .valid()
+    );
+
+    json document = valid;
+    document["create"]["work_memberships"][0]["parent_work_id"]
+        = document["create"]["work_memberships"][0]["child_work_id"];
+    auto result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "self_relation"));
+
+    document = valid;
+    document["create"]["agent_relations"][0]["to_year"] = 1969;
+    result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "range"));
+
+    document = valid;
+    document["create"]["events"][0]["event_type"] = "premiere_release";
+    result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "enum"));
+}
+
+TEST(Contracts, CreditsUseOnlyTheCurrentGenericEntityTargetField) {
+    json document = example("arachne_batch");
+    json& credit = document["create"]["credits"][0];
+    credit["work_id"] = credit["entity_id"];
+    credit.erase("entity_id");
+
+    const validation_result result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "unknown_field"));
+    EXPECT_TRUE(has_code(result, "required"));
+}
+
+TEST(Contracts, CurrentMediaCreditRolesAndMonthPrecisionAreAccepted) {
+    for (const std::string_view medium :
+         { "nonfiction", "comic", "performance" }) {
+        json document = example("arachne_batch");
+        document["create"]["works"][0]["medium"] = medium;
+        EXPECT_TRUE(
+            arachnespace::contracts::validate(
+                contract_name::arachne_batch, document
+            )
+                .valid()
+        ) << medium;
+    }
+    for (const std::string_view role :
+         { "distributor", "broadcaster", "platform", "translator",
+           "illustrator", "printer", "curator", "choreographer", "narrator",
+           "lyricist", "songwriter", "arranger", "sound_engineer", "designer",
+           "animator" }) {
+        json document = example("arachne_batch");
+        document["create"]["credits"][0]["role"] = role;
+        EXPECT_TRUE(
+            arachnespace::contracts::validate(
+                contract_name::arachne_batch, document
+            )
+                .valid()
+        ) << role;
+    }
+
+    json document = example("arachne_batch");
+    document["create"]["works"][0]["medium"] = "autobiography";
+    const validation_result result = arachnespace::contracts::validate(
+        contract_name::arachne_batch, document
+    );
+    EXPECT_FALSE(result.valid());
+    EXPECT_TRUE(has_code(result, "enum"));
+}
+
 TEST(Contracts, ArachneBatchReservesCanonicalEntityIds) {
-    json document = example("arachne_batch_v2");
+    json document = example("arachne_batch");
     document["create"]["works"][0]["local_id"] = "work-000001";
 
     const validation_result result
@@ -406,7 +509,7 @@ TEST(Contracts, ArachneBatchReservesCanonicalEntityIds) {
 }
 
 TEST(Contracts, ArachneBatchReservesCanonicalIdsInLocalReferences) {
-    json document = example("arachne_batch_v2");
+    json document = example("arachne_batch");
     document["create"]["evidence"][0]["source_id"] = "work-000001";
 
     const validation_result result
@@ -426,8 +529,7 @@ TEST(Contracts, LegacyMiningBatchIsNotAnActiveContract) {
         { "batch_id", "old-batch" },
         { "batch_type", "mining" },
     };
-    const validation_result result
-        = arachnespace::contracts::validate(legacy);
+    const validation_result result = arachnespace::contracts::validate(legacy);
     EXPECT_FALSE(result.valid());
     EXPECT_TRUE(has_code(result, "required"));
 }

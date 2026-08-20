@@ -1,15 +1,14 @@
 # Product inbox
 
 The one-time corpus normalization, consolidation, and manifest import has
-finished. Its generated manifests, unresolved JSONL, compatibility contracts,
-and migration-only normalization tools are no longer part of the active
+finished. Its generated manifests, unresolved JSONL, transitional contracts,
+and one-time normalization tools are no longer part of the active
 repository.
 
-Retained one-way migration utilities are offline recovery tools only. The
-runtime product interface targets schema v7 and has no compatibility mapping or
-alternate legacy-ingest path. Schema v7 adds pair-local
-`work_concepts.centrality_scale`; the one-way v6 migration assigns `none` to
-every existing row without changing any stored `centrality` value.
+The repository supports only `schema/product.sql` and the unversioned
+`arachne_batch` shape in the current commit. It has no database upgrade chain,
+batch-version discovery, compatibility mapping, or alternate legacy-ingest
+path. Use the corresponding Git commit to inspect an older state.
 
 Current product changes use one format and a fixed ordered task queue:
 
@@ -24,9 +23,13 @@ or structural research is wanted, opt in separately:
 build/arachne product rebuild-merge-hints export-merge-hints
 ```
 
-Place one plain UTF-8 `arachne_batch_v2` JSON object in `inbox/`. The commands
+Place one plain UTF-8 `arachne_batch` JSON object in `inbox/`. The commands
 always use `inbox/` and `database/art-islands.sqlite` relative to the repository
 root; they do not accept path options.
+
+Miner-facing choices about memberships, relations, manifestation credits,
+events, evidence, and the JSON tail are documented in the
+[mining guidelines](../database/mining.md).
 
 See [Product inbox](PRODUCT_INBOX.md) for the current batch shape, create and
 update semantics, explicit merges, rejected-batch issues, idempotency, and the

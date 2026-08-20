@@ -28,7 +28,10 @@ using json = nlohmann::json;
             { "year_end", year },
             { "credits", json::array() },
             { "concept_ids", concepts },
-            { "measurements", json::array() } } },
+            { "measurements", json::array() },
+            { "memberships", json::array() },
+            { "events", json::array() },
+            { "manifestations", json::array() } } },
     };
 }
 
@@ -38,7 +41,8 @@ using json = nlohmann::json;
     json assertions = json::array();
     for (const auto& work_id : works) {
         assertions.push_back(
-            { { "work_id", work_id }, { "relation_type", "contains" } }
+            { { "work_id", work_id }, { "relation_type", "contains" },
+              { "centrality_scale", "none" } }
         );
     }
     return {
@@ -58,7 +62,7 @@ using json = nlohmann::json;
         { "artifact_type", "merge_hint_input_v1" },
         { "format_version", 1 },
         { "product_snapshot",
-          { { "schema_version", 6 }, { "sha256", std::string(64, 'a') } } },
+          { { "sha256", std::string(64, 'a') } } },
         { "decisions_snapshot",
           { { "sha256", std::string(64, 'b') },
             { "ignored_pair_count", 0 } } },

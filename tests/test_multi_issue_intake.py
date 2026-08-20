@@ -199,7 +199,7 @@ a.output.write_text(json.dumps({'locator':r['attachment_url'],'request_id':f'req
 import argparse, hashlib, json
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('--config',type=Path); p.add_argument('--binary'); sub=p.add_subparsers(dest='op'); f=sub.add_parser('fetch'); f.add_argument('--request',type=Path); f.add_argument('--output-control',type=Path); a=p.parse_args()
-c=json.loads(a.config.read_text()); r=json.loads(a.request.read_text()); root=Path(c['paths']['artifact_store']); target=root/r['output_ref']; target.parent.mkdir(parents=True,exist_ok=True); content=json.dumps({'format':'arachne_batch_v2','batch_id':r['request_id'],'create':{},'update':{},'merge':{}}).encode()+b'\\n'; target.write_bytes(content); a.output_control.write_text(json.dumps({'contract':'acquired_artifact_v1','format_version':1,'request_id':r['request_id'],'source_locator':r['locator'],'transport':{'status':'delivered'},'artifact':{'storage_ref':r['output_ref'],'sha256':hashlib.sha256(content).hexdigest(),'byte_length':len(content)}}))
+c=json.loads(a.config.read_text()); r=json.loads(a.request.read_text()); root=Path(c['paths']['artifact_store']); target=root/r['output_ref']; target.parent.mkdir(parents=True,exist_ok=True); content=json.dumps({'format':'arachne_batch','batch_id':r['request_id'],'create':{},'update':{},'merge':{}}).encode()+b'\\n'; target.write_bytes(content); a.output_control.write_text(json.dumps({'contract':'acquired_artifact_v1','format_version':1,'request_id':r['request_id'],'source_locator':r['locator'],'transport':{'status':'delivered'},'artifact':{'storage_ref':r['output_ref'],'sha256':hashlib.sha256(content).hexdigest(),'byte_length':len(content)}}))
 """,
                 encoding="utf-8",
             )

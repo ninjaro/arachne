@@ -30,7 +30,7 @@ ARTIFACT_FORMATS = (
     "viewer_projection_data_v1",
 )
 
-PRODUCT_BATCH_FORMAT = "arachne_batch_v2"
+PRODUCT_BATCH_FORMAT = "arachne_batch"
 
 WORKFLOWS = (
     "validation.yml",
@@ -188,6 +188,22 @@ def check_repository_surface(root: Path) -> None:
     for workflow in WORKFLOWS:
         path = root / ".github" / "workflows" / workflow
         require(path.is_file(), f"missing workflow: {path}")
+    for relative in (
+        ".github/ISSUE_TEMPLATE/arachne-batch.yml",
+        ".github/workflows/intake.yml",
+        ".github/workflows/product-integration.yml",
+    ):
+        path = root / relative
+        require(path.is_file(), f"missing product batch surface: {path}")
+        content = path.read_text(encoding="utf-8")
+        require(
+            PRODUCT_BATCH_FORMAT in content,
+            f"{path}: current product batch format is not advertised",
+        )
+        require(
+            "arachne_batch_v" not in content,
+            f"{path}: versioned product batch identifier remains",
+        )
     for document in ("ARCHITECTURE.md", "OPERATIONS.md", "PRODUCT_INBOX.md"):
         path = root / "docs" / document
         require(path.is_file(), f"missing documentation: {path}")
@@ -219,6 +235,9 @@ def check_repository_surface(root: Path) -> None:
         "scripts/normalize_legacy_batches.py",
         "scripts/safe_extract.py",
         "schema/product_v4.sql",
+        "schema/product_v5.sql",
+        "schema/product_v6.sql",
+        "schema/product_v7.sql",
         "corpus-import",
         "viewer/README-MIGRATION.md",
         "viewer/patches",
@@ -229,6 +248,25 @@ def check_repository_surface(root: Path) -> None:
             not (root / relative).exists(),
             f"legacy migration surface must be removed: {relative}",
         )
+    require(
+        (root / "schema" / "product.sql").is_file(),
+        "missing sole current product schema: schema/product.sql",
+    )
+    require(
+        [path.name for path in sorted((root / "schema").glob("product*.sql"))]
+        == ["product.sql"],
+        "schema/product.sql must be the sole product schema",
+    )
+    require(
+        not list((root / "scripts").glob("migrate_product_v*_to_v*.py")),
+        "permanent product migration scripts must be absent",
+    )
+    require(
+        "PRAGMA user_version" not in (
+            root / "schema" / "product.sql"
+        ).read_text(encoding="utf-8"),
+        "product schema must not use PRAGMA user_version as an application contract",
+    )
 
 
 def check_merge_hint_decisions(root: Path) -> None:

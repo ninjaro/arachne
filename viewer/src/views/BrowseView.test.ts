@@ -3,12 +3,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 import { fixtureDomain, fixtureWork } from "../lib/test-fixtures";
+import type { Agent } from "../lib/types";
 import { BrowseView } from "./BrowseView";
 
 describe("Browse entity families", () => {
   it("renders grouped work and agent tables with keyboard rows and no images", () => {
     const work = fixtureWork({ id: "work-1", label: "Seven Samurai", year: 1954, tags: ["genre-1"] });
-    const agent = { id: "agent-1", label: "Akira Kurosawa", agentType: "person", identifiers: [] };
+    const agent: Agent = { id: "agent-1", label: "Akira Kurosawa", agentType: "person", identifiers: [] };
     work.contributors = [{ ...agent, role: "director", order: 0, importance: "primary", creditedAs: null }];
     const domain = fixtureDomain([work]);
     domain.agents = [agent];

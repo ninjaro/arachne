@@ -34,8 +34,8 @@ public:
             R"({"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[]})"
         );
         fs::copy_file(
-            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v7.sql",
-            root_ / "schema" / "product_v7.sql"
+            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product.sql",
+            root_ / "schema" / "product.sql"
         );
         const auto initialized
             = arachne::penelope::apply_product_inbox(root_);
@@ -55,18 +55,33 @@ public:
             "('agent-000002',' viaf ',' abc ');"
             "INSERT INTO entities(id,entity_type) VALUES"
             "('work-000001','work'),('work-000002','work'),"
-            "('concept-000001','concept'),('concept-000002','concept');"
+            "('concept-000001','concept'),('concept-000002','concept'),"
+            "('manifestation-000001','manifestation');"
             "INSERT INTO works(entity_id,medium,year_start,date_precision,"
             "date_start_text,date_qualifier) VALUES"
             "('work-000001','film',1980,'exact','1980-05-17','documented'),"
             "('work-000002','film',1990,'year',NULL,NULL);"
+            "INSERT INTO manifestations(entity_id,work_id,manifestation_type,"
+            "release_year,label) VALUES"
+            "('manifestation-000001','work-000001','release',1981,'Home release');"
+            "INSERT INTO work_memberships(child_work_id,parent_work_id,"
+            "membership_type,position,position_text) VALUES"
+            "('work-000002','work-000001','part_of',2,'Part II');"
+            "INSERT INTO agent_relations(subject_agent_id,relation_type,"
+            "object_agent_id,from_year,to_year,role_text) VALUES"
+            "('agent-000001','member_of','agent-000002',1979,1984,'director');"
+            "INSERT INTO events(entity_id,event_type,year_start,date_text,"
+            "date_precision,place_text) VALUES"
+            "('work-000001','premiered',1980,'May 1980','month','Tokyo'),"
+            "('manifestation-000001','released',1981,NULL,'year',NULL);"
             "INSERT INTO concepts(entity_id,concept_type,slug) VALUES"
             "('concept-000001','theme','store-structure-alpha'),"
             "('concept-000002','theme','store-structure-beta');"
-            "INSERT INTO credits(work_id,agent_id,role,importance,credit_order) VALUES"
+            "INSERT INTO credits(entity_id,agent_id,role,importance,credit_order) VALUES"
             "('work-000001','agent-000001','director','primary',0),"
             "('work-000001','agent-000001','screenwriter','key',1),"
-            "('work-000002','agent-000001','director','primary',0);"
+            "('work-000002','agent-000001','director','primary',0),"
+            "('manifestation-000001','agent-000002','distributor','key',0);"
             "INSERT INTO sources(id,source_type,url) VALUES"
             "(1,'web_page','https://example.test/source-1'),"
             "(2,'web_page','https://example.test/source-2');"
@@ -194,7 +209,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
             fixture.root(), arachne::ariadne::merge_hint_generator_version
         );
     EXPECT_EQ(input.at("product_snapshot").at("sha256"), before);
-    EXPECT_EQ(input.at("product_snapshot").at("schema_version"), 7);
+    EXPECT_EQ(input.at("product_snapshot").size(), 1U);
     EXPECT_EQ(input.at("entities").size(), 6U);
     const auto input_work = std::ranges::find_if(
         input.at("entities"), [](const nlohmann::json& value) {
@@ -224,6 +239,23 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     EXPECT_EQ(
         input_work->at("work").at("credits").at(1).at("credit_order"), 1
     );
+    ASSERT_EQ(input_work->at("work").at("memberships").size(), 1U);
+    EXPECT_EQ(
+        input_work->at("work").at("memberships").at(0).at("direction"),
+        "incoming"
+    );
+    ASSERT_EQ(input_work->at("work").at("events").size(), 1U);
+    EXPECT_EQ(
+        input_work->at("work").at("events").at(0).at("event_type"),
+        "premiered"
+    );
+    ASSERT_EQ(input_work->at("work").at("manifestations").size(), 1U);
+    const auto& manifestation
+        = input_work->at("work").at("manifestations").at(0);
+    ASSERT_EQ(manifestation.at("credits").size(), 1U);
+    EXPECT_EQ(manifestation.at("credits").at(0).at("role"), "distributor");
+    ASSERT_EQ(manifestation.at("events").size(), 1U);
+    EXPECT_EQ(manifestation.at("events").at(0).at("event_type"), "released");
     const auto input_organization = std::ranges::find_if(
         input.at("entities"), [](const nlohmann::json& value) {
             return value.at("id") == "agent-000002";
@@ -234,6 +266,12 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     EXPECT_EQ(
         input_organization->at("agent").at("agent_type"), "organization"
     );
+    ASSERT_EQ(input_organization->at("agent").at("relations").size(), 1U);
+    EXPECT_EQ(
+        input_organization->at("agent").at("relations").at(0).at("direction"),
+        "incoming"
+    );
+    EXPECT_TRUE(input_organization->at("agent").at("credits").empty());
     const auto input_concept = std::ranges::find_if(
         input.at("entities"), [](const nlohmann::json& value) {
             return value.at("id") == "concept-000001";

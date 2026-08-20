@@ -47,7 +47,7 @@ struct validation_result {
     explicit operator bool() const noexcept { return valid(); }
 };
 
-/** Return the canonical wire name, including its major-version suffix. */
+/** Return the canonical wire name for the current contract. */
 [[nodiscard]] std::string_view to_string(contract_name name) noexcept;
 
 /** Parse an exact, currently supported wire name. */

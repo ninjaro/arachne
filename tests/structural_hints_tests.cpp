@@ -51,6 +51,9 @@ json work(
         { "credits", std::move(credits) },
         { "concept_ids", std::move(concepts) },
         { "measurements", json::array() },
+        { "memberships", json::array() },
+        { "events", json::array() },
+        { "manifestations", json::array() },
     };
     if (year) {
         payload["year_start"] = *year;
@@ -95,6 +98,7 @@ json assertion(
     return {
         { "work_id", std::move(work_id) },
         { "relation_type", "contains" },
+        { "centrality_scale", "none" },
         { "evidence_ids", std::move(evidence_ids) },
         { "source_ids", std::move(source_ids) },
     };
@@ -133,7 +137,8 @@ json agent(
           ) },
         { "agent",
           { { "agent_type", std::move(agent_type) },
-            { "credits", std::move(credits) } } },
+            { "credits", std::move(credits) },
+            { "relations", json::array() } } },
     };
 }
 
@@ -152,7 +157,7 @@ json fixture_input() {
         { "artifact_type", "merge_hint_input_v1" },
         { "format_version", 1 },
         { "product_snapshot",
-          { { "schema_version", 6 }, { "sha256", std::string(64, 'a') } } },
+          { { "sha256", std::string(64, 'a') } } },
         { "decisions_snapshot",
           { { "sha256", std::string(64, 'b') }, { "ignored_pair_count", 0 } } },
         { "ignored_pairs", json::array() },
@@ -242,9 +247,8 @@ json fixture_input() {
     };
 }
 
-json v7_scale_fixture_input() {
+json scale_fixture_input() {
     json result = fixture_input();
-    result["product_snapshot"]["schema_version"] = 7;
     for (auto& entity : result["entities"]) {
         if (entity.at("family") != "concept") {
             continue;
@@ -295,7 +299,7 @@ json cross_media_fixture_input() {
         if (id == "work-000002" || id == "work-000003") {
             entity["work"]["medium"] = "film";
         } else if (id == "work-000004") {
-            entity["work"]["medium"] = "literature";
+            entity["work"]["medium"] = "novel";
             entity["work"]["year_start"] = 2010;
             entity["work"]["year_end"] = 2010;
         } else if (id == "work-000001") {
@@ -319,7 +323,7 @@ json cross_media_fixture_input() {
                 assertions[index]["centrality"]
                     = id == "concept-000001" ? 100 : 80;
                 assertions[index]["confidence"] = 90;
-                assertions[index]["historical_role"] = "established";
+                assertions[index]["historical_role"] = "canonical";
                 if (index == 0U) {
                     assertions[index]["evidence"].push_back(
                         { { "evidence_id", "evidence-stance-" + id },
@@ -349,8 +353,9 @@ json cross_media_fixture_input() {
                 { { "work_id", "work-000005" },
                   { "relation_type", "exemplifies" },
                   { "centrality", 100 },
+                  { "centrality_scale", "none" },
                   { "confidence", 90 },
-                  { "historical_role", "established" },
+                  { "historical_role", "canonical" },
                   { "evidence_ids", json::array() },
                   { "source_ids", json::array() } }
             );
@@ -358,8 +363,9 @@ json cross_media_fixture_input() {
                 { { "work_id", "work-000006" },
                   { "relation_type", "exemplifies" },
                   { "centrality", 100 },
+                  { "centrality_scale", "none" },
                   { "confidence", 90 },
-                  { "historical_role", "established" },
+                  { "historical_role", "canonical" },
                   { "evidence_ids", json::array() },
                   { "source_ids", json::array() } }
             );
@@ -637,7 +643,7 @@ TEST(StructuralHints, ObservationSchemaIsDeterministicAndSnapshotBound) {
         manifest.at("evidence_semantics")
             .at("historical_acceptance_vs_scene_or_community_usage")
             .at("canonical_schema_support"),
-        "not_represented_in_product_v7"
+        "not_represented_in_product"
     );
     EXPECT_EQ(
         manifest.at("evidence_semantics")
@@ -1807,7 +1813,7 @@ TEST(
     PairLevelCentralityScalesExposeCoverageDebtAndDeduplicatedPriorities
 ) {
     const json analysis = arachne::ariadne::structural_hint_planner::build(
-        v7_scale_fixture_input()
+        scale_fixture_input()
     );
     EXPECT_EQ(
         analysis.at("algorithm_version"), "ariadne-structural-hints-2.3.0"
@@ -1905,8 +1911,8 @@ TEST(
     EXPECT_EQ(agent_details.at("credited_work_scale_debt").size(), 3U);
 }
 
-TEST(StructuralHints, ProductV7ScaleInputFailsClosedWithoutExplicitMode) {
-    json source = v7_scale_fixture_input();
+TEST(StructuralHints, CurrentScaleInputFailsClosedWithoutExplicitMode) {
+    json source = scale_fixture_input();
     source["entities"][4]["concept"]["assertions"][0].erase(
         "centrality_scale"
     );
@@ -1917,7 +1923,7 @@ TEST(StructuralHints, ProductV7ScaleInputFailsClosedWithoutExplicitMode) {
         std::invalid_argument
     );
 
-    source = v7_scale_fixture_input();
+    source = scale_fixture_input();
     source["entities"][4]["concept"]["assertions"][0]["centrality_scale"]
         = "inferred";
     EXPECT_THROW(

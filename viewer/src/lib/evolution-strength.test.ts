@@ -19,10 +19,10 @@ function assignment(centrality: number | null): ConceptAssignment {
     label: "A",
     conceptType: "theme",
     slug: "a",
-    relationType: "about",
+    relationType: "associated_with",
     centrality,
     centralityScale: "none",
-    historicalRole: "defining",
+    historicalRole: "canonical",
     confidence: 0.8,
   };
 }
@@ -57,7 +57,7 @@ describe("tag strength normalization", () => {
       strength: 0.75,
       rawStrength: 75,
       centralityScale: "none",
-      historicalRole: "defining",
+      historicalRole: "canonical",
       confidence: 0.8,
     });
     expect(source).toEqual(snapshot);

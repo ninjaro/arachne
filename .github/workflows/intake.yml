@@ -135,7 +135,7 @@ jobs:
             --base "${{ github.event.repository.default_branch }}" \
             --branch "arachne/batch-${ISSUE_NUMBER}-${GITHUB_RUN_ID}" \
             --title "Add Arachne batches from issue #${ISSUE_NUMBER}" \
-            --body "Adds one or more validated arachne_batch_v2 files from issue #${ISSUE_NUMBER}. Product integration applies them in a separate reviewable database change."
+            --body "Adds one or more validated arachne_batch files from issue #${ISSUE_NUMBER}. Product integration applies them in a separate reviewable database change."
       - name: Return successful intake result
         if: success()
         env:

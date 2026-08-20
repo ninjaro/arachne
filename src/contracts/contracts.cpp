@@ -23,7 +23,7 @@ namespace {
 
     constexpr std::array<std::pair<std::string_view, contract_name>, 10>
         contract_names { {
-            { "arachne_batch_v2", contract_name::arachne_batch },
+            { "arachne_batch", contract_name::arachne_batch },
             { "batch_envelope_v1", contract_name::batch_envelope },
             { "fetch_plan_v1", contract_name::fetch_plan },
             { "fetch_request_v1", contract_name::fetch_request },
@@ -80,7 +80,7 @@ namespace {
             if (std::ranges::find(allowed, std::string_view(key))
                 == allowed.end()) {
                 add(result, child_path(path, key), "unknown_field",
-                    "field is not defined by this contract version");
+                    "field is not defined by the current contract");
             }
         }
     }
@@ -557,6 +557,9 @@ namespace {
         return std::ranges::any_of(contract_names, [base](const auto& entry) {
             const std::string_view supported = entry.first;
             const std::size_t supported_separator = supported.rfind("_v");
+            if (supported_separator == std::string_view::npos) {
+                return false;
+            }
             return supported.substr(0, supported_separator) == base;
         });
     }
@@ -574,16 +577,11 @@ namespace {
                 return std::nullopt;
             }
             const std::string& name = format->get_ref<const std::string&>();
-            if (name == "arachne_batch_v2") {
+            if (name == "arachne_batch") {
                 return contract_name::arachne_batch;
             }
-            if (name.starts_with("arachne_batch_v")) {
-                add(result, "/format", "unsupported_major",
-                    "unsupported Arachne batch major version");
-            } else {
-                add(result, "/format", "unknown_contract",
-                    "unknown or malformed batch format");
-            }
+            add(result, "/format", "unknown_contract",
+                "unknown batch format; this commit supports arachne_batch");
             return std::nullopt;
         }
         const auto it = document.find("contract");
@@ -619,7 +617,7 @@ namespace {
             if (discovered.has_value() && *discovered != expected) {
                 add(result, document.contains("format") ? "/format" : "/contract",
                     "contract_mismatch",
-                    "expected arachne_batch_v2 but received "
+                    "expected arachne_batch but received "
                         + std::string(to_string(*discovered)));
             }
             return;
@@ -760,6 +758,44 @@ namespace {
         }
     }
 
+    void validate_ordered_years(
+        const json& object, const std::string_view path,
+        const std::string_view first_key, const std::string_view last_key,
+        validation_result& result
+    ) {
+        const auto first = object.find(first_key);
+        const auto last = object.find(last_key);
+        if (first == object.end() || last == object.end()
+            || !(first->is_number_integer() || first->is_number_unsigned())
+            || !(last->is_number_integer() || last->is_number_unsigned())) {
+            return;
+        }
+        try {
+            if (last->get<std::int64_t>() < first->get<std::int64_t>()) {
+                add(result, child_path(path, last_key), "range",
+                    std::string(last_key) + " must not be earlier than "
+                        + std::string(first_key));
+            }
+        } catch (const json::exception&) {
+            // The ordinary range validators report values outside int64/year
+            // bounds; do not duplicate that diagnostic here.
+        }
+    }
+
+    void reject_equal_references(
+        const json& object, const std::string_view path,
+        const std::string_view left_key, const std::string_view right_key,
+        validation_result& result
+    ) {
+        const auto left = object.find(left_key);
+        const auto right = object.find(right_key);
+        if (left != object.end() && right != object.end()
+            && left->is_string() && right->is_string() && *left == *right) {
+            add(result, child_path(path, right_key), "self_relation",
+                "relationship endpoints must identify different entities");
+        }
+    }
+
     void validate_entity_id(
         const json& object, const std::string_view key,
         const std::string_view path, const std::string_view family,
@@ -822,7 +858,8 @@ namespace {
     ) {
         reject_unknown_fields(
             create, path,
-            { "agents", "works", "concepts", "manifestations", "names",
+            { "agents", "works", "concepts", "manifestations",
+              "work_memberships", "agent_relations", "events", "names",
               "external_ids", "sources", "evidence", "credits",
               "measurements", "financial_facts", "work_concepts",
               "concept_relations", "parent_guide_assertions" },
@@ -869,7 +906,8 @@ namespace {
                       "short_story", "poetry", "play", "essay", "album",
                       "single", "composition", "painting", "print",
                       "engraving", "drawing", "sculpture", "installation",
-                      "photography", "mixed_media" },
+                      "photography", "mixed_media", "nonfiction", "comic",
+                      "performance" },
                     item_result
                 );
                 validate_year_fields(
@@ -877,7 +915,8 @@ namespace {
                 );
                 optional_enum(
                     item, "date_precision", item_path,
-                    { "year", "decade", "approximate", "range", "exact" },
+                    { "year", "month", "decade", "approximate", "range",
+                      "exact" },
                     item_result
                 );
                 validate_nonempty_optional_strings(
@@ -945,6 +984,129 @@ namespace {
                     item_result
                 );
                 require_string(item, "label", item_path, item_result);
+            }
+        );
+
+        validate_optional_object_array(
+            create, "work_memberships", path, result,
+            [](const json& item, const std::string& item_path,
+               validation_result& item_result) {
+                reject_unknown_fields(
+                    item, item_path,
+                    { "child_work_id", "parent_work_id", "membership_type",
+                      "position", "position_text" },
+                    item_result
+                );
+                for (const std::string_view key :
+                     { "child_work_id", "parent_work_id" }) {
+                    const json* reference
+                        = field(item, key, item_path, item_result);
+                    if (reference != nullptr) {
+                        validate_stable_reference(
+                            *reference, child_path(item_path, key), item_result
+                        );
+                    }
+                }
+                require_enum(
+                    item, "membership_type", item_path,
+                    { "episode_of", "season_of", "track_of", "volume_of",
+                      "issue_of", "chapter_of", "part_of", "collected_in" },
+                    item_result
+                );
+                optional_integer_range(
+                    item, "position", item_path, 0,
+                    std::numeric_limits<std::int64_t>::max(), item_result
+                );
+                optional_string(item, "position_text", item_path, item_result);
+                reject_equal_references(
+                    item, item_path, "child_work_id", "parent_work_id",
+                    item_result
+                );
+            }
+        );
+
+        validate_optional_object_array(
+            create, "agent_relations", path, result,
+            [](const json& item, const std::string& item_path,
+               validation_result& item_result) {
+                reject_unknown_fields(
+                    item, item_path,
+                    { "subject_agent_id", "relation_type", "object_agent_id",
+                      "from_year", "to_year", "period_text", "role_text" },
+                    item_result
+                );
+                for (const std::string_view key :
+                     { "subject_agent_id", "object_agent_id" }) {
+                    const json* reference
+                        = field(item, key, item_path, item_result);
+                    if (reference != nullptr) {
+                        validate_stable_reference(
+                            *reference, child_path(item_path, key), item_result
+                        );
+                    }
+                }
+                require_enum(
+                    item, "relation_type", item_path,
+                    { "member_of", "founder_of", "subsidiary_of",
+                      "division_of", "imprint_of", "owned_by",
+                      "successor_of", "predecessor_of" },
+                    item_result
+                );
+                validate_year_fields(
+                    item, item_path, { "from_year", "to_year" }, item_result
+                );
+                validate_nonempty_optional_strings(
+                    item, item_path, { "period_text", "role_text" },
+                    item_result
+                );
+                reject_equal_references(
+                    item, item_path, "subject_agent_id", "object_agent_id",
+                    item_result
+                );
+                validate_ordered_years(
+                    item, item_path, "from_year", "to_year", item_result
+                );
+            }
+        );
+
+        validate_optional_object_array(
+            create, "events", path, result,
+            [](const json& item, const std::string& item_path,
+               validation_result& item_result) {
+                reject_unknown_fields(
+                    item, item_path,
+                    { "entity_id", "event_type", "year_start", "year_end",
+                      "date_text", "date_precision", "place_text" },
+                    item_result
+                );
+                const json* entity
+                    = field(item, "entity_id", item_path, item_result);
+                if (entity != nullptr) {
+                    validate_stable_reference(
+                        *entity, child_path(item_path, "entity_id"), item_result
+                    );
+                }
+                require_enum(
+                    item, "event_type", item_path,
+                    { "created", "published", "released", "premiered",
+                      "broadcast", "performed", "exhibited", "recorded" },
+                    item_result
+                );
+                validate_year_fields(
+                    item, item_path, { "year_start", "year_end" }, item_result
+                );
+                optional_enum(
+                    item, "date_precision", item_path,
+                    { "year", "month", "exact", "decade", "approximate",
+                      "range" },
+                    item_result
+                );
+                validate_nonempty_optional_strings(
+                    item, item_path, { "date_text", "place_text" }, item_result
+                );
+                validate_ordered_years(
+                    item, item_path, "year_start", "year_end", item_result
+                );
             }
         );
 
@@ -1080,11 +1242,11 @@ namespace {
                validation_result& item_result) {
                 reject_unknown_fields(
                     item, item_path,
-                    { "work_id", "agent_id", "role", "credit_order",
+                    { "entity_id", "agent_id", "role", "credit_order",
                       "importance", "credited_as" },
                     item_result
                 );
-                for (const std::string_view key : { "work_id", "agent_id" }) {
+                for (const std::string_view key : { "entity_id", "agent_id" }) {
                     const json* reference
                         = field(item, key, item_path, item_result);
                     if (reference != nullptr) {
@@ -1099,7 +1261,10 @@ namespace {
                       "actor", "composer", "performer", "artist", "engraver",
                       "sculptor", "photographer", "editor", "cinematographer",
                       "production_company", "publisher", "record_label",
-                      "band" },
+                      "band", "distributor", "broadcaster", "platform",
+                      "translator", "illustrator", "printer", "curator",
+                      "choreographer", "narrator", "lyricist", "songwriter",
+                      "arranger", "sound_engineer", "designer", "animator" },
                     item_result
                 );
                 optional_integer_range(
@@ -1394,13 +1559,15 @@ namespace {
             { "film", "short_film", "television", "novel", "novella",
               "short_story", "poetry", "play", "essay", "album", "single",
               "composition", "painting", "print", "engraving", "drawing",
-              "sculpture", "installation", "photography", "mixed_media" },
+              "sculpture", "installation", "photography", "mixed_media",
+              "nonfiction", "comic", "performance" },
             result
         );
         validate_year_fields(set, path, { "year_start", "year_end" }, result);
         optional_enum(
             set, "date_precision", path,
-            { "year", "decade", "approximate", "range", "exact" }, result
+            { "year", "month", "decade", "approximate", "range", "exact" },
+            result
         );
         validate_nonempty_optional_strings(
             set, path,
@@ -1684,14 +1851,16 @@ namespace {
             const std::string delete_path = child_path(path, "delete");
             reject_unknown_fields(
                 *deletes, delete_path,
-                { "names", "external_ids", "credits", "measurements",
+                { "names", "external_ids", "credits", "work_memberships",
+                  "agent_relations", "events", "measurements",
                   "financial_facts", "evidence", "work_concepts",
                   "concept_relations", "parent_guide_assertions",
                   "ingest_issues" },
                 result
             );
             for (const std::string_view key :
-                 { "names", "external_ids", "credits", "measurements",
+                 { "names", "external_ids", "credits", "work_memberships",
+                   "agent_relations", "events", "measurements",
                    "financial_facts", "evidence", "work_concepts",
                    "concept_relations", "parent_guide_assertions" }) {
                 validate_positive_id_array(
@@ -1914,9 +2083,9 @@ namespace {
             { "format", "batch_id", "create", "update", "merge" }, result
         );
         const json* format = require_string(document, "format", "", result);
-        if (format != nullptr && *format != "arachne_batch_v2") {
+        if (format != nullptr && *format != "arachne_batch") {
             add(result, "/format", "const",
-                "format must be arachne_batch_v2");
+                "format must be arachne_batch");
         }
         require_stable_id(document, "batch_id", "", result);
         if (const json* create

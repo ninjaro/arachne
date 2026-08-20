@@ -40,16 +40,14 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 constexpr std::uintmax_t maximum_batch_bytes = 32U * 1024U * 1024U;
-constexpr int current_product_schema = 7;
 
 class database_error final : public inbox_error {
 public:
     using inbox_error::inbox_error;
 };
 
-[[nodiscard]] std::string sqlite_message(
-    sqlite3* const value, const std::string_view operation
-) {
+[[nodiscard]] std::string
+sqlite_message(sqlite3* const value, const std::string_view operation) {
     return std::string(operation) + ": "
         + (value == nullptr ? "SQLite error" : sqlite3_errmsg(value));
 }
@@ -117,8 +115,7 @@ public:
             bind(index, value.get<std::int64_t>());
         } else if (value.is_number_unsigned()) {
             const auto number = value.get<std::uint64_t>();
-            if (number
-                > static_cast<std::uint64_t>(
+            if (number > static_cast<std::uint64_t>(
                     std::numeric_limits<std::int64_t>::max()
                 )) {
                 throw database_error("integer is outside SQLite's range");
@@ -178,12 +175,14 @@ private:
 void require_current_product_structure(sqlite3* const sql) {
     const std::set<std::string, std::less<>> expected_tables {
         "agents",
+        "agent_relations",
         "applied_batches",
         "concept_relation_evidence",
         "concept_relations",
         "concepts",
         "credits",
         "entities",
+        "events",
         "evidence",
         "external_ids",
         "financial_facts",
@@ -196,6 +195,7 @@ void require_current_product_structure(sqlite3* const sql) {
         "sources",
         "work_concept_evidence",
         "work_concepts",
+        "work_memberships",
         "works",
     };
     std::set<std::string, std::less<>> actual_tables;
@@ -209,15 +209,101 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_tables != expected_tables) {
         throw database_error(
-            "product database table set does not match schema version 7"
+            "product database table set does not match the current schema"
         );
     }
 
+    const std::map<std::string, std::vector<std::string>, std::less<>>
+        expected_columns {
+            { "agent_relations",
+              { "id", "subject_agent_id", "relation_type", "object_agent_id",
+                "from_year", "to_year", "period_text", "role_text" } },
+            { "agents",
+              { "entity_id", "agent_type", "birth_year", "death_year" } },
+            { "applied_batches", { "batch_id" } },
+            { "concept_relation_evidence",
+              { "id", "assertion_id", "evidence_id" } },
+            { "concept_relations",
+              { "id", "subject_concept_id", "relation_type",
+                "object_concept_id", "strength", "from_year", "to_year",
+                "region_code", "confidence" } },
+            { "concepts", { "entity_id", "concept_type", "slug" } },
+            { "credits",
+              { "id", "entity_id", "agent_id", "role", "credit_order",
+                "importance", "credited_as" } },
+            { "entities", { "id", "entity_type" } },
+            { "events",
+              { "id", "entity_id", "event_type", "year_start", "year_end",
+                "date_text", "date_precision", "place_text" } },
+            { "evidence",
+              { "id", "source_id", "exact_quote", "quote_language",
+                "quote_translation", "locator_json", "stance" } },
+            { "external_ids",
+              { "id", "entity_id", "scheme", "value", "canonical_url" } },
+            { "financial_facts",
+              { "id", "work_id", "fact_type", "amount_min", "amount_max",
+                "currency_code", "value_year", "is_estimate", "confidence" } },
+            { "ingest_issues",
+              { "batch_id", "code", "json_path", "message", "value_json",
+                "status" } },
+            { "manifestations",
+              { "entity_id", "work_id", "manifestation_type", "release_year",
+                "region_code", "language_code", "label" } },
+            { "measurements",
+              { "id", "entity_id", "measurement_type", "value", "unit",
+                "qualifier" } },
+            { "names",
+              { "id", "entity_id", "name_type", "language_code", "script_code",
+                "value", "is_preferred" } },
+            { "parent_guide_assertions",
+              { "id", "work_id", "concept_id", "category", "intensity",
+                "explicitness", "frequency", "centrality", "realism",
+                "spoiler_level", "confidence" } },
+            { "parent_guide_evidence",
+              { "id", "assertion_id", "evidence_id" } },
+            { "sources",
+              { "id", "source_type", "title", "bibliography_text",
+                "author_text", "publisher", "publication_date", "url", "doi",
+                "isbn", "language_code" } },
+            { "work_concept_evidence",
+              { "id", "assertion_id", "evidence_id" } },
+            { "work_concepts",
+              { "id", "work_id", "concept_id", "relation_type", "centrality",
+                "centrality_scale", "historical_role", "confidence" } },
+            { "work_memberships",
+              { "id", "child_work_id", "parent_work_id", "membership_type",
+                "position", "position_text" } },
+            { "works",
+              { "entity_id", "medium", "year_start", "year_end",
+                "date_precision", "date_start_text", "date_end_text",
+                "date_qualifier", "language_code", "country_code",
+                "production_info_json" } },
+        };
+    for (const auto& [table, columns] : expected_columns) {
+        std::vector<std::string> actual_columns;
+        statement info(sql, "PRAGMA table_info(\"" + table + "\")");
+        while (info.step()) {
+            actual_columns.emplace_back(info.text(1));
+        }
+        if (actual_columns != columns) {
+            throw database_error(
+                "product database columns do not match the current schema: "
+                + table
+            );
+        }
+    }
+
     const std::set<std::string, std::less<>> expected_indexes {
+        "agent_relations_logical_unique",
+        "agent_relations_object_idx",
+        "agent_relations_subject_idx",
         "concept_relations_object_idx",
         "credits_agent_idx",
+        "credits_entity_idx",
         "credits_logical_unique",
-        "credits_work_idx",
+        "events_entity_idx",
+        "events_logical_unique",
+        "events_type_idx",
         "evidence_logical_unique",
         "external_ids_entity_idx",
         "financial_facts_logical_unique",
@@ -230,6 +316,9 @@ void require_current_product_structure(sqlite3* const sql) {
         "sources_isbn_unique",
         "sources_url_unique",
         "work_concepts_concept_idx",
+        "work_memberships_child_idx",
+        "work_memberships_logical_unique",
+        "work_memberships_parent_idx",
     };
     std::set<std::string, std::less<>> actual_indexes;
     statement indexes(
@@ -242,7 +331,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_indexes != expected_indexes) {
         throw database_error(
-            "product database index set does not match schema version 7"
+            "product database index set does not match the current schema"
         );
     }
 
@@ -251,8 +340,12 @@ void require_current_product_structure(sqlite3* const sql) {
         "agents_entity_type_update",
         "concept_relation_last_evidence_delete",
         "concepts_entity_type",
+        "credits_entity_type",
+        "credits_entity_type_update",
         "entities_agent_type_update",
         "entities_subtype_update_guard",
+        "events_entity_type",
+        "events_entity_type_update",
         "manifestations_entity_type",
         "parent_guide_last_evidence_delete",
         "work_concept_last_evidence_delete",
@@ -267,7 +360,7 @@ void require_current_product_structure(sqlite3* const sql) {
     }
     if (actual_triggers != expected_triggers) {
         throw database_error(
-            "product database trigger set does not match schema version 7"
+            "product database trigger set does not match the current schema"
         );
     }
 }
@@ -291,12 +384,6 @@ public:
         sqlite3_extended_result_codes(value_, 1);
         sqlite3_busy_timeout(value_, 10'000);
         execute("PRAGMA foreign_keys = ON");
-        statement version(value_, "PRAGMA user_version");
-        if (!version.step() || version.integer(0) != current_product_schema) {
-            throw database_error(
-                "product database must use schema version 7"
-            );
-        }
         require_current_product_structure(value_);
     }
 
@@ -345,8 +432,7 @@ public:
         if (!finished_) {
             try {
                 database_.execute("ROLLBACK");
-            } catch (...) {
-            }
+            } catch (...) { }
         }
     }
 
@@ -373,9 +459,8 @@ struct file_snapshot final {
     file_identity identity;
 };
 
-[[nodiscard]] bool same_identity(
-    const file_identity& left, const file_identity& right
-) {
+[[nodiscard]] bool
+same_identity(const file_identity& left, const file_identity& right) {
     return left.device == right.device && left.inode == right.inode
         && left.size == right.size
         && left.modified.tv_sec == right.modified.tv_sec
@@ -439,7 +524,9 @@ private:
     }
     if (before.st_size < 0
         || static_cast<std::uintmax_t>(before.st_size) > maximum_batch_bytes) {
-        throw inbox_error("inbox batch exceeds its byte limit: " + path.string());
+        throw inbox_error(
+            "inbox batch exceeds its byte limit: " + path.string()
+        );
     }
     std::string bytes(static_cast<std::size_t>(before.st_size), '\0');
     std::size_t offset = 0;
@@ -451,7 +538,9 @@ private:
             continue;
         }
         if (count <= 0) {
-            throw inbox_error("cannot read complete inbox file " + path.string());
+            throw inbox_error(
+                "cannot read complete inbox file " + path.string()
+            );
         }
         offset += static_cast<std::size_t>(count);
     }
@@ -463,7 +552,9 @@ private:
     struct stat after {};
     if (trailing_count != 0 || ::fstat(descriptor.get(), &after) != 0
         || !same_identity(identity_of(before), identity_of(after))) {
-        throw inbox_error("inbox file changed while it was read: " + path.string());
+        throw inbox_error(
+            "inbox file changed while it was read: " + path.string()
+        );
     }
     return {
         .path = path,
@@ -474,8 +565,8 @@ private:
 
 [[nodiscard]] bool snapshot_still_current(const file_snapshot& snapshot) {
     struct stat state {};
-    return ::lstat(snapshot.path.c_str(), &state) == 0
-        && S_ISREG(state.st_mode) && !S_ISLNK(state.st_mode)
+    return ::lstat(snapshot.path.c_str(), &state) == 0 && S_ISREG(state.st_mode)
+        && !S_ISLNK(state.st_mode)
         && same_identity(snapshot.identity, identity_of(state));
 }
 
@@ -566,14 +657,14 @@ void add_issue(
         return false;
     }
     return std::ranges::all_of(
-        value.substr(prefix.size()),
-        [](const unsigned char character) { return std::isdigit(character) != 0; }
+        value.substr(prefix.size()), [](const unsigned char character) {
+            return std::isdigit(character) != 0;
+        }
     );
 }
 
-[[nodiscard]] bool looks_like_canonical_entity_id(
-    const std::string_view value
-) {
+[[nodiscard]] bool
+looks_like_canonical_entity_id(const std::string_view value) {
     return valid_canonical_id(value, "agent")
         || valid_canonical_id(value, "work")
         || valid_canonical_id(value, "concept")
@@ -617,8 +708,8 @@ void check_keys(
     for (const auto& [key, value] : object.items()) {
         if (!allowed.contains(key)) {
             add_issue(
-                batch, "unknown_field",
-                path + "/" + pointer_escape(key), "field is not allowed", &value
+                batch, "unknown_field", path + "/" + pointer_escape(key),
+                "field is not allowed", &value
             );
         }
     }
@@ -692,8 +783,7 @@ void require_nonempty_string(
 
 void require_enum(
     parsed_batch& batch, const json& object, const std::string& key,
-    const std::string& path,
-    const std::set<std::string, std::less<>>& allowed
+    const std::string& path, const std::set<std::string, std::less<>>& allowed
 ) {
     require_kind(batch, object, key, path, value_kind::string);
     const auto found = object.find(key);
@@ -721,9 +811,8 @@ void require_integer_range(
         const auto value = found->get<std::int64_t>();
         if (value < minimum || value > maximum) {
             add_issue(
-                batch, "number_out_of_range",
-                path + "/" + pointer_escape(key), "integer is outside its range",
-                &*found
+                batch, "number_out_of_range", path + "/" + pointer_escape(key),
+                "integer is outside its range", &*found
             );
         }
     } catch (const json::exception&) {
@@ -752,52 +841,88 @@ void require_number_range(
     }
 }
 
-const std::set<std::string, std::less<>> agent_types {
-    "person", "organization", "group"
-};
+const std::set<std::string, std::less<>> agent_types { "person", "organization",
+                                                       "group" };
 const std::set<std::string, std::less<>> media {
-    "film", "short_film", "television", "novel", "novella", "short_story",
-    "poetry", "play", "essay", "album", "single", "composition", "painting",
-    "print", "engraving", "drawing", "sculpture", "installation",
-    "photography", "mixed_media"
+    "film",        "short_film",  "television",   "novel",       "novella",
+    "short_story", "poetry",      "play",         "essay",       "album",
+    "single",      "composition", "painting",     "print",       "engraving",
+    "drawing",     "sculpture",   "installation", "photography", "mixed_media",
+    "nonfiction",  "comic",       "performance"
 };
 const std::set<std::string, std::less<>> date_precisions {
-    "year", "decade", "approximate", "range", "exact"
+    "year", "month", "exact", "decade", "approximate", "range"
 };
 const std::set<std::string, std::less<>> concept_types {
-    "genre", "style", "theme", "keyword", "motif", "trope", "phobia",
-    "taboo", "technique", "movement", "setting", "mood", "content_warning"
+    "genre",   "style",  "theme",          "keyword",   "motif",
+    "trope",   "phobia", "taboo",          "technique", "movement",
+    "setting", "mood",   "content_warning"
 };
 const std::set<std::string, std::less<>> manifestation_types {
-    "edition", "translation", "release", "pressing", "cut", "restoration",
-    "reissue"
+    "edition", "translation", "release", "pressing",
+    "cut",     "restoration", "reissue"
 };
 const std::set<std::string, std::less<>> name_types {
-    "original", "english", "transliteration", "translation", "alias",
-    "credited"
+    "original", "english", "transliteration", "translation", "alias", "credited"
 };
 const std::set<std::string, std::less<>> source_types {
-    "book", "article", "catalogue", "web_page", "interview", "database",
-    "video", "audio", "PDF"
+    "book",     "article", "catalogue", "web_page", "interview",
+    "database", "video",   "audio",     "PDF"
 };
-const std::set<std::string, std::less<>> stances {
-    "supports", "contradicts", "contextualizes"
+const std::set<std::string, std::less<>> stances { "supports", "contradicts",
+                                                   "contextualizes" };
+const std::set<std::string, std::less<>> credit_roles { "author",
+                                                        "director",
+                                                        "screenwriter",
+                                                        "producer",
+                                                        "actor",
+                                                        "composer",
+                                                        "performer",
+                                                        "artist",
+                                                        "engraver",
+                                                        "sculptor",
+                                                        "photographer",
+                                                        "editor",
+                                                        "cinematographer",
+                                                        "production_company",
+                                                        "publisher",
+                                                        "record_label",
+                                                        "band",
+                                                        "distributor",
+                                                        "broadcaster",
+                                                        "platform",
+                                                        "translator",
+                                                        "illustrator",
+                                                        "printer",
+                                                        "curator",
+                                                        "choreographer",
+                                                        "narrator",
+                                                        "lyricist",
+                                                        "songwriter",
+                                                        "arranger",
+                                                        "sound_engineer",
+                                                        "designer",
+                                                        "animator" };
+const std::set<std::string, std::less<>> membership_types {
+    "episode_of", "season_of",  "track_of", "volume_of",
+    "issue_of",   "chapter_of", "part_of",  "collected_in"
 };
-const std::set<std::string, std::less<>> credit_roles {
-    "author", "director", "screenwriter", "producer", "actor", "composer",
-    "performer", "artist", "engraver", "sculptor", "photographer", "editor",
-    "cinematographer", "production_company", "publisher", "record_label",
-    "band"
+const std::set<std::string, std::less<>> agent_relation_types {
+    "member_of",  "founder_of", "subsidiary_of", "division_of",
+    "imprint_of", "owned_by",   "successor_of",  "predecessor_of"
 };
-const std::set<std::string, std::less<>> importance_values {
-    "primary", "key", "supporting"
+const std::set<std::string, std::less<>> event_types {
+    "created",   "published", "released",  "premiered",
+    "broadcast", "performed", "exhibited", "recorded"
 };
-const std::set<std::string, std::less<>> measurement_types {
-    "duration", "height", "width", "depth", "pages"
-};
-const std::set<std::string, std::less<>> measurement_units {
-    "seconds", "millimetres", "pages"
-};
+const std::set<std::string, std::less<>> importance_values { "primary", "key",
+                                                             "supporting" };
+const std::set<std::string, std::less<>> measurement_types { "duration",
+                                                             "height", "width",
+                                                             "depth", "pages" };
+const std::set<std::string, std::less<>> measurement_units { "seconds",
+                                                             "millimetres",
+                                                             "pages" };
 const std::set<std::string, std::less<>> concept_relation_types {
     "broader_than", "narrower_than", "derived_from", "precursor_of",
     "hybrid_of", "revival_of", "regional_variant_of", "influenced_by",
@@ -811,20 +936,18 @@ const std::set<std::string, std::less<>> reviewed_centrality_scales {
     "binary", "ordinal", "graded"
 };
 const std::set<std::string, std::less<>> historical_roles {
-    "formative", "canonical", "transitional", "hybrid", "revival",
-    "late_derivative", "peripheral", "precursor"
+    "formative", "canonical",       "transitional", "hybrid",
+    "revival",   "late_derivative", "peripheral",   "precursor"
 };
 const std::set<std::string, std::less<>> guide_categories {
-    "violence", "sex_nudity", "language", "drugs", "frightening", "self_harm",
-    "discrimination", "abuse", "taboo"
+    "violence",  "sex_nudity",     "language", "drugs", "frightening",
+    "self_harm", "discrimination", "abuse",    "taboo"
 };
-const std::set<std::string, std::less<>> spoiler_levels {
-    "none", "mild", "major"
-};
+const std::set<std::string, std::less<>> spoiler_levels { "none", "mild",
+                                                          "major" };
 
-[[nodiscard]] std::string indexed_path(
-    const std::string_view parent, const std::size_t index
-) {
+[[nodiscard]] std::string
+indexed_path(const std::string_view parent, const std::size_t index) {
     return std::string(parent) + "/" + std::to_string(index);
 }
 
@@ -905,8 +1028,7 @@ void validate_integer_or_local_reference_shape(
             }
         } catch (const json::exception&) {
             add_issue(
-                batch, "number_out_of_range",
-                path + "/" + pointer_escape(key),
+                batch, "number_out_of_range", path + "/" + pointer_escape(key),
                 "database row reference is outside SQLite's range", &*found
             );
         }
@@ -938,8 +1060,8 @@ void validate_create_work(
     check_keys(
         batch, value, path,
         { "local_id", "medium", "year_start", "year_end", "date_precision",
-          "date_start_text", "date_end_text", "date_qualifier",
-          "language_code", "country_code", "production_info_json" },
+          "date_start_text", "date_end_text", "date_qualifier", "language_code",
+          "country_code", "production_info_json" },
         { "local_id", "medium" }
     );
     if (!value.is_object()) {
@@ -961,17 +1083,15 @@ void validate_create_work(
     if (value.contains("date_precision")) {
         require_enum(batch, value, "date_precision", path, date_precisions);
     }
-    for (const auto& key : {
-             "date_start_text", "date_end_text", "date_qualifier",
+    for (const auto& key :
+         { "date_start_text", "date_end_text", "date_qualifier",
              "language_code", "country_code" }) {
         if (value.contains(key)) {
             require_nonempty_string(batch, value, key, path);
         }
     }
     if (value.contains("production_info_json")) {
-        require_nonempty_string(
-            batch, value, "production_info_json", path
-        );
+        require_nonempty_string(batch, value, "production_info_json", path);
         if (value["production_info_json"].is_string()) {
             try {
                 const json parsed = json::parse(
@@ -980,8 +1100,7 @@ void validate_create_work(
                 static_cast<void>(parsed);
             } catch (const json::exception&) {
                 add_issue(
-                    batch, "invalid_json_text",
-                    path + "/production_info_json",
+                    batch, "invalid_json_text", path + "/production_info_json",
                     "production_info_json must contain valid JSON",
                     &value["production_info_json"]
                 );
@@ -1008,7 +1127,8 @@ void validate_create_concept(
         && !valid_slug(value["slug"].get_ref<const std::string&>())) {
         add_issue(
             batch, "invalid_slug", path + "/slug",
-            "slug must contain lowercase alphanumeric dash-separated tokens",
+            "slug must contain lowercase alphanumeric dash-separated "
+            "tokens",
             &value["slug"]
         );
     }
@@ -1029,15 +1149,126 @@ void validate_create_manifestation(
     }
     validate_local_id(batch, value, path, locals, "manifestation");
     validate_entity_reference_shape(batch, value, "work_id", path);
-    require_enum(
-        batch, value, "manifestation_type", path, manifestation_types
-    );
+    require_enum(batch, value, "manifestation_type", path, manifestation_types);
     require_nonempty_string(batch, value, "label", path);
     require_integer_range(batch, value, "release_year", path, -9999, 9999);
     for (const auto& key : { "region_code", "language_code" }) {
         if (value.contains(key)) {
             require_nonempty_string(batch, value, key, path);
         }
+    }
+}
+
+void validate_create_work_membership(
+    parsed_batch& batch, const json& value, const std::string& path
+) {
+    check_keys(
+        batch, value, path,
+        { "child_work_id", "parent_work_id", "membership_type", "position",
+          "position_text" },
+        { "child_work_id", "parent_work_id", "membership_type" }
+    );
+    if (!value.is_object()) {
+        return;
+    }
+    validate_entity_reference_shape(batch, value, "child_work_id", path);
+    validate_entity_reference_shape(batch, value, "parent_work_id", path);
+    require_enum(batch, value, "membership_type", path, membership_types);
+    require_integer_range(
+        batch, value, "position", path, 0,
+        std::numeric_limits<std::int64_t>::max()
+    );
+    if (value.contains("position_text")) {
+        require_nonempty_string(batch, value, "position_text", path);
+    }
+    if (value.contains("child_work_id") && value["child_work_id"].is_string()
+        && value.contains("parent_work_id")
+        && value["parent_work_id"].is_string()
+        && value["child_work_id"] == value["parent_work_id"]) {
+        add_issue(
+            batch, "self_relation", path + "/parent_work_id",
+            "work membership endpoints must identify different works",
+            &value["parent_work_id"]
+        );
+    }
+}
+
+void validate_create_agent_relation(
+    parsed_batch& batch, const json& value, const std::string& path
+) {
+    check_keys(
+        batch, value, path,
+        { "subject_agent_id", "relation_type", "object_agent_id", "from_year",
+          "to_year", "period_text", "role_text" },
+        { "subject_agent_id", "relation_type", "object_agent_id" }
+    );
+    if (!value.is_object()) {
+        return;
+    }
+    validate_entity_reference_shape(batch, value, "subject_agent_id", path);
+    validate_entity_reference_shape(batch, value, "object_agent_id", path);
+    require_enum(batch, value, "relation_type", path, agent_relation_types);
+    require_integer_range(batch, value, "from_year", path, -9999, 9999);
+    require_integer_range(batch, value, "to_year", path, -9999, 9999);
+    for (const char* key : { "period_text", "role_text" }) {
+        if (value.contains(key)) {
+            require_nonempty_string(batch, value, key, path);
+        }
+    }
+    if (value.contains("subject_agent_id")
+        && value["subject_agent_id"].is_string()
+        && value.contains("object_agent_id")
+        && value["object_agent_id"].is_string()
+        && value["subject_agent_id"] == value["object_agent_id"]) {
+        add_issue(
+            batch, "self_relation", path + "/object_agent_id",
+            "agent relation endpoints must identify different agents",
+            &value["object_agent_id"]
+        );
+    }
+    if (value.contains("from_year") && value["from_year"].is_number_integer()
+        && value.contains("to_year") && value["to_year"].is_number_integer()
+        && value["to_year"].get<std::int64_t>()
+            < value["from_year"].get<std::int64_t>()) {
+        add_issue(
+            batch, "invalid_range", path + "/to_year",
+            "to_year must not be earlier than from_year", &value["to_year"]
+        );
+    }
+}
+
+void validate_create_event(
+    parsed_batch& batch, const json& value, const std::string& path
+) {
+    check_keys(
+        batch, value, path,
+        { "entity_id", "event_type", "year_start", "year_end", "date_text",
+          "date_precision", "place_text" },
+        { "entity_id", "event_type" }
+    );
+    if (!value.is_object()) {
+        return;
+    }
+    validate_entity_reference_shape(batch, value, "entity_id", path);
+    require_enum(batch, value, "event_type", path, event_types);
+    require_integer_range(batch, value, "year_start", path, -9999, 9999);
+    require_integer_range(batch, value, "year_end", path, -9999, 9999);
+    if (value.contains("date_precision")) {
+        require_enum(batch, value, "date_precision", path, date_precisions);
+    }
+    for (const char* key : { "date_text", "place_text" }) {
+        if (value.contains(key)) {
+            require_nonempty_string(batch, value, key, path);
+        }
+    }
+    if (value.contains("year_start") && value["year_start"].is_number_integer()
+        && value.contains("year_end") && value["year_end"].is_number_integer()
+        && value["year_end"].get<std::int64_t>()
+            < value["year_start"].get<std::int64_t>()) {
+        add_issue(
+            batch, "invalid_range", path + "/year_end",
+            "year_end must not be earlier than year_start", &value["year_end"]
+        );
     }
 }
 
@@ -1068,8 +1299,7 @@ void validate_create_external_id(
     parsed_batch& batch, const json& value, const std::string& path
 ) {
     check_keys(
-        batch, value, path,
-        { "entity_id", "scheme", "value", "canonical_url" },
+        batch, value, path, { "entity_id", "scheme", "value", "canonical_url" },
         { "entity_id", "scheme", "value" }
     );
     if (!value.is_object()) {
@@ -1090,8 +1320,8 @@ void validate_create_source(
     check_keys(
         batch, value, path,
         { "local_id", "source_type", "title", "bibliography_text",
-          "author_text", "publisher", "publication_date", "url", "doi",
-          "isbn", "language_code" },
+          "author_text", "publisher", "publication_date", "url", "doi", "isbn",
+          "language_code" },
         { "local_id", "source_type" }
     );
     if (!value.is_object()) {
@@ -1099,8 +1329,8 @@ void validate_create_source(
     }
     validate_local_id(batch, value, path, locals, "source");
     require_enum(batch, value, "source_type", path, source_types);
-    for (const auto& key : {
-             "title", "bibliography_text", "author_text", "publisher",
+    for (const auto& key :
+         { "title", "bibliography_text", "author_text", "publisher",
              "publication_date", "url", "doi", "isbn", "language_code" }) {
         if (value.contains(key)) {
             require_nonempty_string(batch, value, key, path);
@@ -1132,9 +1362,7 @@ void validate_create_evidence(
         return;
     }
     validate_local_id(batch, value, path, locals, "evidence");
-    validate_integer_or_local_reference_shape(
-        batch, value, "source_id", path
-    );
+    validate_integer_or_local_reference_shape(batch, value, "source_id", path);
     require_nonempty_string(batch, value, "exact_quote", path);
     require_enum(batch, value, "stance", path, stances);
     for (const auto& key : { "quote_language", "quote_translation" }) {
@@ -1146,9 +1374,8 @@ void validate_create_evidence(
         require_nonempty_string(batch, value, "locator_json", path);
         if (value["locator_json"].is_string()) {
             try {
-                const json parsed = json::parse(
-                    value["locator_json"].get<std::string>()
-                );
+                const json parsed
+                    = json::parse(value["locator_json"].get<std::string>());
                 static_cast<void>(parsed);
             } catch (const json::exception&) {
                 add_issue(
@@ -1166,14 +1393,14 @@ void validate_create_credit(
 ) {
     check_keys(
         batch, value, path,
-        { "work_id", "agent_id", "role", "credit_order", "importance",
+        { "entity_id", "agent_id", "role", "credit_order", "importance",
           "credited_as" },
-        { "work_id", "agent_id", "role", "importance" }
+        { "entity_id", "agent_id", "role", "importance" }
     );
     if (!value.is_object()) {
         return;
     }
-    validate_entity_reference_shape(batch, value, "work_id", path);
+    validate_entity_reference_shape(batch, value, "entity_id", path);
     validate_entity_reference_shape(batch, value, "agent_id", path);
     require_enum(batch, value, "role", path, credit_roles);
     require_enum(batch, value, "importance", path, importance_values);
@@ -1198,12 +1425,9 @@ void validate_create_measurement(
         return;
     }
     validate_entity_reference_shape(batch, value, "entity_id", path);
-    require_enum(
-        batch, value, "measurement_type", path, measurement_types
-    );
+    require_enum(batch, value, "measurement_type", path, measurement_types);
     require_number_range(
-        batch, value, "value", path, 0.0,
-        std::numeric_limits<double>::max()
+        batch, value, "value", path, 0.0, std::numeric_limits<double>::max()
     );
     require_enum(batch, value, "unit", path, measurement_units);
     if (value.contains("qualifier")) {
@@ -1216,10 +1440,9 @@ void validate_create_financial(
 ) {
     check_keys(
         batch, value, path,
-        { "work_id", "fact_type", "amount_min", "amount_max",
-          "currency_code", "value_year", "is_estimate", "confidence" },
-        { "work_id", "fact_type", "amount_min", "currency_code",
-          "is_estimate" }
+        { "work_id", "fact_type", "amount_min", "amount_max", "currency_code",
+          "value_year", "is_estimate", "confidence" },
+        { "work_id", "fact_type", "amount_min", "currency_code", "is_estimate" }
     );
     if (!value.is_object()) {
         return;
@@ -1244,8 +1467,7 @@ void validate_create_financial(
             < value["amount_min"].get<std::int64_t>()) {
         add_issue(
             batch, "invalid_range", path + "/amount_max",
-            "amount_max must not be less than amount_min",
-            &value["amount_max"]
+            "amount_max must not be less than amount_min", &value["amount_max"]
         );
     }
     require_nonempty_string(batch, value, "currency_code", path);
@@ -1258,14 +1480,13 @@ void validate_create_financial(
                })) {
             add_issue(
                 batch, "invalid_currency_code", path + "/currency_code",
-                "currency_code must contain exactly three uppercase letters",
+                "currency_code must contain exactly three uppercase "
+                "letters",
                 &value["currency_code"]
             );
         }
     }
-    require_integer_range(
-        batch, value, "value_year", path, -9999, 9999
-    );
+    require_integer_range(batch, value, "value_year", path, -9999, 9999);
     require_kind(batch, value, "is_estimate", path, value_kind::boolean);
     require_number_range(batch, value, "confidence", path, 0.0, 1.0);
 }
@@ -1312,8 +1533,7 @@ void validate_evidence_list(
         } else if (!(reference.is_number_integer()
                      || reference.is_number_unsigned())) {
             add_issue(
-                batch, "type_mismatch",
-                indexed_path(path + "/evidence", index),
+                batch, "type_mismatch", indexed_path(path + "/evidence", index),
                 "evidence reference must be a positive integer or local_id",
                 &reference
             );
@@ -1355,17 +1575,13 @@ void validate_create_work_concept(
     validate_local_id(batch, value, path, locals, "work_concept");
     validate_entity_reference_shape(batch, value, "work_id", path);
     validate_entity_reference_shape(batch, value, "concept_id", path);
-    require_enum(
-        batch, value, "relation_type", path, work_concept_types
-    );
+    require_enum(batch, value, "relation_type", path, work_concept_types);
     require_integer_range(batch, value, "centrality", path, 1, 100);
     require_enum(
         batch, value, "centrality_scale", path, reviewed_centrality_scales
     );
     if (value.contains("historical_role")) {
-        require_enum(
-            batch, value, "historical_role", path, historical_roles
-        );
+        require_enum(batch, value, "historical_role", path, historical_roles);
     }
     require_number_range(batch, value, "confidence", path, 0.0, 1.0);
     validate_evidence_list(batch, value, path);
@@ -1378,8 +1594,8 @@ void validate_create_concept_relation(
     check_keys(
         batch, value, path,
         { "local_id", "subject_concept_id", "relation_type",
-          "object_concept_id", "strength",
-          "from_year", "to_year", "region_code", "confidence", "evidence" },
+          "object_concept_id", "strength", "from_year", "to_year",
+          "region_code", "confidence", "evidence" },
         { "local_id", "subject_concept_id", "relation_type",
           "object_concept_id", "evidence" }
     );
@@ -1387,15 +1603,9 @@ void validate_create_concept_relation(
         return;
     }
     validate_local_id(batch, value, path, locals, "concept_relation");
-    validate_entity_reference_shape(
-        batch, value, "subject_concept_id", path
-    );
-    validate_entity_reference_shape(
-        batch, value, "object_concept_id", path
-    );
-    require_enum(
-        batch, value, "relation_type", path, concept_relation_types
-    );
+    validate_entity_reference_shape(batch, value, "subject_concept_id", path);
+    validate_entity_reference_shape(batch, value, "object_concept_id", path);
+    require_enum(batch, value, "relation_type", path, concept_relation_types);
     require_integer_range(batch, value, "strength", path, 1, 100);
     require_integer_range(batch, value, "from_year", path, -9999, 9999);
     require_integer_range(batch, value, "to_year", path, -9999, 9999);
@@ -1422,11 +1632,11 @@ void validate_create_parent_guide(
     check_keys(
         batch, value, path,
         { "local_id", "work_id", "concept_id", "category", "intensity",
-          "explicitness", "frequency", "centrality", "realism",
-          "spoiler_level", "confidence", "evidence" },
+          "explicitness", "frequency", "centrality", "realism", "spoiler_level",
+          "confidence", "evidence" },
         { "local_id", "work_id", "concept_id", "category", "intensity",
-          "explicitness", "frequency", "centrality", "realism",
-          "spoiler_level", "evidence" }
+          "explicitness", "frequency", "centrality", "realism", "spoiler_level",
+          "evidence" }
     );
     if (!value.is_object()) {
         return;
@@ -1435,9 +1645,8 @@ void validate_create_parent_guide(
     validate_entity_reference_shape(batch, value, "work_id", path);
     validate_entity_reference_shape(batch, value, "concept_id", path);
     require_enum(batch, value, "category", path, guide_categories);
-    for (const auto& key : {
-             "intensity", "explicitness", "frequency", "centrality",
-             "realism" }) {
+    for (const auto& key : { "intensity", "explicitness", "frequency",
+                             "centrality", "realism" }) {
         require_integer_range(batch, value, key, path, 1, 5);
     }
     require_enum(batch, value, "spoiler_level", path, spoiler_levels);
@@ -1445,9 +1654,8 @@ void validate_create_parent_guide(
     validate_evidence_list(batch, value, path);
 }
 
-using record_validator = void (*)(
-    parsed_batch&, const json&, const std::string&
-);
+using record_validator
+    = void (*)(parsed_batch&, const json&, const std::string&);
 
 template <typename Validator>
 void validate_array(
@@ -1461,8 +1669,8 @@ void validate_array(
     const std::string path = parent_path + "/" + pointer_escape(key);
     if (!found->is_array()) {
         add_issue(
-            batch, "type_mismatch", path, "operation collection must be an array",
-            &*found
+            batch, "type_mismatch", path,
+            "operation collection must be an array", &*found
         );
         return;
     }
@@ -1476,13 +1684,13 @@ void validate_update_record(
     const std::string_view family,
     const std::map<std::string, value_kind, std::less<>>& mutable_fields,
     const std::set<std::string, std::less<>>& required_fields,
-    const std::map<std::string, std::set<std::string, std::less<>>,
-                   std::less<>>& enum_fields,
+    const std::map<
+        std::string, std::set<std::string, std::less<>>, std::less<>>&
+        enum_fields,
     const bool allow_empty = false, const bool integer_id = false
 ) {
     check_keys(
-        batch, value, path, { "id", "set", "unset" },
-        { "id", "set", "unset" }
+        batch, value, path, { "id", "set", "unset" }, { "id", "set", "unset" }
     );
     if (!value.is_object()) {
         return;
@@ -1539,12 +1747,11 @@ void validate_update_record(
                 );
             }
             if (field == "slug" && field_value.is_string()
-                && !valid_slug(
-                    field_value.get_ref<const std::string&>()
-                )) {
+                && !valid_slug(field_value.get_ref<const std::string&>())) {
                 add_issue(
                     batch, "invalid_slug", field_path,
-                    "slug must contain lowercase alphanumeric dash-separated tokens",
+                    "slug must contain lowercase alphanumeric "
+                    "dash-separated tokens",
                     &field_value
                 );
             }
@@ -1560,9 +1767,8 @@ void validate_update_record(
             }
             if (field == "production_info_json" && field_value.is_string()) {
                 try {
-                    const json parsed = json::parse(
-                        field_value.get<std::string>()
-                    );
+                    const json parsed
+                        = json::parse(field_value.get<std::string>());
                     static_cast<void>(parsed);
                 } catch (const json::exception&) {
                     add_issue(
@@ -1574,7 +1780,9 @@ void validate_update_record(
             }
             const auto enum_rule = enum_fields.find(field);
             if (enum_rule != enum_fields.end() && field_value.is_string()
-                && !enum_rule->second.contains(field_value.get<std::string>())) {
+                && !enum_rule->second.contains(
+                    field_value.get<std::string>()
+                )) {
                 add_issue(
                     batch, "unknown_enum", field_path,
                     "field contains an unknown enum value", &field_value
@@ -1587,8 +1795,7 @@ void validate_update_record(
     if (unset != value.end() && unset->is_array()) {
         for (std::size_t index = 0; index < unset->size(); ++index) {
             const auto& field = (*unset)[index];
-            const std::string field_path
-                = indexed_path(path + "/unset", index);
+            const std::string field_path = indexed_path(path + "/unset", index);
             if (!field.is_string()) {
                 add_issue(
                     batch, "type_mismatch", field_path,
@@ -1617,7 +1824,8 @@ void validate_update_record(
             if (set_names.contains(name)) {
                 add_issue(
                     batch, "set_unset_conflict", field_path,
-                    "field cannot be set and unset in the same operation", &field
+                    "field cannot be set and unset in the same operation",
+                    &field
                 );
             }
         }
@@ -1655,8 +1863,7 @@ const std::map<std::string, value_kind, std::less<>> concept_mutable {
     { "concept_type", value_kind::string },
     { "slug", value_kind::string },
 };
-const std::map<std::string, value_kind, std::less<>>
-    manifestation_mutable {
+const std::map<std::string, value_kind, std::less<>> manifestation_mutable {
         { "work_id", value_kind::string },
         { "manifestation_type", value_kind::string },
         { "release_year", value_kind::integer },
@@ -1683,38 +1890,30 @@ const std::map<std::string, value_kind, std::less<>> work_concept_mutable {
     { "confidence", value_kind::number },
 };
 
-const std::map<
-    std::string, std::set<std::string, std::less<>>, std::less<>>
-    agent_update_enums {
-    };
-const std::map<
-    std::string, std::set<std::string, std::less<>>, std::less<>>
+const std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
+    agent_update_enums {};
+const std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
     agent_merge_enums {
         { "agent_type", agent_types },
     };
-const std::map<
-    std::string, std::set<std::string, std::less<>>, std::less<>>
+const std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
     work_update_enums {
         { "medium", media },
         { "date_precision", date_precisions },
     };
-const std::map<
-    std::string, std::set<std::string, std::less<>>, std::less<>>
+const std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
     concept_update_enums {
         { "concept_type", concept_types },
     };
-const std::map<
-    std::string, std::set<std::string, std::less<>>, std::less<>>
+const std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
     manifestation_update_enums {
         { "manifestation_type", manifestation_types },
     };
-const std::map<
-    std::string, std::set<std::string, std::less<>>, std::less<>>
+const std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
     source_update_enums {
         { "source_type", source_types },
     };
-const std::map<
-    std::string, std::set<std::string, std::less<>>, std::less<>>
+const std::map<std::string, std::set<std::string, std::less<>>, std::less<>>
     work_concept_update_enums {
         { "centrality_scale", reviewed_centrality_scales },
         { "historical_role", historical_roles },
@@ -1727,11 +1926,19 @@ void validate_delete_object(
     if (found == update.end()) {
         return;
     }
-    const std::set<std::string, std::less<>> tables {
-        "names", "external_ids", "credits", "measurements",
-        "financial_facts", "evidence", "work_concepts", "concept_relations",
-        "parent_guide_assertions", "ingest_issues"
-    };
+    const std::set<std::string, std::less<>> tables { "names",
+                                                      "external_ids",
+                                                      "credits",
+                                                      "work_memberships",
+                                                      "agent_relations",
+                                                      "events",
+                                                      "measurements",
+                                                      "financial_facts",
+                                                      "evidence",
+                                                      "work_concepts",
+                                                      "concept_relations",
+                                                      "parent_guide_assertions",
+                                                      "ingest_issues" };
     check_keys(batch, *found, path + "/delete", tables);
     if (!found->is_object()) {
         return;
@@ -1741,8 +1948,7 @@ void validate_delete_object(
         if (rows == found->end()) {
             continue;
         }
-        const std::string rows_path
-            = path + "/delete/" + pointer_escape(table);
+        const std::string rows_path = path + "/delete/" + pointer_escape(table);
         if (!rows->is_array()) {
             add_issue(
                 batch, "type_mismatch", rows_path,
@@ -1763,19 +1969,16 @@ void validate_delete_object(
                 if (!value.is_object()) {
                     continue;
                 }
-                require_nonempty_string(
-                    batch, value, "batch_id", value_path
-                );
+                require_nonempty_string(batch, value, "batch_id", value_path);
                 require_nonempty_string(batch, value, "code", value_path);
-                require_nonempty_string(
-                    batch, value, "json_path", value_path
-                );
+                require_nonempty_string(batch, value, "json_path", value_path);
                 if (const auto batch_id = value.find("batch_id");
                     batch_id != value.end() && batch_id->is_string()
-                    && !valid_batch_id(batch_id->get_ref<const std::string&>())) {
+                    && !valid_batch_id(
+                        batch_id->get_ref<const std::string&>()
+                    )) {
                     add_issue(
-                        batch, "invalid_batch_id",
-                        value_path + "/batch_id",
+                        batch, "invalid_batch_id", value_path + "/batch_id",
                         "issue batch_id must be a stable identifier", &*batch_id
                     );
                 }
@@ -1838,8 +2041,9 @@ void validate_merge_record(
     const std::string_view family,
     const std::map<std::string, value_kind, std::less<>>& mutable_fields,
     const std::set<std::string, std::less<>>& required_fields,
-    const std::map<std::string, std::set<std::string, std::less<>>,
-                   std::less<>>& enum_fields,
+    const std::map<
+        std::string, std::set<std::string, std::less<>>, std::less<>>&
+        enum_fields,
     std::map<std::string, std::string, std::less<>>& merged_entities
 ) {
     check_keys(
@@ -1863,9 +2067,8 @@ void validate_merge_record(
                 "target does not identify the required entity family", &*target
             );
         }
-        const auto [position, inserted] = merged_entities.emplace(
-            target_id, path
-        );
+        const auto [position, inserted]
+            = merged_entities.emplace(target_id, path);
         if (!inserted) {
             add_issue(
                 batch, "conflicting_merge", path + "/target",
@@ -1913,9 +2116,8 @@ void validate_merge_record(
                     "merge member occurs more than once", &member
                 );
             }
-            const auto [position, inserted] = merged_entities.emplace(
-                member_id, path
-            );
+            const auto [position, inserted]
+                = merged_entities.emplace(member_id, path);
             if (!inserted) {
                 add_issue(
                     batch, "conflicting_merge", member_path,
@@ -1949,20 +2151,16 @@ void validate_document_shape(parsed_batch& batch) {
         { "format", "batch_id", "create", "update", "merge" },
         { "format", "batch_id", "create", "update", "merge" }
     );
-    require_kind(
-        batch, batch.document, "format", "", value_kind::string
-    );
+    require_kind(batch, batch.document, "format", "", value_kind::string);
     if (batch.document.contains("format")
         && batch.document["format"].is_string()
-        && batch.document["format"] != "arachne_batch_v2") {
+        && batch.document["format"] != "arachne_batch") {
         add_issue(
-            batch, "unsupported_format", "/format",
-            "format must be arachne_batch_v2", &batch.document["format"]
+            batch, "unknown_format", "/format", "format must be arachne_batch",
+            &batch.document["format"]
         );
     }
-    require_kind(
-        batch, batch.document, "batch_id", "", value_kind::string
-    );
+    require_kind(batch, batch.document, "batch_id", "", value_kind::string);
     if (batch.document.contains("batch_id")
         && batch.document["batch_id"].is_string()) {
         batch.batch_id = batch.document["batch_id"].get<std::string>();
@@ -1972,15 +2170,14 @@ void validate_document_shape(parsed_batch& batch) {
         if (!valid_batch_id(batch.batch_id)) {
             add_issue(
                 batch, "invalid_batch_id", "/batch_id",
-                "batch_id must contain 1-128 letters, digits, dot, dash, or underscore",
+                "batch_id must contain 1-128 letters, digits, dot, dash, "
+                "or underscore",
                 &batch.document["batch_id"]
             );
         }
     }
     for (const auto& section : { "create", "update", "merge" }) {
-        require_kind(
-            batch, batch.document, section, "", value_kind::object
-        );
+        require_kind(batch, batch.document, section, "", value_kind::object);
     }
     if (!(batch.document.contains("create")
           && batch.document["create"].is_object()
@@ -1993,9 +2190,22 @@ void validate_document_shape(parsed_batch& batch) {
 
     auto& create = batch.document["create"];
     const std::set<std::string, std::less<>> create_keys {
-        "agents", "works", "concepts", "manifestations", "names",
-        "external_ids", "sources", "evidence", "credits", "measurements",
-        "financial_facts", "work_concepts", "concept_relations",
+        "agents",
+        "works",
+        "concepts",
+        "manifestations",
+        "work_memberships",
+        "agent_relations",
+        "events",
+        "names",
+        "external_ids",
+        "sources",
+        "evidence",
+        "credits",
+        "measurements",
+        "financial_facts",
+        "work_concepts",
+        "concept_relations",
         "parent_guide_assertions"
     };
     check_keys(batch, create, "/create", create_keys);
@@ -2024,10 +2234,18 @@ void validate_document_shape(parsed_batch& batch) {
             parsed_batch& target, const json& value, const std::string& path
         ) { validate_create_manifestation(target, value, path, locals); }
     );
+    validate_array(
+        batch, create, "work_memberships", "/create",
+        validate_create_work_membership
+    );
+    validate_array(
+        batch, create, "agent_relations", "/create",
+        validate_create_agent_relation
+    );
+    validate_array(batch, create, "events", "/create", validate_create_event);
     validate_array(batch, create, "names", "/create", validate_create_name);
     validate_array(
-        batch, create, "external_ids", "/create",
-        validate_create_external_id
+        batch, create, "external_ids", "/create", validate_create_external_id
     );
     validate_array(
         batch, create, "sources", "/create",
@@ -2041,16 +2259,12 @@ void validate_document_shape(parsed_batch& batch) {
             parsed_batch& target, const json& value, const std::string& path
         ) { validate_create_evidence(target, value, path, locals); }
     );
+    validate_array(batch, create, "credits", "/create", validate_create_credit);
     validate_array(
-        batch, create, "credits", "/create", validate_create_credit
+        batch, create, "measurements", "/create", validate_create_measurement
     );
     validate_array(
-        batch, create, "measurements", "/create",
-        validate_create_measurement
-    );
-    validate_array(
-        batch, create, "financial_facts", "/create",
-        validate_create_financial
+        batch, create, "financial_facts", "/create", validate_create_financial
     );
     validate_array(
         batch, create, "work_concepts", "/create",
@@ -2073,8 +2287,8 @@ void validate_document_shape(parsed_batch& batch) {
 
     auto& update = batch.document["update"];
     const std::set<std::string, std::less<>> update_keys {
-        "agents", "works", "concepts", "manifestations", "sources",
-        "work_concepts", "delete"
+        "agents",  "works",         "concepts", "manifestations",
+        "sources", "work_concepts", "delete"
     };
     check_keys(batch, update, "/update", update_keys);
     validate_array(
@@ -2108,8 +2322,7 @@ void validate_document_shape(parsed_batch& batch) {
         batch, update, "manifestations", "/update",
         [](parsed_batch& target, const json& value, const std::string& path) {
             validate_update_record(
-                target, value, path, "manifestation",
-                manifestation_mutable,
+                target, value, path, "manifestation", manifestation_mutable,
                 { "work_id", "manifestation_type", "label" },
                 manifestation_update_enums
             );
@@ -2129,8 +2342,8 @@ void validate_document_shape(parsed_batch& batch) {
         [](parsed_batch& target, const json& value, const std::string& path) {
             validate_update_record(
                 target, value, path, "work_concept", work_concept_mutable,
-                { "centrality", "centrality_scale" },
-                work_concept_update_enums, false, true
+                { "centrality", "centrality_scale" }, work_concept_update_enums,
+                false, true
             );
             if (!value.is_object() || !value.contains("set")
                 || !value["set"].is_object()) {
@@ -2150,8 +2363,8 @@ void validate_document_shape(parsed_batch& batch) {
         }
     );
     validate_delete_object(batch, update, "/update");
-    for (const auto collection : {
-             "agents", "works", "concepts", "manifestations", "sources",
+    for (const auto collection :
+         { "agents", "works", "concepts", "manifestations", "sources",
              "work_concepts" }) {
         const auto rows = update.find(collection);
         if (rows == update.end() || !rows->is_array()) {
@@ -2170,11 +2383,10 @@ void validate_document_shape(parsed_batch& batch) {
             if (!targets.emplace(identity).second) {
                 add_issue(
                     batch, "duplicate_update_target",
-                    indexed_path(
-                        "/update/" + std::string(collection), index
-                    )
+                    indexed_path("/update/" + std::string(collection), index)
                         + "/id",
-                    "a canonical record may be updated at most once per batch",
+                    "a canonical record may be updated at most once per "
+                    "batch",
                     &*id
                 );
             }
@@ -2219,11 +2431,12 @@ void validate_document_shape(parsed_batch& batch) {
         }
     );
 
-    for (const auto& family : {
-             std::pair { "agents", std::string_view("agent") },
+    for (const auto& family :
+         { std::pair { "agents", std::string_view("agent") },
              std::pair { "works", std::string_view("work") },
              std::pair { "concepts", std::string_view("concept") },
-             std::pair { "manifestations", std::string_view("manifestation") } }) {
+           std::pair { "manifestations",
+                       std::string_view("manifestation") } }) {
         const auto updates = update.find(family.first);
         if (updates == update.end() || !updates->is_array()) {
             continue;
@@ -2239,9 +2452,7 @@ void validate_document_shape(parsed_batch& batch) {
             if (conflict != merged_entities.end()) {
                 add_issue(
                     batch, "conflicting_merge_update",
-                    indexed_path(
-                        "/update/" + std::string(family.first), index
-                    )
+                    indexed_path("/update/" + std::string(family.first), index)
                         + "/id",
                     "entity is also modified by " + conflict->second,
                     &operation["id"]
@@ -2252,8 +2463,7 @@ void validate_document_shape(parsed_batch& batch) {
 }
 
 [[nodiscard]] json parse_strict_json(const std::string& bytes) {
-    if (bytes.size() >= 3U
-        && static_cast<unsigned char>(bytes[0]) == 0xEFU
+    if (bytes.size() >= 3U && static_cast<unsigned char>(bytes[0]) == 0xEFU
         && static_cast<unsigned char>(bytes[1]) == 0xBBU
         && static_cast<unsigned char>(bytes[2]) == 0xBFU) {
         throw inbox_error("UTF-8 BOM is not allowed");
@@ -2302,12 +2512,10 @@ void validate_document_shape(parsed_batch& batch) {
     return query.step();
 }
 
-[[nodiscard]] std::string entity_family(
-    sqlite3* const database_value, const std::string& id
-) {
+[[nodiscard]] std::string
+entity_family(sqlite3* const database_value, const std::string& id) {
     statement query(
-        database_value,
-        "SELECT entity_type FROM entities WHERE id = ?"
+        database_value, "SELECT entity_type FROM entities WHERE id = ?"
     );
     query.bind(1, id);
     if (!query.step()) {
@@ -2325,8 +2533,8 @@ void validate_document_shape(parsed_batch& batch) {
 }
 
 void prevalidate_entity_reference(
-    parsed_batch& batch, sqlite3* const database_value,
-    const json& record, const std::string& key, const std::string& path,
+    parsed_batch& batch, sqlite3* const database_value, const json& record,
+    const std::string& key, const std::string& path,
     const std::string_view expected_family = {}
 ) {
     const auto found = record.find(key);
@@ -2361,17 +2569,37 @@ void prevalidate_entity_reference(
     }
     if (!expected_family.empty() && actual_family != expected_family) {
         add_issue(
-            batch, "wrong_reference_family",
-            path + "/" + pointer_escape(key),
-            "reference must identify a " + std::string(expected_family),
-            &*found
+            batch, "wrong_reference_family", path + "/" + pointer_escape(key),
+            "reference must identify a " + std::string(expected_family), &*found
+        );
+    }
+}
+
+void prevalidate_work_or_manifestation_reference(
+    parsed_batch& batch, sqlite3* const database_value, const json& record,
+    const std::string& key, const std::string& path
+) {
+    prevalidate_entity_reference(batch, database_value, record, key, path);
+    const auto found = record.find(key);
+    if (found == record.end() || !found->is_string()) {
+        return;
+    }
+    const std::string& reference = found->get_ref<const std::string&>();
+    const auto local = batch.entity_local_ids.find(reference);
+    const std::string family = local == batch.entity_local_ids.end()
+        ? entity_family(database_value, reference)
+        : local->second;
+    if (!family.empty() && family != "work" && family != "manifestation") {
+        add_issue(
+            batch, "wrong_reference_family", path + "/" + pointer_escape(key),
+            "reference must identify a work or manifestation", &*found
         );
     }
 }
 
 void prevalidate_integer_or_local_reference(
-    parsed_batch& batch, sqlite3* const database_value,
-    const json& record, const std::string& key, const std::string& path,
+    parsed_batch& batch, sqlite3* const database_value, const json& record,
+    const std::string& key, const std::string& path,
     const std::string_view local_family, const std::string_view table
 ) {
     const auto found = record.find(key);
@@ -2379,7 +2607,8 @@ void prevalidate_integer_or_local_reference(
         return;
     }
     if (found->is_string()) {
-        const auto local = batch.entity_local_ids.find(found->get<std::string>());
+        const auto local
+            = batch.entity_local_ids.find(found->get<std::string>());
         if (local == batch.entity_local_ids.end()) {
             add_issue(
                 batch, "unknown_local_reference",
@@ -2393,8 +2622,10 @@ void prevalidate_integer_or_local_reference(
                 "local_id has the wrong record family", &*found
             );
         }
-    } else if ((found->is_number_integer() || found->is_number_unsigned())
-               && !row_exists(database_value, table, "id", *found)) {
+    } else if (
+        (found->is_number_integer() || found->is_number_unsigned())
+        && !row_exists(database_value, table, "id", *found)
+    ) {
         add_issue(
             batch, "unknown_reference", path + "/" + pointer_escape(key),
             "canonical database row does not exist", &*found
@@ -2405,9 +2636,8 @@ void prevalidate_integer_or_local_reference(
 void prevalidate_semantics(parsed_batch& batch, database& product) {
     sqlite3* const sql = product.native();
     const auto& create = batch.document.at("create");
-    auto walk = [&batch, &create](
-                    const std::string& key, const auto& callback
-                ) {
+    auto walk = [&batch,
+                 &create](const std::string& key, const auto& callback) {
         const auto found = create.find(key);
         if (found == create.end() || !found->is_array()) {
             return;
@@ -2417,8 +2647,27 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
         }
     };
     walk("manifestations", [&](const json& row, const std::string& path) {
+        prevalidate_entity_reference(batch, sql, row, "work_id", path, "work");
+    });
+    walk("work_memberships", [&](const json& row, const std::string& path) {
         prevalidate_entity_reference(
-            batch, sql, row, "work_id", path, "work"
+            batch, sql, row, "child_work_id", path, "work"
+        );
+        prevalidate_entity_reference(
+            batch, sql, row, "parent_work_id", path, "work"
+        );
+    });
+    walk("agent_relations", [&](const json& row, const std::string& path) {
+        prevalidate_entity_reference(
+            batch, sql, row, "subject_agent_id", path, "agent"
+        );
+        prevalidate_entity_reference(
+            batch, sql, row, "object_agent_id", path, "agent"
+        );
+    });
+    walk("events", [&](const json& row, const std::string& path) {
+        prevalidate_work_or_manifestation_reference(
+            batch, sql, row, "entity_id", path
         );
     });
     walk("names", [&](const json& row, const std::string& path) {
@@ -2433,8 +2682,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
         );
     });
     walk("credits", [&](const json& row, const std::string& path) {
-        prevalidate_entity_reference(
-            batch, sql, row, "work_id", path, "work"
+        prevalidate_work_or_manifestation_reference(
+            batch, sql, row, "entity_id", path
         );
         prevalidate_entity_reference(
             batch, sql, row, "agent_id", path, "agent"
@@ -2444,9 +2693,7 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
         prevalidate_entity_reference(batch, sql, row, "entity_id", path);
     });
     walk("financial_facts", [&](const json& row, const std::string& path) {
-        prevalidate_entity_reference(
-            batch, sql, row, "work_id", path, "work"
-        );
+        prevalidate_entity_reference(batch, sql, row, "work_id", path, "work");
     });
     auto assertion_evidence = [&](const json& row, const std::string& path) {
         const auto values = row.find("evidence");
@@ -2463,9 +2710,7 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
         }
     };
     walk("work_concepts", [&](const json& row, const std::string& path) {
-        prevalidate_entity_reference(
-            batch, sql, row, "work_id", path, "work"
-        );
+        prevalidate_entity_reference(batch, sql, row, "work_id", path, "work");
         prevalidate_entity_reference(
             batch, sql, row, "concept_id", path, "concept"
         );
@@ -2494,9 +2739,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
     );
 
     const auto& update = batch.document.at("update");
-    for (const auto& [collection, family] : {
-             std::pair { "agents", "agent" },
-             std::pair { "works", "work" },
+    for (const auto& [collection, family] :
+         { std::pair { "agents", "agent" }, std::pair { "works", "work" },
              std::pair { "concepts", "concept" },
              std::pair { "manifestations", "manifestation" } }) {
         const auto rows = update.find(collection);
@@ -2515,7 +2759,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                     batch, "unknown_canonical_id",
                     indexed_path("/update/" + std::string(collection), index)
                         + "/id",
-                    "canonical entity does not exist in the required family",
+                    "canonical entity does not exist in the required "
+                    "family",
                     &row["id"]
                 );
             }
@@ -2524,9 +2769,7 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                 && row["set"].contains("work_id")) {
                 prevalidate_entity_reference(
                     batch, sql, row["set"], "work_id",
-                    indexed_path(
-                        "/update/" + std::string(collection), index
-                    )
+                    indexed_path("/update/" + std::string(collection), index)
                         + "/set",
                     "work"
                 );
@@ -2548,13 +2791,16 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                 );
             }
             if (!row.is_object() || !row.contains("id")
-                || !(row["id"].is_number_integer()
-                     || row["id"].is_number_unsigned())) {
+                || !(
+                    row["id"].is_number_integer()
+                    || row["id"].is_number_unsigned()
+                )) {
                 continue;
             }
             statement identity(
                 sql,
-                "SELECT bibliography_text,url,doi,isbn FROM sources WHERE id=?"
+                "SELECT bibliography_text,url,doi,isbn FROM sources WHERE "
+                "id=?"
             );
             identity.bind_json_value(1, row["id"]);
             if (!identity.step()) {
@@ -2581,14 +2827,14 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                     }
                 }
             }
-            if (std::ranges::none_of(
-                    present,
-                    [](const auto& item) { return item.second; }
-                )) {
+            if (std::ranges::none_of(present, [](const auto& item) {
+                    return item.second;
+                })) {
                 add_issue(
                     batch, "source_identity_required",
                     indexed_path("/update/sources", index),
-                    "source update would remove every strong or fallback identity",
+                    "source update would remove every strong or fallback "
+                    "identity",
                     &row
                 );
             }
@@ -2601,8 +2847,10 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
              ++index) {
             const auto& row = (*work_concept_updates)[index];
             if (!row.is_object() || !row.contains("id")
-                || !(row["id"].is_number_integer()
-                     || row["id"].is_number_unsigned())) {
+                || !(
+                    row["id"].is_number_integer()
+                    || row["id"].is_number_unsigned()
+                )) {
                 continue;
             }
             const std::string path
@@ -2625,7 +2873,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                 add_issue(
                     batch, "centrality_scale_required",
                     path + "/set/centrality_scale",
-                    "changing centrality on an unreviewed legacy assignment "
+                    "changing centrality on an unreviewed legacy "
+                    "assignment "
                     "also requires binary, ordinal, or graded scale",
                     &*set
                 );
@@ -2656,9 +2905,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                     issue.bind_json_value(1, value.at("batch_id"));
                     issue.bind_json_value(2, value.at("code"));
                     issue.bind_json_value(3, value.at("json_path"));
-                    const std::string value_path = indexed_path(
-                        "/update/delete/ingest_issues", index
-                    );
+                    const std::string value_path
+                        = indexed_path("/update/delete/ingest_issues", index);
                     if (!issue.step()) {
                         add_issue(
                             batch, "unknown_delete_row", value_path,
@@ -2696,8 +2944,7 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                     deleted_evidence.emplace(value.get<std::int64_t>());
                 }
             }
-            for (const auto collection : {
-                     "work_concepts", "concept_relations",
+            for (const auto collection : { "work_concepts", "concept_relations",
                      "parent_guide_assertions" }) {
                 const auto created = create.find(collection);
                 if (created == create.end() || !created->is_array()) {
@@ -2724,14 +2971,13 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                                 batch, "deleted_evidence_reference",
                                 indexed_path(
                                     indexed_path(
-                                        "/create/"
-                                            + std::string(collection),
+                                        "/create/" + std::string(collection),
                                         index
-                                    )
-                                        + "/evidence",
+                                    ) + "/evidence",
                                     evidence_index
                                 ),
-                                "new assertion references evidence scheduled "
+                                "new assertion references evidence "
+                                "scheduled "
                                 "for deletion in the same batch",
                                 &reference
                             );
@@ -2753,22 +2999,21 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                             batch, "assertion_evidence_required",
                             indexed_path(
                                 "/create/" + std::string(collection), index
-                            )
-                                + "/evidence",
-                            "evidence deletion would leave the newly created "
+                            ) + "/evidence",
+                            "evidence deletion would leave the newly "
+                            "created "
                             "assertion without evidence",
                             &*evidence_values
                         );
                     }
                 }
             }
-            for (const auto& [assertion_table, link_table] : {
-                     std::pair {
-                         "work_concepts", "work_concept_evidence" },
-                     std::pair {
-                         "concept_relations", "concept_relation_evidence" },
-                     std::pair {
-                         "parent_guide_assertions", "parent_guide_evidence" } }) {
+            for (const auto& [assertion_table, link_table] :
+                 { std::pair { "work_concepts", "work_concept_evidence" },
+                   std::pair { "concept_relations",
+                               "concept_relation_evidence" },
+                   std::pair { "parent_guide_assertions",
+                               "parent_guide_evidence" } }) {
                 std::set<std::int64_t> deleted_assertions;
                 if (const auto values = deletes->find(assertion_table);
                     values != deletes->end() && values->is_array()) {
@@ -2819,8 +3064,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                                 + std::string(assertion_table) + "/"
                                 + std::to_string(assertion_id),
                             "evidence deletion would leave "
-                                + std::string(assertion_table)
-                                + " row " + std::to_string(assertion_id)
+                                + std::string(assertion_table) + " row "
+                                + std::to_string(assertion_id)
                                 + " without evidence",
                             &*evidence_rows
                         );
@@ -2831,9 +3076,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
     }
 
     const auto& merge = batch.document.at("merge");
-    for (const auto& [collection, family] : {
-             std::pair { "agents", "agent" },
-             std::pair { "works", "work" },
+    for (const auto& [collection, family] :
+         { std::pair { "agents", "agent" }, std::pair { "works", "work" },
              std::pair { "concepts", "concept" } }) {
         const auto rows = merge.find(collection);
         if (rows == merge.end() || !rows->is_array()) {
@@ -2849,7 +3093,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                     && entity_family(sql, id.get<std::string>()) != family) {
                     add_issue(
                         batch, "unknown_canonical_id", path,
-                        "merge entity does not exist in the required family",
+                        "merge entity does not exist in the required "
+                        "family",
                         &id
                     );
                 }
@@ -2869,8 +3114,7 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
                         indexed_path(
                             indexed_path(
                                 "/merge/" + std::string(collection), index
-                            )
-                                + "/members",
+                            ) + "/members",
                             member
                         )
                     );
@@ -2880,9 +3124,8 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
     }
 }
 
-[[nodiscard]] std::int64_t maximum_row_id(
-    sqlite3* const sql, const std::string_view table
-) {
+[[nodiscard]] std::int64_t
+maximum_row_id(sqlite3* const sql, const std::string_view table) {
     statement query(
         sql, "SELECT COALESCE(MAX(id), 0) FROM " + std::string(table)
     );
@@ -2892,17 +3135,14 @@ void prevalidate_semantics(parsed_batch& batch, database& product) {
     return query.integer(0);
 }
 
-[[nodiscard]] std::int64_t maximum_entity_suffix(
-    sqlite3* const sql, const std::string_view prefix
-) {
+[[nodiscard]] std::int64_t
+maximum_entity_suffix(sqlite3* const sql, const std::string_view prefix) {
     statement query(
         sql,
         "SELECT COALESCE(MAX(CAST(substr(id, ?) AS INTEGER)), 0) "
         "FROM entities WHERE id GLOB ?"
     );
-    query.bind(
-        1, static_cast<std::int64_t>(prefix.size() + 1U)
-    );
+    query.bind(1, static_cast<std::int64_t>(prefix.size() + 1U));
     query.bind(2, std::string(prefix) + "[0-9]*");
     if (!query.step()) {
         throw database_error("cannot read maximum canonical ID suffix");
@@ -2963,9 +3203,8 @@ initial_allocation_state(database& product) {
     };
 }
 
-[[nodiscard]] std::int64_t next_sequence(
-    std::int64_t& sequence, const std::string_view description
-) {
+[[nodiscard]] std::int64_t
+next_sequence(std::int64_t& sequence, const std::string_view description) {
     if (sequence == std::numeric_limits<std::int64_t>::max()) {
         throw database_error(
             std::string(description) + " ID sequence is exhausted"
@@ -2978,9 +3217,8 @@ void allocate_local_references(
     parsed_batch& batch, local_id_allocation_state& sequences
 ) {
     const auto& create = batch.document.at("create");
-    for (const auto& [collection, family] : {
-             std::pair { "agents", "agent" },
-             std::pair { "works", "work" },
+    for (const auto& [collection, family] :
+         { std::pair { "agents", "agent" }, std::pair { "works", "work" },
              std::pair { "concepts", "concept" },
              std::pair { "manifestations", "manifestation" } }) {
         const auto rows = create.find(collection);
@@ -3021,11 +3259,11 @@ void allocate_local_references(
             }
         }
     }
-    for (const auto& [collection, table] : {
-             std::pair { "work_concepts", "work_concepts" },
+    for (const auto& [collection, table] :
+         { std::pair { "work_concepts", "work_concepts" },
              std::pair { "concept_relations", "concept_relations" },
-             std::pair {
-                 "parent_guide_assertions", "parent_guide_assertions" } }) {
+           std::pair { "parent_guide_assertions",
+                       "parent_guide_assertions" } }) {
         const auto rows = create.find(collection);
         if (rows == create.end() || !rows->is_array()) {
             continue;
@@ -3043,9 +3281,8 @@ void allocate_local_references(
     }
 }
 
-[[nodiscard]] std::string resolve_entity(
-    const parsed_batch& batch, const json& value
-) {
+[[nodiscard]] std::string
+resolve_entity(const parsed_batch& batch, const json& value) {
     const std::string reference = value.get<std::string>();
     const auto local = batch.resolved_entity_ids.find(reference);
     return local == batch.resolved_entity_ids.end() ? reference : local->second;
@@ -3104,7 +3341,8 @@ void create_entities(parsed_batch& batch, sqlite3* const sql) {
             const std::string id = insert_entity(row, agent_type);
             statement insert(
                 sql,
-                "INSERT INTO agents(entity_id,agent_type,birth_year,death_year)"
+                "INSERT INTO "
+                "agents(entity_id,agent_type,birth_year,death_year)"
                 " VALUES(?,?,?,?)"
             );
             insert.bind(1, id);
@@ -3126,7 +3364,8 @@ void create_entities(parsed_batch& batch, sqlite3* const sql) {
                 sql,
                 "INSERT INTO works("
                 "entity_id,medium,year_start,year_end,date_precision,"
-                "date_start_text,date_end_text,date_qualifier,language_code,"
+                "date_start_text,date_end_text,date_qualifier,language_"
+                "code,"
                 "country_code,production_info_json)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?)"
             );
@@ -3189,9 +3428,7 @@ void create_entities(parsed_batch& batch, sqlite3* const sql) {
     }
 }
 
-void create_names_and_identifiers(
-    parsed_batch& batch, sqlite3* const sql
-) {
+void create_names_and_identifiers(parsed_batch& batch, sqlite3* const sql) {
     const auto& create = batch.document.at("create");
     if (const auto rows = create.find("names");
         rows != create.end() && rows->is_array()) {
@@ -3241,9 +3478,7 @@ void create_names_and_identifiers(
     }
 }
 
-void create_sources_and_evidence(
-    parsed_batch& batch, sqlite3* const sql
-) {
+void create_sources_and_evidence(parsed_batch& batch, sqlite3* const sql) {
     const auto& create = batch.document.at("create");
     if (const auto rows = create.find("sources");
         rows != create.end() && rows->is_array()) {
@@ -3258,7 +3493,8 @@ void create_sources_and_evidence(
             statement insert(
                 sql,
                 "INSERT INTO sources("
-                "id,source_type,title,bibliography_text,author_text,publisher,"
+                "id,source_type,title,bibliography_text,author_text,"
+                "publisher,"
                 "publication_date,url,doi,isbn,language_code)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?)"
             );
@@ -3311,6 +3547,73 @@ void create_sources_and_evidence(
 
 void create_facts(parsed_batch& batch, sqlite3* const sql) {
     const auto& create = batch.document.at("create");
+    if (const auto rows = create.find("work_memberships");
+        rows != create.end() && rows->is_array()) {
+        for (std::size_t index = 0; index < rows->size(); ++index) {
+            const auto& row = (*rows)[index];
+            set_application_context(
+                batch, indexed_path("/create/work_memberships", index), row
+            );
+            statement insert(
+                sql,
+                "INSERT INTO work_memberships("
+                "child_work_id,parent_work_id,membership_type,position,"
+                "position_text) VALUES(?,?,?,?,?)"
+            );
+            insert.bind(1, resolve_entity(batch, row.at("child_work_id")));
+            insert.bind(2, resolve_entity(batch, row.at("parent_work_id")));
+            insert.bind_json_value(3, row.at("membership_type"));
+            bind_optional(insert, 4, row, "position");
+            bind_optional(insert, 5, row, "position_text");
+            insert.execute();
+        }
+    }
+    if (const auto rows = create.find("agent_relations");
+        rows != create.end() && rows->is_array()) {
+        for (std::size_t index = 0; index < rows->size(); ++index) {
+            const auto& row = (*rows)[index];
+            set_application_context(
+                batch, indexed_path("/create/agent_relations", index), row
+            );
+            statement insert(
+                sql,
+                "INSERT INTO agent_relations("
+                "subject_agent_id,relation_type,object_agent_id,from_year,"
+                "to_year,period_text,role_text) VALUES(?,?,?,?,?,?,?)"
+            );
+            insert.bind(1, resolve_entity(batch, row.at("subject_agent_id")));
+            insert.bind_json_value(2, row.at("relation_type"));
+            insert.bind(3, resolve_entity(batch, row.at("object_agent_id")));
+            bind_optional(insert, 4, row, "from_year");
+            bind_optional(insert, 5, row, "to_year");
+            bind_optional(insert, 6, row, "period_text");
+            bind_optional(insert, 7, row, "role_text");
+            insert.execute();
+        }
+    }
+    if (const auto rows = create.find("events");
+        rows != create.end() && rows->is_array()) {
+        for (std::size_t index = 0; index < rows->size(); ++index) {
+            const auto& row = (*rows)[index];
+            set_application_context(
+                batch, indexed_path("/create/events", index), row
+            );
+            statement insert(
+                sql,
+                "INSERT INTO events("
+                "entity_id,event_type,year_start,year_end,date_text,"
+                "date_precision,place_text) VALUES(?,?,?,?,?,?,?)"
+            );
+            insert.bind(1, resolve_entity(batch, row.at("entity_id")));
+            insert.bind_json_value(2, row.at("event_type"));
+            bind_optional(insert, 3, row, "year_start");
+            bind_optional(insert, 4, row, "year_end");
+            bind_optional(insert, 5, row, "date_text");
+            bind_optional(insert, 6, row, "date_precision");
+            bind_optional(insert, 7, row, "place_text");
+            insert.execute();
+        }
+    }
     if (const auto rows = create.find("credits");
         rows != create.end() && rows->is_array()) {
         for (std::size_t index = 0; index < rows->size(); ++index) {
@@ -3321,10 +3624,11 @@ void create_facts(parsed_batch& batch, sqlite3* const sql) {
             statement insert(
                 sql,
                 "INSERT INTO credits("
-                "work_id,agent_id,role,credit_order,importance,credited_as)"
+                "entity_id,agent_id,role,credit_order,importance,credited_"
+                "as)"
                 " VALUES(?,?,?,?,?,?)"
             );
-            insert.bind(1, resolve_entity(batch, row.at("work_id")));
+            insert.bind(1, resolve_entity(batch, row.at("entity_id")));
             insert.bind(2, resolve_entity(batch, row.at("agent_id")));
             insert.bind_json_value(3, row.at("role"));
             bind_optional(insert, 4, row, "credit_order");
@@ -3386,9 +3690,8 @@ void create_facts(parsed_batch& batch, sqlite3* const sql) {
 }
 
 void attach_evidence(
-    const parsed_batch& batch, sqlite3* const sql,
-    const std::string_view table, const std::int64_t assertion_id,
-    const json& evidence
+    const parsed_batch& batch, sqlite3* const sql, const std::string_view table,
+    const std::int64_t assertion_id, const json& evidence
 ) {
     for (const auto& reference : evidence) {
         statement insert(
@@ -3398,8 +3701,7 @@ void attach_evidence(
         );
         insert.bind(1, assertion_id);
         insert.bind(
-            2,
-            resolve_row_reference(batch.evidence_local_ids, reference)
+            2, resolve_row_reference(batch.evidence_local_ids, reference)
         );
         insert.execute();
     }
@@ -3456,13 +3758,9 @@ void create_assertions(parsed_batch& batch, sqlite3* const sql) {
                 " VALUES(?,?,?,?,?,?,?,?,?)"
             );
             insert.bind(1, id);
-            insert.bind(
-                2, resolve_entity(batch, row.at("subject_concept_id"))
-            );
+            insert.bind(2, resolve_entity(batch, row.at("subject_concept_id")));
             insert.bind_json_value(3, row.at("relation_type"));
-            insert.bind(
-                4, resolve_entity(batch, row.at("object_concept_id"))
-            );
+            insert.bind(4, resolve_entity(batch, row.at("object_concept_id")));
             bind_optional(insert, 5, row, "strength");
             bind_optional(insert, 6, row, "from_year");
             bind_optional(insert, 7, row, "to_year");
@@ -3470,8 +3768,7 @@ void create_assertions(parsed_batch& batch, sqlite3* const sql) {
             bind_optional(insert, 9, row, "confidence");
             insert.execute();
             attach_evidence(
-                batch, sql, "concept_relation_evidence", id,
-                row.at("evidence")
+                batch, sql, "concept_relation_evidence", id, row.at("evidence")
             );
         }
     }
@@ -3480,8 +3777,8 @@ void create_assertions(parsed_batch& batch, sqlite3* const sql) {
         for (std::size_t index = 0; index < rows->size(); ++index) {
             const auto& row = (*rows)[index];
             set_application_context(
-                batch,
-                indexed_path("/create/parent_guide_assertions", index), row
+                batch, indexed_path("/create/parent_guide_assertions", index),
+                row
             );
             const std::int64_t id = batch.assertion_local_ids.at(
                 row.at("local_id").get<std::string>()
@@ -3566,10 +3863,7 @@ void apply_updates(parsed_batch& batch, sqlite3* const sql) {
             const auto& row = (*rows)[index];
             set_application_context(
                 batch,
-                indexed_path(
-                    "/update/" + std::string(collection), index
-                ),
-                row
+                indexed_path("/update/" + std::string(collection), index), row
             );
             update_row(sql, table, "entity_id", row);
             const std::string id = row.at("id").get<std::string>();
@@ -3616,12 +3910,14 @@ void apply_deletes(parsed_batch& batch, sqlite3* const sql) {
     if (deletes == update.end() || !deletes->is_object()) {
         return;
     }
-    // Assertions must be removed before evidence so their cascading evidence-link
-    // deletes do not look like attempts to orphan an assertion.
-    for (const std::string_view table_name : {
-             "names", "external_ids", "credits", "measurements",
-             "financial_facts", "work_concepts", "concept_relations",
-             "parent_guide_assertions", "evidence", "ingest_issues" }) {
+    // Assertions must be removed before evidence so their cascading
+    // evidence-link deletes do not look like attempts to orphan an
+    // assertion.
+    for (const std::string_view table_name :
+         { "names", "external_ids", "credits", "work_memberships",
+           "agent_relations", "events", "measurements", "financial_facts",
+           "work_concepts", "concept_relations", "parent_guide_assertions",
+           "evidence", "ingest_issues" }) {
         const auto found = deletes->find(table_name);
         if (found == deletes->end()) {
             continue;
@@ -3655,17 +3951,16 @@ void apply_deletes(parsed_batch& batch, sqlite3* const sql) {
                 remove.execute();
                 if (sqlite3_changes(sql) != 1) {
                     throw database_error(
-                        "ingest issue disappeared or reopened before deletion"
+                        "ingest issue disappeared or reopened before "
+                        "deletion"
                     );
                 }
             }
             continue;
         }
-        statement remove(
-            sql, "DELETE FROM " + table + " WHERE id=?"
-        );
-        for (std::size_t value_index = 0;
-             value_index < values.size(); ++value_index) {
+        statement remove(sql, "DELETE FROM " + table + " WHERE id=?");
+        for (std::size_t value_index = 0; value_index < values.size();
+             ++value_index) {
             const auto& value = values[value_index];
             set_application_context(
                 batch,
@@ -3687,9 +3982,7 @@ void apply_deletes(parsed_batch& batch, sqlite3* const sql) {
     }
 }
 
-[[nodiscard]] std::set<std::string, std::less<>> string_set(
-    const json& array
-) {
+[[nodiscard]] std::set<std::string, std::less<>> string_set(const json& array) {
     std::set<std::string, std::less<>> result;
     for (const auto& value : array) {
         result.emplace(value.get<std::string>());
@@ -3777,8 +4070,7 @@ void reject_preferred_name_conflict(
     std::set<std::string, std::less<>> preferred;
     auto inspect = [&](const std::string& id) {
         statement query(
-            sql,
-            "SELECT value FROM names WHERE entity_id=? AND is_preferred=1"
+            sql, "SELECT value FROM names WHERE entity_id=? AND is_preferred=1"
         );
         query.bind(1, id);
         while (query.step()) {
@@ -3871,11 +4163,10 @@ void merge_credits(
     const std::string& target, const std::string& member
 ) {
     const std::string other_column
-        = id_column == "work_id" ? "agent_id" : "work_id";
-    const std::string conflict
-        = "SELECT 1 FROM credits t JOIN credits m ON t." + std::string(id_column)
-        + "=? AND m." + std::string(id_column) + "=? AND t." + other_column
-        + "=m." + other_column
+        = id_column == "entity_id" ? "agent_id" : "entity_id";
+    const std::string conflict = "SELECT 1 FROM credits t JOIN credits m ON t."
+        + std::string(id_column) + "=? AND m." + std::string(id_column)
+        + "=? AND t." + other_column + "=m." + other_column
         + " AND t.role=m.role AND t.credit_order IS m.credit_order "
           "AND t.credited_as IS m.credited_as "
           "WHERE t.importance<>m.importance LIMIT 1";
@@ -3895,12 +4186,224 @@ void merge_credits(
     remove.bind(2, target);
     remove.execute();
     statement rewrite(
-        sql, "UPDATE credits SET " + std::string(id_column) + "=? WHERE "
+        sql,
+        "UPDATE credits SET " + std::string(id_column) + "=? WHERE "
             + std::string(id_column) + "=?"
     );
     rewrite.bind(1, target);
     rewrite.bind(2, member);
     rewrite.execute();
+}
+
+void merge_events(
+    sqlite3* const sql, const std::string& target, const std::string& member
+) {
+    statement remove(
+        sql,
+        "DELETE FROM events AS m WHERE m.entity_id=? AND EXISTS("
+        "SELECT 1 FROM events AS t WHERE t.entity_id=? "
+        "AND t.event_type=m.event_type AND t.year_start IS m.year_start "
+        "AND t.year_end IS m.year_end AND t.date_text IS m.date_text "
+        "AND t.date_precision IS m.date_precision "
+        "AND t.place_text IS m.place_text)"
+    );
+    remove.bind(1, member);
+    remove.bind(2, target);
+    remove.execute();
+    statement rewrite(sql, "UPDATE events SET entity_id=? WHERE entity_id=?");
+    rewrite.bind(1, target);
+    rewrite.bind(2, member);
+    rewrite.execute();
+}
+
+struct work_membership_row final {
+    std::int64_t id {};
+    std::string child;
+    std::string parent;
+    std::string type;
+    std::optional<std::int64_t> position;
+    std::optional<std::string> position_text;
+};
+
+void merge_work_memberships(
+    sqlite3* const sql, const std::string& target, const std::string& member
+) {
+    statement query(
+        sql,
+        "SELECT id,child_work_id,parent_work_id,membership_type,position,"
+        "position_text FROM work_memberships "
+        "WHERE child_work_id=? OR parent_work_id=? ORDER BY id"
+    );
+    query.bind(1, member);
+    query.bind(2, member);
+    std::vector<work_membership_row> rows;
+    while (query.step()) {
+        rows.push_back(
+            {
+                .id = query.integer(0),
+                .child = query.text(1),
+                .parent = query.text(2),
+                .type = query.text(3),
+                .position = query.is_null(4)
+                    ? std::nullopt
+                    : std::optional<std::int64_t>(query.integer(4)),
+                .position_text = query.is_null(5)
+                    ? std::nullopt
+                    : std::optional<std::string>(query.text(5)),
+            }
+        );
+    }
+    for (const auto& row : rows) {
+        const std::string child = row.child == member ? target : row.child;
+        const std::string parent = row.parent == member ? target : row.parent;
+        if (child == parent) {
+            statement remove(sql, "DELETE FROM work_memberships WHERE id=?");
+            remove.bind(1, row.id);
+            remove.execute();
+            continue;
+        }
+        statement collision(
+            sql,
+            "SELECT id FROM work_memberships WHERE child_work_id=? "
+            "AND parent_work_id=? AND membership_type=? AND position IS ? "
+            "AND position_text IS ? AND id<>? LIMIT 1"
+        );
+        collision.bind(1, child);
+        collision.bind(2, parent);
+        collision.bind(3, row.type);
+        if (row.position.has_value()) {
+            collision.bind(4, *row.position);
+        } else {
+            collision.bind_null(4);
+        }
+        if (row.position_text.has_value()) {
+            collision.bind(5, *row.position_text);
+        } else {
+            collision.bind_null(5);
+        }
+        collision.bind(6, row.id);
+        if (collision.step()) {
+            statement remove(sql, "DELETE FROM work_memberships WHERE id=?");
+            remove.bind(1, row.id);
+            remove.execute();
+            continue;
+        }
+        statement rewrite(
+            sql,
+            "UPDATE work_memberships SET child_work_id=?,parent_work_id=? "
+            "WHERE id=?"
+        );
+        rewrite.bind(1, child);
+        rewrite.bind(2, parent);
+        rewrite.bind(3, row.id);
+        rewrite.execute();
+    }
+}
+
+struct agent_relation_row final {
+    std::int64_t id {};
+    std::string subject;
+    std::string type;
+    std::string object;
+    std::optional<std::int64_t> from_year;
+    std::optional<std::int64_t> to_year;
+    std::optional<std::string> period_text;
+    std::optional<std::string> role_text;
+};
+
+void merge_agent_relations(
+    sqlite3* const sql, const std::string& target, const std::string& member
+) {
+    statement query(
+        sql,
+        "SELECT "
+        "id,subject_agent_id,relation_type,object_agent_id,from_year,"
+        "to_year,period_text,role_text FROM agent_relations "
+        "WHERE subject_agent_id=? OR object_agent_id=? ORDER BY id"
+    );
+    query.bind(1, member);
+    query.bind(2, member);
+    std::vector<agent_relation_row> rows;
+    while (query.step()) {
+        rows.push_back(
+            {
+                .id = query.integer(0),
+                .subject = query.text(1),
+                .type = query.text(2),
+                .object = query.text(3),
+                .from_year = query.is_null(4)
+                    ? std::nullopt
+                    : std::optional<std::int64_t>(query.integer(4)),
+                .to_year = query.is_null(5)
+                    ? std::nullopt
+                    : std::optional<std::int64_t>(query.integer(5)),
+                .period_text = query.is_null(6)
+                    ? std::nullopt
+                    : std::optional<std::string>(query.text(6)),
+                .role_text = query.is_null(7)
+                    ? std::nullopt
+                    : std::optional<std::string>(query.text(7)),
+            }
+        );
+    }
+    for (const auto& row : rows) {
+        const std::string subject
+            = row.subject == member ? target : row.subject;
+        const std::string object = row.object == member ? target : row.object;
+        if (subject == object) {
+            statement remove(sql, "DELETE FROM agent_relations WHERE id=?");
+            remove.bind(1, row.id);
+            remove.execute();
+            continue;
+        }
+        statement collision(
+            sql,
+            "SELECT id FROM agent_relations WHERE subject_agent_id=? "
+            "AND relation_type=? AND object_agent_id=? AND from_year IS ? "
+            "AND to_year IS ? AND period_text IS ? AND role_text IS ? "
+            "AND id<>? LIMIT 1"
+        );
+        collision.bind(1, subject);
+        collision.bind(2, row.type);
+        collision.bind(3, object);
+        if (row.from_year.has_value()) {
+            collision.bind(4, *row.from_year);
+        } else {
+            collision.bind_null(4);
+        }
+        if (row.to_year.has_value()) {
+            collision.bind(5, *row.to_year);
+        } else {
+            collision.bind_null(5);
+        }
+        if (row.period_text.has_value()) {
+            collision.bind(6, *row.period_text);
+        } else {
+            collision.bind_null(6);
+        }
+        if (row.role_text.has_value()) {
+            collision.bind(7, *row.role_text);
+        } else {
+            collision.bind_null(7);
+        }
+        collision.bind(8, row.id);
+        if (collision.step()) {
+            statement remove(sql, "DELETE FROM agent_relations WHERE id=?");
+            remove.bind(1, row.id);
+            remove.execute();
+            continue;
+        }
+        statement rewrite(
+            sql,
+            "UPDATE agent_relations SET "
+            "subject_agent_id=?,object_agent_id=? "
+            "WHERE id=?"
+        );
+        rewrite.bind(1, subject);
+        rewrite.bind(2, object);
+        rewrite.bind(3, row.id);
+        rewrite.execute();
+    }
 }
 
 void transfer_assertion_evidence(
@@ -3932,9 +4435,10 @@ void merge_work_concepts(
         "AND m.historical_role IS t.historical_role "
         "AND m.confidence IS t.confidence) "
         "FROM work_concepts m JOIN work_concepts t "
-        "ON m." + std::string(id_column) + "=? AND t."
-            + std::string(id_column) + "=? AND m." + other_column + "=t."
-            + other_column + " AND m.relation_type=t.relation_type"
+        "ON m."
+            + std::string(id_column) + "=? AND t." + std::string(id_column)
+            + "=? AND m." + other_column + "=t." + other_column
+            + " AND m.relation_type=t.relation_type"
     );
     rows.bind(1, member);
     rows.bind(2, target);
@@ -3954,8 +4458,9 @@ void merge_work_concepts(
         remove.execute();
     }
     statement rewrite(
-        sql, "UPDATE work_concepts SET " + std::string(id_column)
-            + "=? WHERE " + std::string(id_column) + "=?"
+        sql,
+        "UPDATE work_concepts SET " + std::string(id_column) + "=? WHERE "
+            + std::string(id_column) + "=?"
     );
     rewrite.bind(1, target);
     rewrite.bind(2, member);
@@ -3976,9 +4481,10 @@ void merge_parent_guides(
         "AND m.realism=t.realism AND m.spoiler_level=t.spoiler_level "
         "AND m.confidence IS t.confidence) "
         "FROM parent_guide_assertions m JOIN parent_guide_assertions t "
-        "ON m." + std::string(id_column) + "=? AND t."
-            + std::string(id_column) + "=? AND m." + other_column + "=t."
-            + other_column + " AND m.category=t.category"
+        "ON m."
+            + std::string(id_column) + "=? AND t." + std::string(id_column)
+            + "=? AND m." + other_column + "=t." + other_column
+            + " AND m.category=t.category"
     );
     rows.bind(1, member);
     rows.bind(2, target);
@@ -3993,14 +4499,13 @@ void merge_parent_guides(
         transfer_assertion_evidence(
             sql, "parent_guide_evidence", keeper, duplicate
         );
-        statement remove(
-            sql, "DELETE FROM parent_guide_assertions WHERE id=?"
-        );
+        statement remove(sql, "DELETE FROM parent_guide_assertions WHERE id=?");
         remove.bind(1, duplicate);
         remove.execute();
     }
     statement rewrite(
-        sql, "UPDATE parent_guide_assertions SET " + std::string(id_column)
+        sql,
+        "UPDATE parent_guide_assertions SET " + std::string(id_column)
             + "=? WHERE " + std::string(id_column) + "=?"
     );
     rewrite.bind(1, target);
@@ -4015,7 +4520,8 @@ void merge_financial_facts(
             sql,
             "SELECT 1 FROM financial_facts t JOIN financial_facts m "
             "ON t.work_id=? AND m.work_id=? AND t.fact_type=m.fact_type "
-            "AND t.amount_min=m.amount_min AND t.amount_max IS m.amount_max "
+            "AND t.amount_min=m.amount_min AND t.amount_max IS "
+            "m.amount_max "
             "AND t.currency_code=m.currency_code "
             "AND t.value_year IS m.value_year "
             "WHERE t.is_estimate<>m.is_estimate "
@@ -4086,11 +4592,16 @@ void merge_concept_relations(
         statement collision(
             sql,
             "SELECT id,"
-            "(strength IS (SELECT strength FROM concept_relations WHERE id=?) "
-            "AND from_year IS (SELECT from_year FROM concept_relations WHERE id=?) "
-            "AND to_year IS (SELECT to_year FROM concept_relations WHERE id=?) "
-            "AND region_code IS (SELECT region_code FROM concept_relations WHERE id=?) "
-            "AND confidence IS (SELECT confidence FROM concept_relations WHERE id=?)) "
+            "(strength IS (SELECT strength FROM concept_relations WHERE "
+            "id=?) "
+            "AND from_year IS (SELECT from_year FROM concept_relations "
+            "WHERE id=?) "
+            "AND to_year IS (SELECT to_year FROM concept_relations WHERE "
+            "id=?) "
+            "AND region_code IS (SELECT region_code FROM concept_relations "
+            "WHERE id=?) "
+            "AND confidence IS (SELECT confidence FROM concept_relations "
+            "WHERE id=?)) "
             "FROM concept_relations WHERE subject_concept_id=? "
             "AND relation_type=? AND object_concept_id=? AND id<>? LIMIT 1"
         );
@@ -4126,9 +4637,7 @@ void merge_concept_relations(
     }
 }
 
-void delete_merged_entity(
-    sqlite3* const sql, const std::string& member
-) {
+void delete_merged_entity(sqlite3* const sql, const std::string& member) {
     statement remove(sql, "DELETE FROM entities WHERE id=?");
     remove.bind(1, member);
     remove.execute();
@@ -4146,9 +4655,7 @@ void delete_merged_entity(
     return result;
 }
 
-void merge_agents(
-    sqlite3* const sql, const json& operation
-) {
+void merge_agents(sqlite3* const sql, const json& operation) {
     const std::string target = operation.at("target");
     const auto members = merge_members(operation);
     reject_preferred_name_conflict(sql, target, members);
@@ -4157,9 +4664,7 @@ void merge_agents(
         { "agent_type", "birth_year", "death_year" }, { "agent_type" }
     );
     if (operation.at("set").contains("agent_type")) {
-        statement sync(
-            sql, "UPDATE entities SET entity_type=? WHERE id=?"
-        );
+        statement sync(sql, "UPDATE entities SET entity_type=? WHERE id=?");
         sync.bind_json_value(1, operation.at("set").at("agent_type"));
         sync.bind(2, target);
         sync.execute();
@@ -4167,26 +4672,27 @@ void merge_agents(
     for (const auto& member : members) {
         merge_entity_scoped_rows(sql, target, member);
         merge_credits(sql, "agent_id", target, member);
+        merge_agent_relations(sql, target, member);
         delete_merged_entity(sql, member);
     }
 }
 
-void merge_works(
-    sqlite3* const sql, const json& operation
-) {
+void merge_works(sqlite3* const sql, const json& operation) {
     const std::string target = operation.at("target");
     const auto members = merge_members(operation);
     reject_preferred_name_conflict(sql, target, members);
     resolve_scalar_fields(
         sql, "works", "entity_id", target, members, operation,
         { "medium", "year_start", "year_end", "date_precision",
-          "date_start_text", "date_end_text", "date_qualifier",
-          "language_code", "country_code", "production_info_json" },
+          "date_start_text", "date_end_text", "date_qualifier", "language_code",
+          "country_code", "production_info_json" },
         { "medium" }
     );
     for (const auto& member : members) {
         merge_entity_scoped_rows(sql, target, member);
-        merge_credits(sql, "work_id", target, member);
+        merge_credits(sql, "entity_id", target, member);
+        merge_events(sql, target, member);
+        merge_work_memberships(sql, target, member);
         merge_financial_facts(sql, target, member);
         merge_work_concepts(sql, "work_id", target, member);
         merge_parent_guides(sql, "work_id", target, member);
@@ -4200,9 +4706,7 @@ void merge_works(
     }
 }
 
-void merge_concepts(
-    sqlite3* const sql, const json& operation
-) {
+void merge_concepts(sqlite3* const sql, const json& operation) {
     const std::string target = operation.at("target");
     const auto members = merge_members(operation);
     reject_preferred_name_conflict(sql, target, members);
@@ -4228,8 +4732,7 @@ void merge_concepts(
                 const std::string base = temporary;
                 std::size_t attempt = 0;
                 statement collision(
-                    sql,
-                    "SELECT 1 FROM concepts WHERE slug=? LIMIT 1"
+                    sql, "SELECT 1 FROM concepts WHERE slug=? LIMIT 1"
                 );
                 for (;;) {
                     sqlite3_reset(collision.native());
@@ -4297,13 +4800,9 @@ void apply_merges(parsed_batch& batch, sqlite3* const sql) {
     }
 }
 
-
-[[nodiscard]] bool batch_was_applied(
-    sqlite3* const sql, const std::string& batch_id
-) {
-    statement query(
-        sql, "SELECT 1 FROM applied_batches WHERE batch_id=?"
-    );
+[[nodiscard]] bool
+batch_was_applied(sqlite3* const sql, const std::string& batch_id) {
+    statement query(sql, "SELECT 1 FROM applied_batches WHERE batch_id=?");
     query.bind(1, batch_id);
     return query.step();
 }
@@ -4331,7 +4830,8 @@ void record_issues(
         "batch_id,code,json_path,message,value_json,status)"
         " VALUES(?,?,?,?,?,'open') "
         "ON CONFLICT(batch_id,code,json_path) DO UPDATE SET "
-        "message=excluded.message,value_json=excluded.value_json,status='open'"
+        "message=excluded.message,value_json=excluded.value_json,status='"
+        "open'"
     );
     for (const auto& issue : issues) {
         sqlite3_reset(insert.native());
@@ -4358,9 +4858,9 @@ void apply_one_batch(parsed_batch& batch, database& product) {
         return;
     }
     /*
-     * References were resolved before BEGIN. Recheck every canonical reference
-     * against the writer snapshot so a concurrent deletion cannot invalidate
-     * the preflight.
+     * References were resolved before BEGIN. Recheck every canonical
+     * reference against the writer snapshot so a concurrent deletion cannot
+     * invalidate the preflight.
      */
     parsed_batch recheck = batch;
     recheck.issues.clear();
@@ -4371,9 +4871,10 @@ void apply_one_batch(parsed_batch& batch, database& product) {
     }
 
     /*
-     * Delete explicitly replaced internal/relationship rows before inserting
-     * their successors. Otherwise the old row can occupy the same natural
-     * UNIQUE key and make an atomic replacement depend on impossible ordering.
+     * Delete explicitly replaced internal/relationship rows before
+     * inserting their successors. Otherwise the old row can occupy the same
+     * natural UNIQUE key and make an atomic replacement depend on
+     * impossible ordering.
      */
     apply_deletes(batch, product.native());
     create_entities(batch, product.native());
@@ -4397,8 +4898,7 @@ void apply_one_batch(parsed_batch& batch, database& product) {
     require_clean_foreign_keys(product.native());
     {
         statement applied(
-            product.native(),
-            "INSERT INTO applied_batches(batch_id) VALUES(?)"
+            product.native(), "INSERT INTO applied_batches(batch_id) VALUES(?)"
         );
         applied.bind(1, batch.batch_id);
         applied.execute();
@@ -4417,8 +4917,8 @@ void require_real_directory(
 ) {
     if (!real_directory(path)) {
         throw inbox_error(
-            std::string(description) + " must be a real directory: "
-            + path.string()
+            std::string(description)
+            + " must be a real directory: " + path.string()
         );
     }
 }
@@ -4426,9 +4926,7 @@ void require_real_directory(
 void require_real_database_file(const fs::path& path) {
     struct stat state {};
     if (::lstat(path.c_str(), &state) != 0) {
-        throw inbox_error(
-            "product database does not exist: " + path.string()
-        );
+        throw inbox_error("product database does not exist: " + path.string());
     }
     if (!S_ISREG(state.st_mode) || S_ISLNK(state.st_mode)) {
         throw inbox_error(
@@ -4440,12 +4938,16 @@ void require_real_database_file(const fs::path& path) {
 [[nodiscard]] std::string read_schema(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
-        throw inbox_error("cannot open current product schema: " + path.string());
+        throw inbox_error(
+            "cannot open current product schema: " + path.string()
+        );
     }
     std::ostringstream buffer;
     buffer << input.rdbuf();
     if (!input.eof() && input.fail()) {
-        throw inbox_error("cannot read current product schema: " + path.string());
+        throw inbox_error(
+            "cannot read current product schema: " + path.string()
+        );
     }
     return buffer.str();
 }
@@ -4459,9 +4961,7 @@ void ensure_product_database(
         return;
     }
     if (errno != ENOENT) {
-        throw inbox_error(
-            "cannot inspect product database: " + path.string()
-        );
+        throw inbox_error("cannot inspect product database: " + path.string());
     }
     require_real_directory(path.parent_path(), "database directory");
     sqlite3* raw = nullptr;
@@ -4472,7 +4972,8 @@ void ensure_product_database(
             nullptr
         )
         != SQLITE_OK) {
-        const std::string message = sqlite_message(raw, "create product database");
+        const std::string message
+            = sqlite_message(raw, "create product database");
         if (raw != nullptr) {
             sqlite3_close(raw);
         }
@@ -4480,12 +4981,9 @@ void ensure_product_database(
     }
     try {
         char* error = nullptr;
-        const std::string schema = read_schema(
-            repository_root / "schema" / "product_v7.sql"
-        );
-        if (sqlite3_exec(
-                raw, schema.c_str(), nullptr, nullptr, &error
-            )
+        const std::string schema
+            = read_schema(repository_root / "schema" / "product.sql");
+        if (sqlite3_exec(raw, schema.c_str(), nullptr, nullptr, &error)
             != SQLITE_OK) {
             const std::string message
                 = error == nullptr ? sqlite3_errmsg(raw) : error;
@@ -4502,8 +5000,7 @@ void ensure_product_database(
     require_real_database_file(path);
 }
 
-[[nodiscard]] std::vector<file_snapshot>
-snapshot_inbox(const fs::path& inbox) {
+[[nodiscard]] std::vector<file_snapshot> snapshot_inbox(const fs::path& inbox) {
     require_real_directory(inbox, "inbox");
     std::vector<fs::path> paths;
     std::error_code error;
@@ -4520,7 +5017,9 @@ snapshot_inbox(const fs::path& inbox) {
             continue;
         }
         if (S_ISLNK(state.st_mode)) {
-            throw inbox_error("symbolic link in inbox is rejected: " + path.string());
+            throw inbox_error(
+                "symbolic link in inbox is rejected: " + path.string()
+            );
         }
         if (S_ISDIR(state.st_mode)) {
             throw inbox_error(
@@ -4567,9 +5066,10 @@ snapshot_inbox(const fs::path& inbox) {
                 : diagnostic.instance_path;
             const bool present = std::ranges::any_of(
                 result.issues, [&](const inbox_issue& issue) {
-                    // The table-specific validator owns diagnostics for paths it
-                    // understands. Contract validation is a backstop, not a
-                    // second issue for the same rejected field/value.
+                    // The table-specific validator owns diagnostics for
+                    // paths it understands. Contract validation is a
+                    // backstop, not a second issue for the same rejected
+                    // field/value.
                     return issue.json_path == path;
                 }
             );
@@ -4640,15 +5140,14 @@ void move_rejected_unchanged(
         static_cast<void>(fs::create_directory(rejected, error));
         if (error) {
             throw inbox_error(
-                "cannot create rejected inbox directory "
-                + rejected.string() + ": " + error.message()
+                "cannot create rejected inbox directory " + rejected.string()
+                + ": " + error.message()
             );
         }
     }
     if (!real_directory(rejected)) {
         throw inbox_error(
-            "rejected inbox path is not a real directory: "
-            + rejected.string()
+            "rejected inbox path is not a real directory: " + rejected.string()
         );
     }
     fs::path destination = rejected / snapshot.path.filename();
@@ -4659,8 +5158,7 @@ void move_rejected_unchanged(
                 break;
             }
             throw inbox_error(
-                "cannot inspect rejected destination "
-                + destination.string()
+                "cannot inspect rejected destination " + destination.string()
             );
         }
         if (suffix == 100000U) {
@@ -4670,15 +5168,15 @@ void move_rejected_unchanged(
             );
         }
         destination = rejected
-            / (snapshot.path.stem().string() + "-"
-               + std::to_string(suffix) + snapshot.path.extension().string());
+            / (snapshot.path.stem().string() + "-" + std::to_string(suffix)
+               + snapshot.path.extension().string());
     }
     std::error_code error;
     fs::rename(snapshot.path, destination, error);
     if (error) {
         throw inbox_error(
-            "cannot move rejected inbox file " + snapshot.path.string()
-            + " to " + destination.string() + ": " + error.message()
+            "cannot move rejected inbox file " + snapshot.path.string() + " to "
+            + destination.string() + ": " + error.message()
         );
     }
 }
@@ -4691,7 +5189,8 @@ void record_and_move_rejected(
     } catch (const std::exception& error) {
         add_issue(
             batch, "issue_storage_error", "/",
-            "structured issues could not be stored; rejected file remains in "
+            "structured issues could not be stored; rejected file remains "
+            "in "
             "place: "
                 + std::string(error.what())
         );
@@ -4701,15 +5200,13 @@ void record_and_move_rejected(
         move_rejected_unchanged(batch.file, rejected);
     } catch (const std::exception& error) {
         add_issue(
-            batch, "rejected_file_not_moved", "/",
-            std::string(error.what())
+            batch, "rejected_file_not_moved", "/", std::string(error.what())
         );
     }
 }
 
-[[nodiscard]] inbox_batch_report report_for(
-    const parsed_batch& batch, const inbox_batch_status status
-) {
+[[nodiscard]] inbox_batch_report
+report_for(const parsed_batch& batch, const inbox_batch_status status) {
     return {
         .path = batch.file.path,
         .batch_id = batch.batch_id,
@@ -4718,9 +5215,8 @@ void record_and_move_rejected(
     };
 }
 
-[[nodiscard]] inbox_result run_inbox(
-    const fs::path& repository_root, const bool apply
-) {
+[[nodiscard]] inbox_result
+run_inbox(const fs::path& repository_root, const bool apply) {
     const fs::path inbox = repository_root / "inbox";
     const fs::path database_path
         = repository_root / "database" / "art-islands.sqlite";
@@ -4758,9 +5254,7 @@ void record_and_move_rejected(
         if (!batch.issues.empty()) {
             ++result.rejected_count;
             if (apply && valid_batch_id(batch.batch_id)) {
-                record_and_move_rejected(
-                    batch, product, inbox / "rejected"
-                );
+                record_and_move_rejected(batch, product, inbox / "rejected");
             }
             result.batches.push_back(
                 report_for(batch, inbox_batch_status::rejected)
@@ -4799,16 +5293,15 @@ void record_and_move_rejected(
                     || message.find("FOREIGN KEY") != std::string::npos
                 ) {
                     code = "constraint_violation";
-                } else if (message.find("disappeared") != std::string::npos
-                           || message.find("changed")
-                               != std::string::npos) {
+                } else if (
+                    message.find("disappeared") != std::string::npos
+                    || message.find("changed") != std::string::npos
+                ) {
                     code = "concurrent_change";
                 }
                 std::optional<json> rejected_value;
                 if (!batch.application_value_json.empty()) {
-                    rejected_value = json::parse(
-                        batch.application_value_json
-                    );
+                    rejected_value = json::parse(batch.application_value_json);
                 }
                 add_issue(
                     batch, code, batch.application_path, message,
@@ -4816,9 +5309,7 @@ void record_and_move_rejected(
                 );
             }
             ++result.rejected_count;
-            record_and_move_rejected(
-                batch, product, inbox / "rejected"
-            );
+            record_and_move_rejected(batch, product, inbox / "rejected");
             result.batches.push_back(
                 report_for(batch, inbox_batch_status::rejected)
             );
@@ -4836,10 +5327,11 @@ void record_and_move_rejected(
             );
         }
         /*
-         * Retirement is deliberately outside the database-application catch.
-         * A post-commit filesystem failure must never relabel committed data as
-         * rejected or create a false application issue. The still-present file
-         * is safely retired as an already-applied batch on the next run.
+         * Retirement is deliberately outside the database-application
+         * catch. A post-commit filesystem failure must never relabel
+         * committed data as rejected or create a false application issue.
+         * The still-present file is safely retired as an already-applied
+         * batch on the next run.
          */
         remove_unchanged(batch.file);
     }

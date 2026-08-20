@@ -7,6 +7,7 @@ import {
   parseTasteIndex,
   portableInterestProfile,
 } from "./taste";
+import type { Agent } from "./types";
 
 function tasteDomain() {
   const liked = fixtureWork({ id: "work-liked", year: 2000, tags: [
@@ -19,7 +20,7 @@ function tasteDomain() {
     { id: "concept-theme", label: "Night theme" },
   ] });
   disliked.concepts[0].conceptType = "theme";
-  const agent = { id: "agent-1", label: "Creator", agentType: "person", identifiers: [] };
+  const agent: Agent = { id: "agent-1", label: "Creator", agentType: "person", identifiers: [] };
   const domain = fixtureDomain([liked, disliked]);
   domain.agents = [agent];
   domain.agentById = new Map([[agent.id, agent]]);

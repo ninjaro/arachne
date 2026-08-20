@@ -270,23 +270,17 @@ if(BUILD_TESTS)
             tests.test_materialize_local_product_snapshot -v
     )
     add_test(
+        NAME product_schema_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_product_schema -v
+    )
+    add_test(
+        NAME product_projection_catalog_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_product_projection_catalog -v
+    )
+    add_test(
         NAME source_refresh_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_source_refresh -v
-    )
-    add_test(
-        NAME product_v5_migration_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_product_v5_migration -v
-    )
-    add_test(
-        NAME product_v6_migration_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_product_v6_migration -v
-    )
-    add_test(
-        NAME product_v7_migration_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_product_v7_migration -v
     )
     add_test(
         NAME operations_cli_tests
@@ -298,9 +292,9 @@ if(BUILD_TESTS)
         actor_boundary_tests intake_adapter_tests workflow_yaml_tests
         publication_adapter_tests image_hint_staging_tests
         wikidata_hpc_worker_tests wikidata_hpc_run_tests
-        local_product_snapshot_materializer_tests source_refresh_tests
-        product_v5_migration_tests product_v6_migration_tests
-        product_v7_migration_tests
+        local_product_snapshot_materializer_tests product_schema_tests
+        product_projection_catalog_tests
+        source_refresh_tests
         operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )

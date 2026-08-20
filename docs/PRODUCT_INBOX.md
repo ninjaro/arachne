@@ -2,7 +2,7 @@
 
 The product inbox is the only routine path for applying research batches to the
 canonical product database. It accepts one current, closed format:
-`arachne_batch_v2`.
+`arachne_batch`. The current commit defines the complete supported shape.
 
 ## Fixed repository interface
 
@@ -55,7 +55,7 @@ Every root field is required, and unknown fields are invalid:
 
 ```json
 {
-  "format": "arachne_batch_v2",
+  "format": "arachne_batch",
   "batch_id": "research-00421",
   "create": {},
   "update": {},
@@ -64,9 +64,9 @@ Every root field is required, and unknown fields are invalid:
 ```
 
 The complete machine-readable contract is
-[`arachne_batch_v2.schema.json`](../contracts/schemas/arachne_batch_v2.schema.json).
+[`arachne_batch.schema.json`](../contracts/schemas/arachne_batch.schema.json).
 A representative document is
-[`arachne_batch_v2.json`](../contracts/examples/arachne_batch_v2.json).
+[`arachne_batch.json`](../contracts/examples/arachne_batch.json).
 Every object in the contract is closed with `additionalProperties: false`.
 Unknown field names, aliases, enum spellings, and implicit defaults are
 rejected.
@@ -109,6 +109,9 @@ agents
 works
 concepts
 manifestations
+work_memberships
+agent_relations
+events
 names
 external_ids
 sources
@@ -135,8 +138,26 @@ storage for mechanically migrated, not-yet-reviewed legacy rows and is not
 valid for a new assignment. No stance, preference, assertion weight, scale, or
 boolean is inferred.
 
+Work memberships describe structural containment such as `episode_of`,
+`track_of`, or `collected_in`; both endpoints are works and may use same-batch
+local IDs. Agent relations describe explicit membership or corporate structure,
+not a relationship inferred from shared credits. Events target a work or
+manifestation and preserve independent dates such as publication, release,
+premiere, broadcast, performance, exhibition, and recording. `date_precision`
+includes `month`; full dates use `exact`.
+
+Credits use `entity_id`, which must identify a work or manifestation. Put
+edition-, pressing-, translation-, release-, or platform-specific credits on
+the manifestation. Broad media include `nonfiction`, `comic`, and
+`performance`; narrower forms such as autobiography, manga, and documentary
+remain concepts. Irregular tail metadata may remain in `production_info_json`.
+
 General product facts that the database models directly, including work dates,
-measurements, and budgets, do not require assertion evidence.
+memberships, agent relations, events, credits, measurements, and budgets, do
+not require assertion evidence. General metadata is stored on a best-effort
+basis and is not an authoritative factual record. Values may be incomplete,
+stale, or incorrect. External identifiers and links let users consult the
+original databases and sources when authoritative detail is needed.
 
 ## Update and deletion operations
 
@@ -189,6 +210,9 @@ Each array contains positive integer database row IDs:
 names
 external_ids
 credits
+work_memberships
+agent_relations
+events
 measurements
 financial_facts
 evidence
@@ -241,10 +265,13 @@ belong to the declared family. Conflicting or overlapping merges in one batch
 are rejected.
 
 A valid merge rewrites every member foreign key to the target, deduplicates
-rows that become logically identical, applies the declared `set` and `unset`
-resolution, and deletes the member entities. A collision with incompatible
-required values rejects the whole batch. No redirect, alias, tombstone,
-retired-ID table, or compatibility mapping is created.
+rows that become logically identical, removes membership or agent-relation
+edges that would become self-relations, applies the declared `set` and `unset`
+resolution, and deletes the member entities. Work merges move only credits and
+events that directly target the merged work; manifestation-targeted records
+remain attached to their manifestation. A collision with incompatible required
+values rejects the whole batch. No redirect, alias, tombstone, retired-ID
+table, or compatibility mapping is created.
 
 Similarity, matching names, matching slugs, graph overlap, or shared external
 identifiers never authorize a merge. They can create a review hint only.
@@ -343,7 +370,7 @@ stored as queryable typed rows, while sequences, clusters, views, and other
 evolving analytical sections are retained losslessly by section. No
 cross-database foreign keys are required.
 
-The temporary metadata records the product schema version, exact product
+The temporary metadata records the current product schema identity, exact product
 SHA-256, merge-hint generator/schema version, and the exact durable-decision
 artifact SHA-256. `export-merge-hints` refuses missing or stale state and never
 performs a hidden rebuild. A successful export atomically writes
@@ -381,7 +408,7 @@ family-specific score distributions rather than operator-supplied thresholds or
 fixed per-entity caps. The exported messages explain the positive reasons for
 selection and preserve machine-readable component signals. Hints are advisory:
 no score or signal performs a merge, and every identity change must arrive in a
-later explicit `arachne_batch_v2` batch.
+later explicit `arachne_batch` batch.
 
 Structural hints are not merge candidates. They preserve independent bounded
 measurements such as overlap, directional containment, temporal displacement,

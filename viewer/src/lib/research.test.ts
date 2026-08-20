@@ -48,6 +48,9 @@ function catalog(): Catalog {
     databaseSha256: SHA256,
     agents: [],
     works: [],
+    workMemberships: [],
+    agentRelations: [],
+    events: [],
   };
 }
 

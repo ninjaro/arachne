@@ -11,7 +11,7 @@ function weightedDomain(reversed = false) {
   weak.concepts[0]!.historicalRole = "peripheral";
   weak.concepts[0]!.confidence = 0.6;
   strong.concepts[0]!.centrality = 90;
-  strong.concepts[0]!.historicalRole = "defining";
+  strong.concepts[0]!.historicalRole = "canonical";
   strong.concepts[0]!.confidence = 0.95;
   return fixtureDomain(reversed ? [strong, weak] : [weak, strong]);
 }
@@ -51,7 +51,7 @@ describe("weighted Evolution memberships", () => {
         workId: "work-strong",
         raw: 90,
         normalized: 0.9,
-        role: "defining",
+        role: "canonical",
         confidence: 0.95,
       },
       {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/arachne_batch_v2.schema.json",
-  "title": "Arachne product inbox batch v2",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/arachne_batch.schema.json",
+  "title": "Arachne product inbox batch",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,7 +13,7 @@
   ],
   "properties": {
     "format": {
-      "const": "arachne_batch_v2"
+      "const": "arachne_batch"
     },
     "batch_id": {
       "$ref": "#/$defs/stable_id"
@@ -115,13 +115,17 @@
         "sculpture",
         "installation",
         "photography",
-        "mixed_media"
+        "mixed_media",
+        "nonfiction",
+        "comic",
+        "performance"
       ]
     },
     "date_precision": {
       "type": "string",
       "enum": [
         "year",
+        "month",
         "decade",
         "approximate",
         "range",
@@ -174,6 +178,45 @@
         "reissue"
       ]
     },
+    "membership_type": {
+      "type": "string",
+      "enum": [
+        "episode_of",
+        "season_of",
+        "track_of",
+        "volume_of",
+        "issue_of",
+        "chapter_of",
+        "part_of",
+        "collected_in"
+      ]
+    },
+    "agent_relation_type": {
+      "type": "string",
+      "enum": [
+        "member_of",
+        "founder_of",
+        "subsidiary_of",
+        "division_of",
+        "imprint_of",
+        "owned_by",
+        "successor_of",
+        "predecessor_of"
+      ]
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "created",
+        "published",
+        "released",
+        "premiered",
+        "broadcast",
+        "performed",
+        "exhibited",
+        "recorded"
+      ]
+    },
     "credit_role": {
       "type": "string",
       "enum": [
@@ -193,7 +236,22 @@
         "production_company",
         "publisher",
         "record_label",
-        "band"
+        "band",
+        "distributor",
+        "broadcaster",
+        "platform",
+        "translator",
+        "illustrator",
+        "printer",
+        "curator",
+        "choreographer",
+        "narrator",
+        "lyricist",
+        "songwriter",
+        "arranger",
+        "sound_engineer",
+        "designer",
+        "animator"
       ]
     },
     "credit_importance": {
@@ -359,6 +417,24 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/create_manifestation"
+          }
+        },
+        "work_memberships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_work_membership"
+          }
+        },
+        "agent_relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_agent_relation"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_event"
           }
         },
         "names": {
@@ -541,6 +617,96 @@
         }
       }
     },
+    "create_work_membership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "child_work_id",
+        "parent_work_id",
+        "membership_type"
+      ],
+      "properties": {
+        "child_work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "parent_work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "membership_type": {
+          "$ref": "#/$defs/membership_type"
+        },
+        "position": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "position_text": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_agent_relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject_agent_id",
+        "relation_type",
+        "object_agent_id"
+      ],
+      "properties": {
+        "subject_agent_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "relation_type": {
+          "$ref": "#/$defs/agent_relation_type"
+        },
+        "object_agent_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "from_year": {
+          "$ref": "#/$defs/year"
+        },
+        "to_year": {
+          "$ref": "#/$defs/year"
+        },
+        "period_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "role_text": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "event_type"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "event_type": {
+          "$ref": "#/$defs/event_type"
+        },
+        "year_start": {
+          "$ref": "#/$defs/year"
+        },
+        "year_end": {
+          "$ref": "#/$defs/year"
+        },
+        "date_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "date_precision": {
+          "$ref": "#/$defs/date_precision"
+        },
+        "place_text": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
     "create_name": {
       "type": "object",
       "additionalProperties": false,
@@ -696,13 +862,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "work_id",
+        "entity_id",
         "agent_id",
         "role",
         "importance"
       ],
       "properties": {
-        "work_id": {
+        "entity_id": {
           "$ref": "#/$defs/entity_reference"
         },
         "agent_id": {
@@ -1438,6 +1604,15 @@
           "$ref": "#/$defs/positive_id_array"
         },
         "credits": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "work_memberships": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "agent_relations": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "events": {
           "$ref": "#/$defs/positive_id_array"
         },
         "measurements": {

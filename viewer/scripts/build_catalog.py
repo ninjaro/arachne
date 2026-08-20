@@ -67,6 +67,72 @@ def require_stable_database_file(database: Path) -> None:
         )
 
 
+CURRENT_PRODUCT_COLUMNS: dict[str, set[str]] = {
+    "entities": {"id", "entity_type"},
+    "works": {"entity_id", "medium", "date_precision"},
+    "manifestations": {"entity_id", "work_id", "manifestation_type"},
+    "credits": {"id", "entity_id", "agent_id", "role"},
+    "work_memberships": {
+        "id",
+        "child_work_id",
+        "parent_work_id",
+        "membership_type",
+        "position",
+        "position_text",
+    },
+    "agent_relations": {
+        "id",
+        "subject_agent_id",
+        "relation_type",
+        "object_agent_id",
+        "from_year",
+        "to_year",
+        "period_text",
+        "role_text",
+    },
+    "events": {
+        "id",
+        "entity_id",
+        "event_type",
+        "year_start",
+        "year_end",
+        "date_text",
+        "date_precision",
+        "place_text",
+    },
+}
+
+
+def require_current_product_structure(connection: sqlite3.Connection) -> None:
+    """Fail closed on fields consumed by the current catalog/export code.
+
+    Repository history, rather than a numeric SQLite application version,
+    identifies older contracts. This check guards the one structure consumed
+    by this commit without attempting version discovery or dispatch.
+    """
+    available_tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table'"
+        )
+    }
+    for table, required in CURRENT_PRODUCT_COLUMNS.items():
+        if table not in available_tables:
+            raise RuntimeError(f"current product database is missing table {table}")
+        actual = {
+            str(row[1])
+            for row in connection.execute(
+                f"PRAGMA table_info({sql_identifier(table)})"
+            )
+        }
+        missing = sorted(required - actual)
+        if missing:
+            raise RuntimeError(
+                f"current product table {table} is missing column(s): "
+                + ", ".join(missing)
+            )
+
+
 def export_local_product_jsonl(database: Path, output: Path) -> int:
     """Write a generic local read-only export for the native projection CLI.
 
@@ -89,8 +155,7 @@ def export_local_product_jsonl(database: Path, output: Path) -> int:
         integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
         if integrity != "ok":
             raise RuntimeError(f"database quick_check failed: {integrity}")
-        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 7:
-            raise RuntimeError("local product export requires schema version 7")
+        require_current_product_structure(connection)
         tables = [
             str(row[0])
             for row in connection.execute(
@@ -184,11 +249,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
     if integrity != "ok":
         raise RuntimeError(f"database quick_check failed: {integrity}")
 
-    user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if user_version != 7:
-        raise RuntimeError(
-            f"unsupported product schema version {user_version}; expected 7"
-        )
+    require_current_product_structure(connection)
 
     preferred_names: dict[str, str] = {}
     for row in rows(
@@ -251,26 +312,26 @@ def build_catalog(database: Path) -> dict[str, Any]:
         )
 
     contributors: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    credits_by_entity: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows(
         connection,
         """
-        SELECT id, work_id, agent_id, role, credit_order, importance, credited_as
+        SELECT id, entity_id, agent_id, role, credit_order, importance, credited_as
         FROM credits
-        ORDER BY work_id, credit_order IS NULL, credit_order, role, agent_id
+        ORDER BY entity_id, credit_order IS NULL, credit_order, role, agent_id
         """,
     ):
         agent = agents.get(row["agent_id"])
         if not agent:
             continue
-        contributors[row["work_id"]].append(
-            {
-                **agent,
-                "role": row["role"],
-                "order": row["credit_order"],
-                "importance": row["importance"],
-                "creditedAs": row["credited_as"],
-            }
-        )
+        item = {
+            **agent,
+            "role": row["role"],
+            "order": row["credit_order"],
+            "importance": row["importance"],
+            "creditedAs": row["credited_as"],
+        }
+        credits_by_entity[row["entity_id"]].append(item)
 
     advisories: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows(
@@ -341,13 +402,21 @@ def build_catalog(database: Path) -> dict[str, Any]:
     # resolves to the authoritative catalog agent through agentById.
     for agent_id, agent in agents.items():
         agent["identifiers"] = identifiers.get(agent_id, [])
-    for work_contributors in contributors.values():
+    work_ids = {
+        str(row["entity_id"])
+        for row in rows(connection, "SELECT entity_id FROM works")
+    }
+    for entity_id, entity_contributors in credits_by_entity.items():
+        if entity_id in work_ids:
+            contributors[entity_id] = entity_contributors
+    for work_contributors in credits_by_entity.values():
         for contributor in work_contributors:
             contributor["identifiers"] = identifiers.get(
                 contributor["id"], []
             )
 
     manifestations: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    manifestation_by_id: dict[str, dict[str, Any]] = {}
     for row in rows(
         connection,
         """
@@ -357,17 +426,89 @@ def build_catalog(database: Path) -> dict[str, Any]:
         ORDER BY work_id, release_year IS NULL, release_year, entity_id
         """,
     ):
-        manifestations[row["work_id"]].append(
-            {
-                "id": row["entity_id"],
-                "type": row["manifestation_type"],
-                "releaseYear": row["release_year"],
-                "regionCode": row["region_code"],
-                "languageCode": row["language_code"],
-                "label": row["label"]
-                or preferred_names.get(row["entity_id"]),
-            }
+        item = {
+            "id": row["entity_id"],
+            "type": row["manifestation_type"],
+            "releaseYear": row["release_year"],
+            "regionCode": row["region_code"],
+            "languageCode": row["language_code"],
+            "label": row["label"] or preferred_names.get(row["entity_id"]),
+            "contributors": credits_by_entity.get(row["entity_id"], []),
+            "events": [],
+        }
+        manifestations[row["work_id"]].append(item)
+        manifestation_by_id[row["entity_id"]] = item
+
+    events: list[dict[str, Any]] = []
+    events_by_entity: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows(
+        connection,
+        """
+        SELECT id, entity_id, event_type, year_start, year_end, date_text,
+               date_precision, place_text
+        FROM events
+        ORDER BY entity_id, year_start IS NULL, year_start, event_type, id
+        """,
+    ):
+        item = {
+            "id": projection_id("event", row["id"]),
+            "entityId": row["entity_id"],
+            "eventType": row["event_type"],
+            "yearStart": row["year_start"],
+            "yearEnd": row["year_end"],
+            "dateText": row["date_text"],
+            "datePrecision": row["date_precision"],
+            "placeText": row["place_text"],
+        }
+        events.append(item)
+        events_by_entity[row["entity_id"]].append(item)
+    for manifestation_id, manifestation in manifestation_by_id.items():
+        manifestation["events"] = events_by_entity.get(manifestation_id, [])
+
+    work_memberships = [
+        {
+            "id": projection_id("work-membership", row["id"]),
+            "childId": row["child_work_id"],
+            "parentId": row["parent_work_id"],
+            "membershipType": row["membership_type"],
+            "position": row["position"],
+            "positionText": row["position_text"],
+        }
+        for row in rows(
+            connection,
+            """
+            SELECT id, child_work_id, parent_work_id, membership_type,
+                   position, position_text
+            FROM work_memberships
+            ORDER BY child_work_id, parent_work_id, membership_type,
+                     position IS NULL, position, position_text, id
+            """,
         )
+    ]
+
+    agent_relations = [
+        {
+            "id": projection_id("agent-relation", row["id"]),
+            "subjectId": row["subject_agent_id"],
+            "objectId": row["object_agent_id"],
+            "relationType": row["relation_type"],
+            "fromYear": row["from_year"],
+            "toYear": row["to_year"],
+            "periodText": row["period_text"],
+            "roleText": row["role_text"],
+        }
+        for row in rows(
+            connection,
+            """
+            SELECT id, subject_agent_id, object_agent_id, relation_type,
+                   from_year, to_year, period_text, role_text
+            FROM agent_relations
+            ORDER BY subject_agent_id, relation_type, object_agent_id,
+                     from_year IS NULL, from_year, to_year, period_text,
+                     role_text, id
+            """,
+        )
+    ]
 
     financial_facts: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows(
@@ -466,6 +607,7 @@ def build_catalog(database: Path) -> dict[str, Any]:
                     else 0.0
                 ),
                 "contributors": contributors.get(work_id, []),
+                "events": events_by_entity.get(work_id, []),
                 "advisories": advisories.get(work_id, []),
                 "measurements": measurements.get(work_id, []),
                 "identifiers": identifiers.get(work_id, []),
@@ -480,10 +622,12 @@ def build_catalog(database: Path) -> dict[str, Any]:
         "formatVersion": 1,
         "productSnapshotId": "local-" + database_sha256(database)[:16],
         "databaseSha256": database_sha256(database),
-        "databaseUserVersion": user_version,
         "agents": [agents[agent_id] for agent_id in sorted(agents)],
         "works": works,
         "workRelations": work_relations,
+        "workMemberships": work_memberships,
+        "agentRelations": agent_relations,
+        "events": events,
     }
 
 

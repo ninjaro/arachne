@@ -53,6 +53,22 @@ def main() -> int:
 
     db = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
+    current_tables = {
+        "entities", "names", "works", "manifestations", "concepts", "agents",
+        "sources", "evidence", "work_concepts", "concept_relations",
+        "parent_guide_assertions", "credits", "work_memberships",
+        "agent_relations", "events",
+    }
+    available_tables = {
+        str(row[0])
+        for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")
+    }
+    missing_tables = sorted(current_tables - available_tables)
+    if missing_tables:
+        raise RuntimeError(
+            "current product database is missing table(s): "
+            + ", ".join(missing_tables)
+        )
 
     preferred_names: dict[str, str] = {}
     if table_exists(db, "names"):
@@ -120,6 +136,28 @@ def main() -> int:
                     "noncanonical": False,
                 },
             )
+
+    for row in rows(
+        db,
+        """
+        SELECT entity_id, work_id, manifestation_type, release_year,
+               region_code, language_code, label
+        FROM manifestations
+        """,
+    ):
+        upsert_node(
+            row["entity_id"],
+            "manifestation",
+            label=row["label"],
+            attributes={
+                "work_id": row["work_id"],
+                "manifestation_type": row["manifestation_type"],
+                "release_year": row["release_year"],
+                "region_code": row["region_code"],
+                "language_code": row["language_code"],
+                "noncanonical": False,
+            },
+        )
 
     if table_exists(db, "concepts"):
         for row in rows(
@@ -203,6 +241,30 @@ def main() -> int:
                 },
             )
 
+    for row in rows(
+        db,
+        """
+        SELECT id, entity_id, event_type, year_start, year_end, date_text,
+               date_precision, place_text
+        FROM events
+        """,
+    ):
+        event_id = projection_id("event", row["id"])
+        upsert_node(
+            event_id,
+            "event",
+            label=row["event_type"],
+            attributes={
+                "entity_id": row["entity_id"],
+                "event_type": row["event_type"],
+                "year_start": row["year_start"],
+                "year_end": row["year_end"],
+                "date_text": row["date_text"],
+                "date_precision": row["date_precision"],
+                "place_text": row["place_text"],
+            },
+        )
+
     evidence_by_assertion: dict[str, list[str]] = {}
     for table, assertion_namespace in (
         ("work_concept_evidence", "work-concept"),
@@ -233,6 +295,7 @@ def main() -> int:
         *,
         derived: bool = False,
         explanation: str | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> None:
         if source not in nodes or target not in nodes:
             return
@@ -246,8 +309,15 @@ def main() -> int:
             source_ids.extend(evidence)
         if source_ids:
             provenance["source_ids"] = sorted(set(source_ids))
-        if explanation:
-            provenance["explanation"] = explanation
+        provenance["explanation"] = explanation or (
+            "Derived product projection relation."
+            if derived
+            else (
+                "Accepted human-authored product relation with linked evidence."
+                if evidence
+                else "Accepted human-authored product relation."
+            )
+        )
         edges.append(
             {
                 "edge_id": edge_id(source, target, kind, assertion_id),
@@ -259,6 +329,7 @@ def main() -> int:
                     "derived": derived,
                     "assertion_id": assertion_id,
                     "evidence": sorted(set(evidence or [])),
+                    **(attributes or {}),
                 },
             }
         )
@@ -314,14 +385,76 @@ def main() -> int:
     if table_exists(db, "credits"):
         for row in rows(
             db,
-            "SELECT id, agent_id, work_id, role FROM credits",
+            "SELECT id, agent_id, entity_id, role FROM credits",
         ):
             add_edge(
                 row["agent_id"],
-                row["work_id"],
+                row["entity_id"],
                 f"credit:{row['role']}",
                 projection_id("credit", row["id"]),
             )
+
+    for row in rows(
+        db,
+        """
+        SELECT id, child_work_id, parent_work_id, membership_type,
+               position, position_text
+        FROM work_memberships
+        """,
+    ):
+        add_edge(
+            row["child_work_id"],
+            row["parent_work_id"],
+            f"membership:{row['membership_type']}",
+            projection_id("work-membership", row["id"]),
+            attributes={
+                "position": row["position"],
+                "position_text": row["position_text"],
+            },
+        )
+
+    for row in rows(db, "SELECT entity_id, work_id FROM manifestations"):
+        add_edge(
+            row["entity_id"],
+            row["work_id"],
+            "manifestation_of",
+            f"manifestation-link:{row['entity_id']}",
+        )
+
+    for row in rows(
+        db,
+        """
+        SELECT id, subject_agent_id, object_agent_id, relation_type,
+               from_year, to_year, period_text, role_text
+        FROM agent_relations
+        """,
+    ):
+        add_edge(
+            row["subject_agent_id"],
+            row["object_agent_id"],
+            f"agent_relation:{row['relation_type']}",
+            projection_id("agent-relation", row["id"]),
+            attributes={
+                "from_year": row["from_year"],
+                "to_year": row["to_year"],
+                "period_text": row["period_text"],
+                "role_text": row["role_text"],
+            },
+        )
+
+    for row in rows(
+        db,
+        """
+        SELECT id, entity_id, event_type FROM events
+        """,
+    ):
+        event_id = projection_id("event", row["id"])
+        add_edge(
+            row["entity_id"],
+            event_id,
+            f"event:{row['event_type']}",
+            event_id,
+        )
 
     if table_exists(db, "evidence"):
         for row in rows(db, "SELECT id, source_id FROM evidence"):

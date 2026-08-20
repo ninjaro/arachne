@@ -26,7 +26,6 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-constexpr int product_schema_version = 7;
 constexpr int hint_store_schema_version = 3;
 constexpr std::uintmax_t maximum_decisions_bytes = 8U * 1024U * 1024U;
 
@@ -308,12 +307,22 @@ void attach_product_read_only(database& hints, const fs::path& path) {
             "canonical product attachment is not read-only"
         );
     }
-    statement version(hints.native(), "PRAGMA product.user_version");
-    if (!version.step() || version.integer(0) != product_schema_version) {
-        throw merge_hint_store_error(
-            "merge-hint rebuild requires product schema version 7"
-        );
-    }
+    // Preparing the fields consumed by this commit is a strict current-shape
+    // check. Numeric application schema versions and historical dispatch are
+    // intentionally not part of the product contract.
+    statement current_shape(
+        hints.native(),
+        "SELECT c.entity_id,c.agent_id,c.role,w.entity_id,m.entity_id,"
+        " wm.child_work_id,wm.parent_work_id,ar.subject_agent_id,"
+        " ar.object_agent_id,ev.entity_id"
+        " FROM product.credits c"
+        " LEFT JOIN product.works w ON w.entity_id=c.entity_id"
+        " LEFT JOIN product.manifestations m ON m.entity_id=c.entity_id"
+        " LEFT JOIN product.work_memberships wm ON 0"
+        " LEFT JOIN product.agent_relations ar ON 0"
+        " LEFT JOIN product.events ev ON 0 LIMIT 0"
+    );
+    current_shape.execute();
 }
 
 struct ignored_pair_state final {
@@ -455,9 +464,6 @@ void initialize_store(
         metadata.bind(2, value);
         metadata.execute();
     };
-    insert_metadata(
-        "product_schema_version", std::to_string(product_schema_version)
-    );
     insert_metadata("product_sha256", product_sha256);
     insert_metadata("hint_store_schema_version", "3");
     insert_metadata("generator_version", generator_version);
@@ -495,9 +501,7 @@ void require_current_store(
             "unsupported disposable merge-hint schema version"
         );
     }
-    if (metadata_value(hints.native(), "product_schema_version")
-            != std::to_string(product_schema_version)
-        || metadata_value(hints.native(), "hint_store_schema_version") != "3") {
+    if (metadata_value(hints.native(), "hint_store_schema_version") != "3") {
         throw merge_hint_store_error(
             "disposable merge-hint metadata uses an unsupported version"
         );
@@ -641,8 +645,7 @@ void require_current_store(
         { "artifact_type", "merge_hint_input_v1" },
         { "format_version", 1 },
         { "product_snapshot",
-          { { "schema_version", product_schema_version },
-            { "sha256", metadata_value(hints.native(), "product_sha256") } } },
+          { { "sha256", metadata_value(hints.native(), "product_sha256") } } },
         { "decisions_snapshot",
           { { "sha256", metadata_value(hints.native(), "decisions_sha256") },
             { "ignored_pair_count",
@@ -683,6 +686,7 @@ void require_current_store(
                 { "birth_year", optional_integer(base, 3) },
                 { "death_year", optional_integer(base, 4) },
                 { "credits", json::array() },
+                { "relations", json::array() },
             };
         } else if (base.text(1) == "work") {
             entity["work"] = {
@@ -690,7 +694,7 @@ void require_current_store(
                                              : json(base.text(5)) },
                 { "year_start", optional_integer(base, 6) },
                 { "year_end", optional_integer(base, 7) },
-                { "date_precision", base.is_null(8) ? json("unknown")
+                { "date_precision", base.is_null(8) ? json(nullptr)
                                                       : json(base.text(8)) },
                 { "date_start_text", base.is_null(9) ? json(nullptr)
                                                        : json(base.text(9)) },
@@ -701,6 +705,9 @@ void require_current_store(
                 { "credits", json::array() },
                 { "concept_ids", json::array() },
                 { "measurements", json::array() },
+                { "memberships", json::array() },
+                { "events", json::array() },
+                { "manifestations", json::array() },
             };
         } else {
             entity["concept"] = {
@@ -752,8 +759,10 @@ void require_current_store(
 
     statement credits(
         hints.native(),
-        "SELECT work_id,agent_id,role,importance,credited_as,credit_order"
-        " FROM product.credits ORDER BY work_id,agent_id,role,id"
+        "SELECT c.entity_id,c.agent_id,c.role,c.importance,c.credited_as,"
+        " c.credit_order FROM product.credits c"
+        " JOIN product.works w ON w.entity_id=c.entity_id"
+        " ORDER BY c.entity_id,c.agent_id,c.role,c.id"
     );
     while (credits.step()) {
         const auto work = indices.find(credits.text(0));
@@ -781,6 +790,170 @@ void require_current_store(
             entities[agent->second]["agent"]["credits"].push_back(
                 std::move(value)
             );
+        }
+    }
+
+    std::unordered_map<std::string, std::pair<std::size_t, std::size_t>>
+        manifestation_locations;
+    statement manifestations(
+        hints.native(),
+        "SELECT entity_id,work_id,manifestation_type,release_year,region_code,"
+        " language_code,label FROM product.manifestations"
+        " ORDER BY work_id,entity_id"
+    );
+    while (manifestations.step()) {
+        const auto work = indices.find(manifestations.text(1));
+        if (work == indices.end()) {
+            continue;
+        }
+        json value {
+            { "entity_id", manifestations.text(0) },
+            { "manifestation_type", manifestations.text(2) },
+            { "release_year", optional_integer(manifestations, 3) },
+            { "region_code", manifestations.is_null(4)
+                  ? json(nullptr)
+                  : json(manifestations.text(4)) },
+            { "language_code", manifestations.is_null(5)
+                  ? json(nullptr)
+                  : json(manifestations.text(5)) },
+            { "label", manifestations.is_null(6)
+                  ? json(nullptr)
+                  : json(manifestations.text(6)) },
+            { "credits", json::array() },
+            { "events", json::array() },
+        };
+        auto& values = entities[work->second]["work"]["manifestations"];
+        manifestation_locations.emplace(
+            manifestations.text(0),
+            std::pair { work->second, values.size() }
+        );
+        values.push_back(std::move(value));
+    }
+
+    statement manifestation_credits(
+        hints.native(),
+        "SELECT c.entity_id,c.agent_id,c.role,c.importance,c.credited_as,"
+        " c.credit_order FROM product.credits c"
+        " JOIN product.manifestations m ON m.entity_id=c.entity_id"
+        " ORDER BY c.entity_id,c.agent_id,c.role,c.id"
+    );
+    while (manifestation_credits.step()) {
+        const auto location
+            = manifestation_locations.find(manifestation_credits.text(0));
+        if (location == manifestation_locations.end()) {
+            continue;
+        }
+        json value {
+            { "agent_id", manifestation_credits.text(1) },
+            { "role", manifestation_credits.text(2) },
+            { "importance", manifestation_credits.text(3) },
+        };
+        if (!manifestation_credits.is_null(4)) {
+            value["credited_as"] = manifestation_credits.text(4);
+        }
+        if (!manifestation_credits.is_null(5)) {
+            value["credit_order"] = manifestation_credits.integer(5);
+        }
+        entities[location->second.first]["work"]["manifestations"]
+            [location->second.second]["credits"]
+                .push_back(std::move(value));
+    }
+
+    statement memberships(
+        hints.native(),
+        "SELECT child_work_id,parent_work_id,membership_type,position,"
+        " position_text FROM product.work_memberships ORDER BY id"
+    );
+    while (memberships.step()) {
+        const auto child = indices.find(memberships.text(0));
+        const auto parent = indices.find(memberships.text(1));
+        const auto append = [&](const auto found, const std::string_view direction,
+                                const std::string& peer) {
+            if (found == indices.end()) {
+                return;
+            }
+            json value {
+                { "direction", direction },
+                { "work_id", peer },
+                { "membership_type", memberships.text(2) },
+                { "position", optional_integer(memberships, 3) },
+                { "position_text", memberships.is_null(4)
+                      ? json(nullptr)
+                      : json(memberships.text(4)) },
+            };
+            entities[found->second]["work"]["memberships"].push_back(
+                std::move(value)
+            );
+        };
+        append(child, "outgoing", memberships.text(1));
+        append(parent, "incoming", memberships.text(0));
+    }
+
+    statement agent_relations_query(
+        hints.native(),
+        "SELECT subject_agent_id,relation_type,object_agent_id,from_year,"
+        " to_year,period_text,role_text FROM product.agent_relations"
+        " ORDER BY id"
+    );
+    while (agent_relations_query.step()) {
+        const auto subject = indices.find(agent_relations_query.text(0));
+        const auto object = indices.find(agent_relations_query.text(2));
+        const auto append = [&](const auto found, const std::string_view direction,
+                                const std::string& peer) {
+            if (found == indices.end()) {
+                return;
+            }
+            json value {
+                { "direction", direction },
+                { "agent_id", peer },
+                { "relation_type", agent_relations_query.text(1) },
+                { "from_year", optional_integer(agent_relations_query, 3) },
+                { "to_year", optional_integer(agent_relations_query, 4) },
+                { "period_text", agent_relations_query.is_null(5)
+                      ? json(nullptr)
+                      : json(agent_relations_query.text(5)) },
+                { "role_text", agent_relations_query.is_null(6)
+                      ? json(nullptr)
+                      : json(agent_relations_query.text(6)) },
+            };
+            entities[found->second]["agent"]["relations"].push_back(
+                std::move(value)
+            );
+        };
+        append(subject, "outgoing", agent_relations_query.text(2));
+        append(object, "incoming", agent_relations_query.text(0));
+    }
+
+    statement events(
+        hints.native(),
+        "SELECT id,entity_id,event_type,year_start,year_end,date_text,"
+        " date_precision,place_text FROM product.events ORDER BY entity_id,id"
+    );
+    while (events.step()) {
+        json value {
+            { "id", events.integer(0) },
+            { "event_type", events.text(2) },
+            { "year_start", optional_integer(events, 3) },
+            { "year_end", optional_integer(events, 4) },
+            { "date_text", events.is_null(5) ? json(nullptr)
+                                                : json(events.text(5)) },
+            { "date_precision", events.is_null(6) ? json(nullptr)
+                                                     : json(events.text(6)) },
+            { "place_text", events.is_null(7) ? json(nullptr)
+                                                : json(events.text(7)) },
+        };
+        if (const auto work = indices.find(events.text(1));
+            work != indices.end()
+            && entities[work->second]["family"] == "work") {
+            entities[work->second]["work"]["events"].push_back(
+                std::move(value)
+            );
+        } else if (const auto manifestation
+                   = manifestation_locations.find(events.text(1));
+                   manifestation != manifestation_locations.end()) {
+            entities[manifestation->second.first]["work"]["manifestations"]
+                [manifestation->second.second]["events"]
+                    .push_back(std::move(value));
         }
     }
 
@@ -2947,8 +3120,6 @@ void validate_stored_extended_analysis_references(sqlite3* const sql) {
     const std::string algorithm_version
         = metadata_value(sql, "structural_algorithm_version");
     const json snapshot {
-        { "schema_version",
-          std::stoll(metadata_value(sql, "product_schema_version")) },
         { "sha256", metadata_value(sql, "product_sha256") },
     };
     const json cross_media = stored_analysis_section(sql, "cross_media");
@@ -3302,10 +3473,7 @@ void require_derived_consistency(sqlite3* const sql) {
     );
     require_zero(
         "SELECT count(*) FROM main.analytical_observations o WHERE"
-        " json_extract(o.product_snapshot_json,'$.schema_version') IS NOT"
-        " CAST((SELECT value FROM main.metadata"
-        "  WHERE key='product_schema_version') AS INTEGER)"
-        " OR json_extract(o.product_snapshot_json,'$.sha256') IS NOT"
+        " json_extract(o.product_snapshot_json,'$.sha256') IS NOT"
         " (SELECT value FROM main.metadata WHERE key='product_sha256')",
         "analytical observations are stale or unbound from the product snapshot"
     );
@@ -3371,18 +3539,12 @@ void require_derived_consistency(sqlite3* const sql) {
         "  'arachne_structural_analysis_v1')"
         " OR (section='version' AND json_extract(payload_json,'$') IS NOT 1)"
         " OR (section='snapshot' AND ("
-        "  json_extract(payload_json,'$.schema_version') IS NOT"
-        "   CAST((SELECT value FROM main.metadata"
-        "    WHERE key='product_schema_version') AS INTEGER)"
-        "  OR json_extract(payload_json,'$.sha256') IS NOT"
+        "  json_extract(payload_json,'$.sha256') IS NOT"
         "   (SELECT value FROM main.metadata WHERE key='product_sha256')))"
         " OR (section='external_classification_comparison' AND ("
         "  json_extract(payload_json,'$.algorithm_version') IS NOT"
         "   (SELECT value FROM main.metadata"
         "    WHERE key='structural_algorithm_version')"
-        "  OR json_extract(payload_json,'$.product_snapshot.schema_version')"
-        "   IS NOT CAST((SELECT value FROM main.metadata"
-        "    WHERE key='product_schema_version') AS INTEGER)"
         "  OR json_extract(payload_json,'$.product_snapshot.sha256') IS NOT"
         "   (SELECT value FROM main.metadata WHERE key='product_sha256')))",
         "structural analysis projection has stale contract or snapshot binding"
@@ -3483,8 +3645,6 @@ void store_merge_hint_projection(
         || projection.at("generator").value("version", "")
             != metadata_value(hints.native(), "generator_version")
         || !projection.contains("product_snapshot")
-        || projection.at("product_snapshot").value("schema_version", 0)
-            != product_schema_version
         || projection.at("product_snapshot").value("sha256", "")
             != metadata_value(hints.native(), "product_sha256")
         || !projection.contains("decisions_snapshot")
@@ -3760,8 +3920,7 @@ json load_merge_hint_export(
             { "score_scale", 10000 },
             { "selection_method", "strong-union-otsu-fuzzy-v1" } } },
         { "product_snapshot",
-          { { "schema_version", product_schema_version },
-            { "sha256", metadata_value(hints.native(), "product_sha256") } } },
+          { { "sha256", metadata_value(hints.native(), "product_sha256") } } },
         { "decisions_snapshot",
           { { "sha256", metadata_value(hints.native(), "decisions_sha256") },
             { "ignored_pair_count",

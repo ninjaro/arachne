@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { fixtureDomain, fixtureWork } from "../lib/test-fixtures";
+import type { Agent } from "../lib/types";
 import { TasteView } from "./TasteView";
 
 describe("Taste view", () => {
@@ -10,7 +11,7 @@ describe("Taste view", () => {
       { id: "concept-1", label: "Rated Theme" },
     ] });
     work.concepts[0].conceptType = "theme";
-    const agent = { id: "agent-1", label: "Rated Agent", agentType: "person", identifiers: [] };
+    const agent: Agent = { id: "agent-1", label: "Rated Agent", agentType: "person", identifiers: [] };
     work.contributors = [{ ...agent, role: "author", order: 0, importance: "primary", creditedAs: null }];
     const domain = fixtureDomain([work]);
     domain.agents = [agent];

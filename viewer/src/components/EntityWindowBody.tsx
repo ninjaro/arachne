@@ -94,6 +94,7 @@ function IdentifierSection({ identifiers }: { identifiers: Identifier[] }) {
 
 export function WorkEntityBody({
   work,
+  domain,
   ratings,
   onRate,
   onSearch,
@@ -102,6 +103,7 @@ export function WorkEntityBody({
   imageHintProduct,
 }: {
   work: Work;
+  domain: Domain;
   ratings: Ratings;
   onRate: RateHandler;
   onSearch: (query: string) => void;
@@ -109,6 +111,10 @@ export function WorkEntityBody({
   imageHintsUrl: string;
   imageHintProduct: ImageHintProductIdentity;
 }) {
+  const memberships = domain.workMemberships.filter(
+    (membership) =>
+      membership.childId === work.id || membership.parentId === work.id,
+  );
   return (
     <>
       <div className="window-meta">
@@ -206,6 +212,59 @@ export function WorkEntityBody({
                   contributor.creditedAs !== contributor.label
                     ? ` as ${contributor.creditedAs}`
                     : ""}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ) : null}
+
+      {memberships.length ? (
+        <section>
+          <h3>Structure</h3>
+          <dl className="detail-list">
+            {memberships.map((membership) => {
+              const outgoing = membership.childId === work.id;
+              const peerId = outgoing ? membership.parentId : membership.childId;
+              const peer = domain.workById.get(peerId);
+              return (
+                <div key={membership.id}>
+                  <dt>{humanize(outgoing ? membership.membershipType : `contains_${membership.membershipType}`)}</dt>
+                  <dd>
+                    <button
+                      type="button"
+                      className="detail-filter-link"
+                      onClick={() => onOpen(peerId)}
+                    >
+                      {peer?.label ?? peerId}
+                    </button>
+                    {membership.positionText
+                      ? ` · ${membership.positionText}`
+                      : membership.position !== null
+                        ? ` · #${membership.position}`
+                        : ""}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        </section>
+      ) : null}
+
+      {work.events.length ? (
+        <section>
+          <h3>Events</h3>
+          <dl className="detail-list">
+            {work.events.map((event) => (
+              <div key={event.id}>
+                <dt>{humanize(event.eventType)}</dt>
+                <dd>
+                  {event.dateText ?? event.yearStart ?? "Date unknown"}
+                  {event.yearEnd !== null && event.yearEnd !== event.yearStart
+                    ? `–${event.yearEnd}`
+                    : ""}
+                  {event.placeText ? ` · ${event.placeText}` : ""}
+                  {event.datePrecision ? ` · ${humanize(event.datePrecision)}` : ""}
                 </dd>
               </div>
             ))}
@@ -343,6 +402,25 @@ export function WorkEntityBody({
                 {manifestation.regionCode
                   ? ` · ${manifestation.regionCode}`
                   : ""}
+                {manifestation.contributors.length ? (
+                  <ul className="plain-list">
+                    {manifestation.contributors.map((contributor, index) => (
+                      <li key={`${contributor.id}:${contributor.role}:${index}`}>
+                        {humanize(contributor.role)}: {contributor.label}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {manifestation.events.length ? (
+                  <ul className="plain-list">
+                    {manifestation.events.map((event) => (
+                      <li key={event.id}>
+                        {humanize(event.eventType)}: {event.dateText ?? event.yearStart ?? "date unknown"}
+                        {event.placeText ? ` · ${event.placeText}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -379,6 +457,9 @@ export function AgentEntityBody({
     [agent.id, domain.works],
   );
   const visibleWorks = creditedWorks.slice(0, 100);
+  const relations = domain.agentRelations.filter(
+    (relation) => relation.subjectId === agent.id || relation.objectId === agent.id,
+  );
 
   return (
     <>
@@ -431,6 +512,39 @@ export function AgentEntityBody({
               Showing the first {visibleWorks.length.toLocaleString()} works.
             </p>
           ) : null}
+        </section>
+      ) : null}
+
+      {relations.length ? (
+        <section>
+          <h3>Relationships</h3>
+          <dl className="detail-list">
+            {relations.map((relation) => {
+              const outgoing = relation.subjectId === agent.id;
+              const peerId = outgoing ? relation.objectId : relation.subjectId;
+              const peer = domain.agentById.get(peerId);
+              return (
+                <div key={relation.id}>
+                  <dt>{humanize(outgoing ? relation.relationType : `inverse_${relation.relationType}`)}</dt>
+                  <dd>
+                    <button
+                      type="button"
+                      className="detail-filter-link"
+                      onClick={() => onOpen(peerId)}
+                    >
+                      {peer?.label ?? peerId}
+                    </button>
+                    {relation.roleText ? ` · ${relation.roleText}` : ""}
+                    {relation.periodText
+                      ? ` · ${relation.periodText}`
+                      : relation.fromYear !== null
+                        ? ` · ${relation.fromYear}${relation.toYear !== null ? `–${relation.toYear}` : ""}`
+                        : ""}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
         </section>
       ) : null}
 

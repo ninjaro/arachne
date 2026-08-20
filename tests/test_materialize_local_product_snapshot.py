@@ -18,6 +18,7 @@ MATERIALIZER = ROOT / "scripts" / "materialize_local_product_snapshot.py"
 CATALOG_BUILDER = ROOT / "viewer" / "scripts" / "build_catalog.py"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 STABLE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+PRODUCT_SCHEMA = ROOT / "schema" / "product.sql"
 
 
 def digest(path: Path) -> str:
@@ -26,7 +27,7 @@ def digest(path: Path) -> str:
 
 def create_database(path: Path, *, stable_primary_keys: bool = True) -> None:
     with sqlite3.connect(path) as connection:
-        connection.execute("PRAGMA user_version = 7")
+        connection.executescript(PRODUCT_SCHEMA.read_text(encoding="utf-8"))
         if stable_primary_keys:
             connection.executescript(
                 """
@@ -45,6 +46,17 @@ def create_database(path: Path, *, stable_primary_keys: bool = True) -> None:
             )
 
 
+def create_product_database(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.executescript(PRODUCT_SCHEMA.read_text(encoding="utf-8"))
+        connection.execute(
+            "INSERT INTO entities(id, entity_type) VALUES('work-000001', 'work')"
+        )
+        connection.execute(
+            "INSERT INTO works(entity_id, medium) VALUES('work-000001', 'film')"
+        )
+
+
 class LocalProductSnapshotMaterializerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
@@ -54,7 +66,7 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         self.database = self.root / "canonical product.sqlite"
         self.graph_store = self.root / "state graphs"
         self.control = self.root / "product-control.json"
-        create_database(self.database)
+        create_product_database(self.database)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -134,7 +146,7 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         self.assertEqual(control["format_version"], 1)
         self.assertRegex(control["snapshot_id"], STABLE_ID)
         self.assertRegex(control["run_id"], STABLE_ID)
-        self.assertEqual(control["graph_version"], "canonical-schema-v7")
+        self.assertEqual(control["graph_version"], "canonical-product-schema")
         self.assertEqual(control["content_sha256"], digest(self.database))
         dt.datetime.fromisoformat(control["activated_at"].replace("Z", "+00:00"))
         self.assertEqual(
@@ -178,10 +190,23 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         self.assertEqual(
             [(record["table"], record["row"]) for record in records[1:]],
             [
-                ("alpha", {"code": "a", "value": 1.5}),
-                ("alpha", {"code": "b", "value": 2.5}),
-                ("zeta", {"id": 1, "value": "first"}),
-                ("zeta", {"id": 2, "value": "second"}),
+                ("entities", {"entity_type": "work", "id": "work-000001"}),
+                (
+                    "works",
+                    {
+                        "country_code": None,
+                        "date_end_text": None,
+                        "date_precision": None,
+                        "date_qualifier": None,
+                        "date_start_text": None,
+                        "entity_id": "work-000001",
+                        "language_code": None,
+                        "medium": "film",
+                        "production_info_json": None,
+                        "year_end": None,
+                        "year_start": None,
+                    },
+                ),
             ],
         )
         snapshot = database.parent

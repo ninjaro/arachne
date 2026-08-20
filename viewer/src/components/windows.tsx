@@ -258,6 +258,7 @@ export function FloatingEntityWindows({
               {work ? (
                 <WorkEntityBody
                   work={work}
+                  domain={domain}
                   ratings={ratings}
                   onRate={onRate}
                   onSearch={onSearch}

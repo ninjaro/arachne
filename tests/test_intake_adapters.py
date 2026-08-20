@@ -137,7 +137,7 @@ class IntakeAdapterTests(unittest.TestCase):
         payload = self.artifacts / "intake" / "batch.json"
         payload.parent.mkdir()
         content = (
-            b'{"format":"arachne_batch_v2","batch_id":"issue-17",'
+            b'{"format":"arachne_batch","batch_id":"issue-17",'
             b'"create":{},"update":{},"merge":{}}\n'
         )
         payload.write_bytes(content)

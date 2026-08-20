@@ -51,4 +51,4 @@ jobs:
             --base "${{ github.event.repository.default_branch }}" \
             --branch "arachne/inbox-${GITHUB_RUN_ID}" \
             --title "Apply Arachne inbox batches" \
-            --body "Applied validated arachne_batch_v2 files from inbox/ in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+            --body "Applied validated arachne_batch files from inbox/ in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."

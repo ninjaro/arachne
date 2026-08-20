@@ -700,9 +700,8 @@ namespace {
             { "format_version", 1 },
             { "product_snapshot",
               snapshot_identity(product_snapshot_id, product_sha256) },
-            // Compatibility keys let the current static viewer consume the same
-            // physical report while it migrates to the explicit artifact
-            // envelope.
+            // Viewer-facing aliases expose the same snapshot-bound report
+            // through the catalog naming convention.
             { "formatVersion", 1 },
             { "productSnapshotId", product_snapshot_id },
             { "centrality_scale_coverage",
@@ -757,27 +756,51 @@ ordered_json product_projection_builder::entity(
     const std::string entity_type
         = string_field(*canonical, "entity_type", "canonical entity");
     const bool work_family = entity_type == "work";
+    const bool manifestation_family = entity_type == "manifestation";
     const bool agent_family = entity_type == "person"
         || entity_type == "organization" || entity_type == "group";
-    if (!work_family && !agent_family) {
+    if (!work_family && !manifestation_family && !agent_family) {
         throw std::invalid_argument(
-            "product entity inspection supports only works and agents"
+            "product entity inspection supports only works, manifestations, "
+            "and agents"
         );
     }
     const auto labels = preferred_names(product_export);
     ordered_json credits = ordered_json::array();
     for (const auto& credit : array_or_empty(product_export, "credits")) {
-        if (!credit.is_object()
-            || (work_family && credit.value("work_id", "") != entity_id)
+        if (!credit.is_object()) {
+            continue;
+        }
+        const std::string target_id = credit.value("entity_id", "");
+        if (((work_family || manifestation_family)
+                && target_id != entity_id)
             || (agent_family && credit.value("agent_id", "") != entity_id)) {
             continue;
         }
         ordered_json item = credit;
-        const std::string related_id = work_family
+        const std::string related_id = work_family || manifestation_family
             ? credit.value("agent_id", "")
-            : credit.value("work_id", "");
-        item[work_family ? "agent_label" : "work_label"]
-            = labels.contains(related_id) ? labels.at(related_id) : related_id;
+            : target_id;
+        if (work_family || manifestation_family) {
+            item["agent_label"] = labels.contains(related_id)
+                ? labels.at(related_id)
+                : related_id;
+        } else {
+            const json* target
+                = find_row(product_export, "entities", "id", target_id);
+            const std::string target_type = target == nullptr
+                ? "unknown"
+                : target->value("entity_type", "unknown");
+            item["target_type"] = target_type;
+            item["target_label"] = labels.contains(related_id)
+                ? labels.at(related_id)
+                : related_id;
+            if (target_type == "work") {
+                item["work_label"] = item.at("target_label");
+            } else if (target_type == "manifestation") {
+                item["manifestation_label"] = item.at("target_label");
+            }
+        }
         credits.push_back(std::move(item));
     }
 
@@ -865,8 +888,68 @@ ordered_json product_projection_builder::entity(
         }
     }
 
+    ordered_json work_memberships = ordered_json::array();
+    if (work_family) {
+        for (const auto& membership :
+             array_or_empty(product_export, "work_memberships")) {
+            if (membership.is_object()
+                && (membership.value("child_work_id", "") == entity_id
+                    || membership.value("parent_work_id", "")
+                        == entity_id)) {
+                work_memberships.push_back(ordered_json(membership));
+            }
+        }
+    }
+
+    ordered_json agent_relations = ordered_json::array();
+    if (agent_family) {
+        for (const auto& relation :
+             array_or_empty(product_export, "agent_relations")) {
+            if (relation.is_object()
+                && (relation.value("subject_agent_id", "") == entity_id
+                    || relation.value("object_agent_id", "") == entity_id)) {
+                agent_relations.push_back(ordered_json(relation));
+            }
+        }
+    }
+
+    const ordered_json events
+        = (work_family || manifestation_family)
+        ? filtered_rows(product_export, "events", "entity_id", entity_id)
+        : ordered_json::array();
+
+    ordered_json manifestation_credits = ordered_json::array();
+    if (work_family) {
+        std::set<std::string, std::less<>> manifestation_ids;
+        for (const auto& manifestation :
+             array_or_empty(product_export, "manifestations")) {
+            if (manifestation.is_object()
+                && manifestation.value("work_id", "") == entity_id) {
+                manifestation_ids.emplace(
+                    manifestation.value("entity_id", "")
+                );
+            }
+        }
+        for (const auto& credit : array_or_empty(product_export, "credits")) {
+            if (credit.is_object()
+                && manifestation_ids.contains(
+                    credit.value("entity_id", "")
+                )) {
+                ordered_json item = credit;
+                const std::string agent_id = credit.value("agent_id", "");
+                item["agent_label"] = labels.contains(agent_id)
+                    ? labels.at(agent_id)
+                    : agent_id;
+                manifestation_credits.push_back(std::move(item));
+            }
+        }
+    }
+
     const json* subtype = find_row(
-        product_export, work_family ? "works" : "agents", "entity_id", entity_id
+        product_export,
+        work_family ? "works"
+                    : manifestation_family ? "manifestations" : "agents",
+        "entity_id", entity_id
     );
     if (subtype == nullptr) {
         throw std::invalid_argument(
@@ -879,9 +962,13 @@ ordered_json product_projection_builder::entity(
         { "product_snapshot",
           snapshot_identity(product_snapshot_id, product_sha256) },
         { "entity_id", entity_id },
-        { "family", work_family ? "work" : "agent" },
+        { "family", work_family ? "work"
+                                 : manifestation_family ? "manifestation"
+                                                        : "agent" },
         { "entity", *canonical },
-        { work_family ? "work" : "agent", *subtype },
+        { work_family ? "work"
+                      : manifestation_family ? "manifestation" : "agent",
+          *subtype },
         { "names",
           filtered_rows(product_export, "names", "entity_id", entity_id) },
         { "external_ids",
@@ -896,6 +983,7 @@ ordered_json product_projection_builder::entity(
                     product_export, "manifestations", "work_id", entity_id
                 )
               : ordered_json::array() },
+        { "manifestation_credits", std::move(manifestation_credits) },
         { "measurements",
           filtered_rows(
               product_export, "measurements", "entity_id", entity_id
@@ -908,6 +996,9 @@ ordered_json product_projection_builder::entity(
               : ordered_json::array() },
         { "parent_guide_assertions", std::move(advisories) },
         { "work_relations", std::move(work_relations) },
+        { "work_memberships", std::move(work_memberships) },
+        { "agent_relations", std::move(agent_relations) },
+        { "events", events },
         { "evidence", std::move(evidence) },
         { "sources", std::move(sources) },
     };
@@ -1046,11 +1137,14 @@ ordered_json product_projection_builder::taste_index(
             continue;
         }
         const std::string agent_id = credit.value("agent_id", "");
-        const auto work = work_by_id.find(credit.value("work_id", ""));
+        const std::string target_id = credit.value("entity_id", "");
+        const auto work = work_by_id.find(target_id);
         if (agent_id.empty() || work == work_by_id.end()) {
+            // Release/edition credits remain available to entity/catalog
+            // projections but do not become work-level taste evidence.
             continue;
         }
-        credited_works_by_agent[agent_id].emplace(credit.value("work_id", ""));
+        credited_works_by_agent[agent_id].emplace(target_id);
         const double credit_weight
             = importance_multiplier(credit.value("importance", ""));
         auto& scores = scores_by_agent[agent_id];

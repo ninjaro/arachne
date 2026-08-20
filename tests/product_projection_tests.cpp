@@ -65,7 +65,7 @@ json product() {
               { "canonical_url", "https://www.wikidata.org/wiki/Q1" } } } },
         { "credits",
           { { { "id", 1 },
-              { "work_id", "work-000001" },
+              { "entity_id", "work-000001" },
               { "agent_id", "agent-000001" },
               { "role", "director" },
               { "credit_order", 1 },
@@ -327,35 +327,35 @@ TEST(
     );
     fixture["credits"].push_back(
         { { "id", 2 },
-          { "work_id", "work-000001" },
+          { "entity_id", "work-000001" },
           { "agent_id", "agent-000002" },
           { "role", "producer" },
           { "importance", "key" } }
     );
     fixture["credits"].push_back(
         { { "id", 3 },
-          { "work_id", "work-000002" },
+          { "entity_id", "work-000002" },
           { "agent_id", "agent-000001" },
           { "role", "director" },
           { "importance", "primary" } }
     );
     fixture["credits"].push_back(
         { { "id", 4 },
-          { "work_id", "work-000002" },
+          { "entity_id", "work-000002" },
           { "agent_id", "agent-000002" },
           { "role", "producer" },
           { "importance", "key" } }
     );
     fixture["credits"].push_back(
         { { "id", 5 },
-          { "work_id", "work-000003" },
+          { "entity_id", "work-000003" },
           { "agent_id", "agent-000001" },
           { "role", "director" },
           { "importance", "primary" } }
     );
     fixture["credits"].push_back(
         { { "id", 6 },
-          { "work_id", "work-000003" },
+          { "entity_id", "work-000003" },
           { "agent_id", "agent-000002" },
           { "role", "producer" },
           { "importance", "key" } }
@@ -472,6 +472,13 @@ TEST(
 TEST(ProductProjection, EntityInspectionJoinsWorkAndAgentContext) {
     auto fixture = product();
     fixture["entities"].push_back(
+        { { "id", "agent-000002" }, { "entity_type", "organization" } }
+    );
+    fixture["agents"].push_back(
+        { { "entity_id", "agent-000002" },
+          { "agent_type", "organization" } }
+    );
+    fixture["entities"].push_back(
         { { "id", "work-000002" }, { "entity_type", "work" } }
     );
     fixture["works"].push_back(
@@ -484,6 +491,37 @@ TEST(ProductProjection, EntityInspectionJoinsWorkAndAgentContext) {
             { "subject_work_id", "work-000001" },
             { "object_work_id", "work-000002" },
             { "relation_type", "influenced_by" } } }
+    );
+    fixture["work_memberships"] = json::array(
+        { { { "id", 1 },
+            { "child_work_id", "work-000001" },
+            { "parent_work_id", "work-000002" },
+            { "membership_type", "part_of" } } }
+    );
+    fixture["agent_relations"] = json::array(
+        { { { "id", 1 },
+            { "subject_agent_id", "agent-000001" },
+            { "relation_type", "member_of" },
+            { "object_agent_id", "agent-000002" } } }
+    );
+    fixture["events"] = json::array(
+        { { { "id", 1 },
+            { "entity_id", "work-000001" },
+            { "event_type", "premiered" },
+            { "year_start", 1950 },
+            { "date_precision", "year" } },
+          { { "id", 2 },
+            { "entity_id", "manifestation-000001" },
+            { "event_type", "released" },
+            { "year_start", 1951 },
+            { "date_precision", "year" } } }
+    );
+    fixture["credits"].push_back(
+        { { "id", 2 },
+          { "entity_id", "manifestation-000001" },
+          { "agent_id", "agent-000001" },
+          { "role", "distributor" },
+          { "importance", "key" } }
     );
     const auto work = arachne::ariadne::product_projection_builder::entity(
         fixture, "work-000001", "product-test", product_hash
@@ -504,6 +542,10 @@ TEST(ProductProjection, EntityInspectionJoinsWorkAndAgentContext) {
     EXPECT_EQ(
         work.at("work_relations").at(0).at("object_work_id"), "work-000002"
     );
+    EXPECT_EQ(work.at("work_memberships").size(), 1U);
+    EXPECT_EQ(work.at("events").size(), 1U);
+    ASSERT_EQ(work.at("manifestation_credits").size(), 1U);
+    EXPECT_EQ(work.at("manifestation_credits").at(0).at("role"), "distributor");
 
     const auto agent = arachne::ariadne::product_projection_builder::entity(
         fixture, "agent-000001", "product-test", product_hash
@@ -512,16 +554,35 @@ TEST(ProductProjection, EntityInspectionJoinsWorkAndAgentContext) {
     EXPECT_EQ(agent.at("credits").at(0).at("work_label"), "Sparse Work");
     EXPECT_TRUE(agent.at("manifestations").empty());
     EXPECT_TRUE(agent.at("work_relations").empty());
+    EXPECT_EQ(agent.at("credits").size(), 2U);
+    EXPECT_EQ(agent.at("credits").at(1).at("target_type"), "manifestation");
+    EXPECT_EQ(agent.at("agent_relations").size(), 1U);
+
+    const auto manifestation
+        = arachne::ariadne::product_projection_builder::entity(
+            fixture, "manifestation-000001", "product-test", product_hash
+        );
+    EXPECT_EQ(manifestation.at("family"), "manifestation");
+    ASSERT_EQ(manifestation.at("credits").size(), 1U);
+    EXPECT_EQ(manifestation.at("credits").at(0).at("role"), "distributor");
+    EXPECT_EQ(manifestation.at("events").size(), 1U);
 }
 
 TEST(ProductProjection, TasteIndexPrecomputesVectorsAndAgentAffinities) {
     auto fixture = product();
     fixture["credits"].push_back(
         { { "id", 2 },
-          { "work_id", "work-000001" },
+          { "entity_id", "work-000001" },
           { "agent_id", "agent-000001" },
           { "role", "producer" },
           { "importance", "supporting" } }
+    );
+    fixture["credits"].push_back(
+        { { "id", 3 },
+          { "entity_id", "manifestation-000001" },
+          { "agent_id", "agent-000001" },
+          { "role", "distributor" },
+          { "importance", "primary" } }
     );
     const auto index
         = arachne::ariadne::product_projection_builder::taste_index(
@@ -543,6 +604,13 @@ TEST(ProductProjection, TasteIndexPrecomputesVectorsAndAgentAffinities) {
     EXPECT_FALSE(policy.at("canonical_values_written"));
     const auto& coverage = index.at("centrality_scale_coverage");
     EXPECT_EQ(coverage.at("concept_assignment_count"), 1U);
+    EXPECT_EQ(
+        index.at("entities")
+            .at("agent-000001")
+            .at("centrality_scale_coverage")
+            .at("credited_work_count"),
+        1U
+    );
     EXPECT_EQ(coverage.at("missing_centrality_scale_count"), 1U);
     EXPECT_DOUBLE_EQ(
         coverage.at("missing_centrality_scale_fraction").get<double>(), 1.0

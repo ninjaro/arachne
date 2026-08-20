@@ -15,17 +15,26 @@ current Arachne product database.
   relation overlays, and adaptive compressed chronology
 - rated/recommended Islands graph with disconnected components preserved
 - draggable multi-window work details
-- first-class agents with external identifiers and credit references from works
+- first-class agents with external identifiers, explicit agent relationships,
+  and direct work-credit references
 - concepts, content-guide assertions, measurements, work identifiers,
-  manifestations and financial facts from the current database
+  structural work memberships, dated events, manifestations (including their
+  own credits/events), and financial facts from the current database
 
 Work-concept projections retain both the raw `1–100` centrality and the
 pair-local `centralityScale`. The viewer labels `none` as an unreviewed semantic
 scale while retaining the stored numeric value; it does not reinterpret it as
 binary, zero, or irrelevance. Viewer weighting uses that unchanged numeric
-value on its canonical range as a compatibility fallback, not as evidence that
+value on its canonical range as a numeric fallback, not as evidence that
 the number is semantically calibrated, and never infers a scale from the
 concept, neighboring works, or catalog-wide distributions.
+
+Only credits whose target is a work become work contributors or feed quality,
+research, and taste calculations. Credits targeting a release/edition remain
+visible on that manifestation and never silently become work-level evidence.
+General metadata is best-effort rather than authoritative and may be incomplete,
+stale, or incorrect; external identifiers link to original databases for users
+who need authoritative detail.
 
 ## Local development
 

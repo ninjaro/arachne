@@ -78,7 +78,6 @@ namespace {
         std::string work_id;
         std::string relation_type;
         std::optional<double> centrality;
-        /** Empty only for pre-v7 analytical fixtures, never an inferred mode. */
         std::string centrality_scale;
         std::optional<double> confidence;
         std::string historical_role;
@@ -314,20 +313,12 @@ namespace {
         return value == "binary" || value == "ordinal" || value == "graded";
     }
 
-    [[nodiscard]] std::string centrality_scale_from(
-        const json& assertion, const bool required
-    ) {
+    [[nodiscard]] std::string centrality_scale_from(const json& assertion) {
         const auto value = assertion.find("centrality_scale");
         if (value == assertion.end() || value->is_null()) {
-            if (required) {
-                throw std::invalid_argument(
-                    "product-v7 normalized assertion must retain "
-                    "centrality_scale"
-                );
-            }
-            /* Missing is retained as missing input. In particular, do not
-             * silently turn it into one of the four canonical scale modes. */
-            return {};
+            throw std::invalid_argument(
+                "current normalized assertion must retain centrality_scale"
+            );
         }
         if (!value->is_string()) {
             throw std::invalid_argument(
@@ -529,8 +520,6 @@ namespace {
     [[nodiscard]] corpus_data parse_corpus(const json& input) {
         corpus_data result;
         result.product_snapshot = input.at("product_snapshot");
-        const bool require_centrality_scale
-            = result.product_snapshot.value("schema_version", 0) >= 7;
         for (const auto& entity : input.at("entities")) {
             const std::string id = entity.at("id");
             const std::string family = entity.at("family");
@@ -541,8 +530,9 @@ namespace {
                 work.medium = normalized_token(payload, "medium", "unknown");
                 work.year_start = optional_integer(payload, "year_start");
                 work.year_end = optional_integer(payload, "year_end");
-                work.date_precision
-                    = payload.value("date_precision", "unknown");
+                work.date_precision = optional_string(
+                    payload, "date_precision"
+                ).value_or("unknown");
                 work.date_start_text
                     = optional_string(payload, "date_start_text");
                 work.date_end_text = optional_string(payload, "date_end_text");
@@ -702,7 +692,7 @@ namespace {
                     ),
                     .centrality = optional_number(assertion, "centrality"),
                     .centrality_scale = centrality_scale_from(
-                        assertion, require_centrality_scale
+                        assertion
                     ),
                     .confidence = optional_number(assertion, "confidence"),
                     .historical_role = normalized_token(
@@ -7875,7 +7865,7 @@ namespace {
             { "historical_acceptance_vs_scene_or_community_usage",
               { { "status", "unavailable_in_normalized_structural_input" },
                 { "canonical_schema_support",
-                  "not_represented_in_product_v7" },
+                  "not_represented_in_product" },
                 { "available_explicit_category_count", 0 },
                 { "inferred_from_source_type_or_text", false },
                 { "semantic_categories_collapsed", false },

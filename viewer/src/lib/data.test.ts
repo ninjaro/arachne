@@ -40,6 +40,9 @@ function catalog(): Catalog {
     agents: [firstAgent, secondAgent],
     works: [work],
     workRelations: [],
+    workMemberships: [],
+    agentRelations: [],
+    events: [],
   };
 }
 
@@ -84,6 +87,18 @@ describe("catalog agents", () => {
       identifiers: [],
     };
     expect(isCatalog(mismatchedContributor)).toBe(false);
+
+    const unknownAgentType = catalog();
+    unknownAgentType.agents[0] = {
+      ...unknownAgentType.agents[0],
+      agentType: "studio",
+    } as unknown as Agent;
+    expect(isCatalog(unknownAgentType)).toBe(false);
+
+    const unknownCreditRole = catalog();
+    (unknownCreditRole.works[0].contributors[0] as unknown as Record<string, unknown>).role =
+      "studio";
+    expect(isCatalog(unknownCreditRole)).toBe(false);
   });
 
   it("accepts a generated-shape catalog", () => {
@@ -111,5 +126,46 @@ describe("catalog agents", () => {
     const staleCount = catalog();
     staleCount.works[0].conceptAssignmentCount = 1;
     expect(isCatalog(staleCount)).toBe(false);
+  });
+
+  it("rejects tampered embedded events and manifestation contributors", () => {
+    const withEvent = catalog();
+    const event = {
+      id: "event:1",
+      entityId: "work-000001",
+      eventType: "premiered" as const,
+      yearStart: 2001,
+      yearEnd: null,
+      dateText: "May 2001",
+      datePrecision: "month" as const,
+      placeText: "Berlin",
+    };
+    withEvent.events = [event];
+    withEvent.works[0].events = [{ ...event, placeText: "Elsewhere" }];
+    expect(isCatalog(withEvent)).toBe(false);
+
+    const withManifestation = catalog();
+    withManifestation.works[0].manifestations = [
+      {
+        id: "manifestation-000001",
+        type: "release",
+        releaseYear: 2002,
+        regionCode: null,
+        languageCode: null,
+        label: "Release",
+        contributors: [
+          {
+            ...firstAgent,
+            label: "Tampered label",
+            role: "distributor",
+            order: 0,
+            importance: "key",
+            creditedAs: null,
+          },
+        ],
+        events: [],
+      },
+    ];
+    expect(isCatalog(withManifestation)).toBe(false);
   });
 });

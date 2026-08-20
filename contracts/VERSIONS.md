@@ -1,11 +1,11 @@
 # Arachne Contract Versions
 
 The files in `schemas/` are JSON Schema Draft 2020-12 contracts. The files in
-`examples/` are conforming payloads and executable compatibility fixtures.
+`examples/` are conforming payloads and executable contract fixtures.
 `artifacts/` contains schemas and examples for large resolved payloads that are
 referenced by boundary contracts rather than treated as additional contracts.
 
-`arachne_batch_v2` is the one active product-inbox format. It is a direct,
+`arachne_batch` is the one product-inbox format in the current commit. It is a direct,
 transactional mutation request for the product database rather than a generic
 actor message or a universal normalized transfer manifest.
 
@@ -25,13 +25,12 @@ and the payload's `contract`. It must not guess at a compatible interpretation.
 Product-inbox batches instead use the single discriminator:
 
 ```json
-{ "format": "arachne_batch_v2" }
+{ "format": "arachne_batch" }
 ```
 
 They do not carry `contract`, `format_version`, `batch_type`, or extensions.
 Their root, operation sections, and every record are closed with
-`additionalProperties: false`. A batch must be upgraded explicitly when its
-shape changes.
+`additionalProperties: false`.
 
 Minor, backward-compatible additions to actor control contracts belong under
 `extensions`. Extension keys use a namespaced form such as `org.example.trace`.
@@ -63,7 +62,7 @@ artifacts always use the original referenced bytes instead.
 
 | Contract | Producer | Consumer | Notes |
 |---|---|---|---|
-| `arachne_batch_v2` | Research bot or reviewer | Arachne product inbox | Closed create/update/merge request. New records use batch-local IDs; existing records use canonical database IDs. Assertions require explicit source-backed evidence, exact quotes, and stances. |
+| `arachne_batch` | Research bot or reviewer | Arachne product inbox | Closed create/update/merge request. New records use batch-local IDs; existing records use canonical database IDs. Assertions require explicit source-backed evidence, exact quotes, and stances. |
 | `batch_envelope_v1` | Arachne | Arachne, Penelope | Stable cocoon identity and immutable payload reference. `status` is a ledger projection; transitions do not mutate payload bytes or identity fields. |
 | `fetch_plan_v1` | Ariadne | Arachne | Declarative external-data needs; never an executable request. |
 | `fetch_request_v1` | Arachne | Pheidippides | Concrete door/endpoint GET or POST with transport mode, freshness, bounded independent timeouts/retries, optional body/checksum or verified resume artifact, and exact output custody. |
@@ -107,20 +106,21 @@ members of the C++ `contract_name` enumeration:
   medium/year/evidence, soft-guidance, or UI-style data.
 
 Legacy normalized imports and unresolved JSONL formats are not active contracts.
-Routine inbox processing mutates product schema v7 directly and records only
+Routine inbox processing mutates the current product schema directly and records only
 canonical product state, batch idempotency, and durable ingest issues. Its
 pair-local work-concept centrality scale is explicit: new assignments require a
 reviewed `binary`, `ordinal`, or `graded` mode, while `none` remains reserved for
-mechanically migrated, not-yet-reviewed assignments. Merge hints are a
+not-yet-reviewed assignments already present in the canonical product. Merge hints are a
 disposable Ariadne projection with an explicit review artifact; only
 ignored-pair decisions are durable, and neither artifact is part of the product
 database contract.
 
-## Compatibility policy
+## Actor-contract evolution policy
 
 - A v1 actor-contract producer may add only namespaced `extensions` entries
   without a major version change.
-- `arachne_batch_v2` admits no extensions or undeclared fields.
+- `arachne_batch` admits no extensions, version-negotiation fields, aliases, or
+  undeclared fields. Only the shape in the current commit is supported.
 - Removing a field, changing a field's meaning or type, broadening execution
   authority, or changing hash semantics requires a new major contract.
 - Consumers validate before performing transport, database mutation, graph

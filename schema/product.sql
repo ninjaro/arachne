@@ -1,10 +1,13 @@
--- Product graph schema v5. Canonical entities use compact readable text IDs;
--- internal records use row-local integer keys. Legacy remote assets, source
--- archives, and alternate source URLs are deliberately absent. Batch
--- idempotency, concrete ingest issues, and review-only merge hints live in the
--- product database without retaining execution metadata.
-PRAGMA user_version = 5;
-
+-- Current product graph schema. Canonical entities use compact readable text IDs;
+-- internal records use row-local integer keys. Remote assets, source archives,
+-- alternate source URLs, and disposable merge-hint state are deliberately
+-- absent. Work/concept centrality scale semantics belong to each assignment.
+-- `none` marks an assignment whose scale has not been semantically reviewed; it
+-- does not mean binary, irrelevant, zero, or unknown centrality. Consumers may
+-- retain the stored number as a fallback, but that is not evidence that the
+-- value is correctly calibrated. Batch idempotency and concrete ingest issues
+-- remain durable product workflow state. This file is the only supported
+-- product schema; repository history records earlier shapes.
 CREATE TABLE entities (
     id TEXT PRIMARY KEY,
     entity_type TEXT NOT NULL CHECK (entity_type IN
@@ -38,11 +41,11 @@ CREATE TABLE works (
         ('film','short_film','television','novel','novella','short_story',
          'poetry','play','essay','album','single','composition','painting',
          'print','engraving','drawing','sculpture','installation',
-         'photography','mixed_media')),
+         'photography','mixed_media','nonfiction','comic','performance')),
     year_start INTEGER,
     year_end INTEGER,
     date_precision TEXT CHECK (date_precision IS NULL OR date_precision IN
-        ('year','decade','approximate','range','exact')),
+        ('year','month','exact','decade','approximate','range')),
     date_start_text TEXT,
     date_end_text TEXT,
     date_qualifier TEXT,
@@ -59,6 +62,29 @@ CREATE TABLE works (
     CHECK (year_end IS NULL OR year_end BETWEEN -9999 AND 9999),
     CHECK (year_start IS NULL OR year_end IS NULL OR year_end >= year_start)
 ) STRICT;
+
+CREATE TABLE work_memberships (
+    id INTEGER PRIMARY KEY,
+    child_work_id TEXT NOT NULL REFERENCES works(entity_id) ON DELETE CASCADE,
+    parent_work_id TEXT NOT NULL REFERENCES works(entity_id) ON DELETE CASCADE,
+    membership_type TEXT NOT NULL CHECK (membership_type IN
+        ('episode_of','season_of','track_of','volume_of','issue_of','chapter_of',
+         'part_of','collected_in')),
+    position INTEGER CHECK (position IS NULL OR position >= 0),
+    position_text TEXT CHECK (position_text IS NULL OR length(position_text) > 0),
+    CHECK (child_work_id <> parent_work_id)
+) STRICT;
+CREATE INDEX work_memberships_child_idx
+ON work_memberships(child_work_id);
+CREATE INDEX work_memberships_parent_idx
+ON work_memberships(parent_work_id);
+CREATE UNIQUE INDEX work_memberships_logical_unique ON work_memberships(
+    child_work_id,
+    parent_work_id,
+    membership_type,
+    COALESCE(position, -1),
+    COALESCE(position_text, '')
+);
 
 CREATE TABLE manifestations (
     entity_id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
@@ -82,6 +108,34 @@ CREATE TABLE manifestations (
     ),
     CHECK (release_year IS NULL OR release_year BETWEEN -9999 AND 9999)
 ) STRICT;
+
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN
+        ('created','published','released','premiered','broadcast','performed',
+         'exhibited','recorded')),
+    year_start INTEGER,
+    year_end INTEGER,
+    date_text TEXT CHECK (date_text IS NULL OR length(date_text) > 0),
+    date_precision TEXT CHECK (date_precision IS NULL OR date_precision IN
+        ('year','month','exact','decade','approximate','range')),
+    place_text TEXT CHECK (place_text IS NULL OR length(place_text) > 0),
+    CHECK (year_start IS NULL OR year_start BETWEEN -9999 AND 9999),
+    CHECK (year_end IS NULL OR year_end BETWEEN -9999 AND 9999),
+    CHECK (year_start IS NULL OR year_end IS NULL OR year_end >= year_start)
+) STRICT;
+CREATE INDEX events_entity_idx ON events(entity_id);
+CREATE INDEX events_type_idx ON events(event_type);
+CREATE UNIQUE INDEX events_logical_unique ON events(
+    entity_id,
+    event_type,
+    COALESCE(year_start, -10000),
+    COALESCE(year_end, -10000),
+    COALESCE(date_text, ''),
+    COALESCE(date_precision, ''),
+    COALESCE(place_text, '')
+);
 
 CREATE TABLE names (
     id INTEGER PRIMARY KEY,
@@ -127,22 +181,55 @@ CREATE TABLE agents (
     CHECK (birth_year IS NULL OR death_year IS NULL OR death_year >= birth_year)
 ) STRICT;
 
+CREATE TABLE agent_relations (
+    id INTEGER PRIMARY KEY,
+    subject_agent_id TEXT NOT NULL REFERENCES agents(entity_id) ON DELETE CASCADE,
+    relation_type TEXT NOT NULL CHECK (relation_type IN
+        ('member_of','founder_of','subsidiary_of','division_of','imprint_of',
+         'owned_by','successor_of','predecessor_of')),
+    object_agent_id TEXT NOT NULL REFERENCES agents(entity_id) ON DELETE CASCADE,
+    from_year INTEGER,
+    to_year INTEGER,
+    period_text TEXT CHECK (period_text IS NULL OR length(period_text) > 0),
+    role_text TEXT CHECK (role_text IS NULL OR length(role_text) > 0),
+    CHECK (subject_agent_id <> object_agent_id),
+    CHECK (from_year IS NULL OR from_year BETWEEN -9999 AND 9999),
+    CHECK (to_year IS NULL OR to_year BETWEEN -9999 AND 9999),
+    CHECK (from_year IS NULL OR to_year IS NULL OR to_year >= from_year)
+) STRICT;
+CREATE INDEX agent_relations_subject_idx
+ON agent_relations(subject_agent_id);
+CREATE INDEX agent_relations_object_idx
+ON agent_relations(object_agent_id);
+CREATE UNIQUE INDEX agent_relations_logical_unique ON agent_relations(
+    subject_agent_id,
+    relation_type,
+    object_agent_id,
+    COALESCE(from_year, -10000),
+    COALESCE(to_year, -10000),
+    COALESCE(period_text, ''),
+    COALESCE(role_text, '')
+);
+
 CREATE TABLE credits (
     id INTEGER PRIMARY KEY,
-    work_id TEXT NOT NULL REFERENCES works(entity_id) ON DELETE CASCADE,
+    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     agent_id TEXT NOT NULL REFERENCES agents(entity_id) ON DELETE CASCADE,
     role TEXT NOT NULL CHECK (role IN
         ('author','director','screenwriter','producer','actor','composer',
          'performer','artist','engraver','sculptor','photographer','editor',
-         'cinematographer','production_company','publisher','record_label','band')),
+         'cinematographer','production_company','publisher','record_label','band',
+         'distributor','broadcaster','platform','translator','illustrator',
+         'printer','curator','choreographer','narrator','lyricist','songwriter',
+         'arranger','sound_engineer','designer','animator')),
     credit_order INTEGER CHECK (credit_order IS NULL OR credit_order >= 0),
     importance TEXT NOT NULL CHECK (importance IN ('primary','key','supporting')),
     credited_as TEXT
 ) STRICT;
-CREATE INDEX credits_work_idx ON credits(work_id);
+CREATE INDEX credits_entity_idx ON credits(entity_id);
 CREATE INDEX credits_agent_idx ON credits(agent_id);
 CREATE UNIQUE INDEX credits_logical_unique ON credits(
-    work_id,
+    entity_id,
     agent_id,
     role,
     COALESCE(credit_order, -1),
@@ -232,6 +319,8 @@ CREATE TABLE work_concepts (
         ('exemplifies','contains','anticipates','influenced_by','influences',
          'revives','parodies','deconstructs','associated_with')),
     centrality INTEGER NOT NULL CHECK (centrality BETWEEN 1 AND 100),
+    centrality_scale TEXT NOT NULL CHECK (centrality_scale IN
+        ('none','binary','ordinal','graded')),
     historical_role TEXT CHECK (historical_role IS NULL OR historical_role IN
         ('formative','canonical','transitional','hybrid','revival',
          'late_derivative','peripheral','precursor')),
@@ -345,88 +434,6 @@ CREATE TABLE ingest_issues (
 CREATE INDEX ingest_issues_status_idx
 ON ingest_issues(status, batch_id, code, json_path);
 
-CREATE TABLE merge_hints (
-    entity_type TEXT NOT NULL CHECK (
-        entity_type IN ('agent', 'work', 'concept')
-    ),
-    left_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    right_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    score REAL NOT NULL CHECK (score BETWEEN 0 AND 1),
-    text_score REAL,
-    graph_score REAL,
-    context_score REAL,
-    signals_json TEXT NOT NULL CHECK (json_valid(signals_json)),
-    status TEXT NOT NULL DEFAULT 'open' CHECK (
-        status IN ('open', 'ignored')
-    ),
-    PRIMARY KEY (entity_type, left_id, right_id),
-    CHECK (left_id < right_id)
-) STRICT;
-CREATE INDEX merge_hints_left_idx ON merge_hints(left_id);
-CREATE INDEX merge_hints_right_idx ON merge_hints(right_id);
-CREATE INDEX merge_hints_status_score_idx
-ON merge_hints(status, entity_type, score DESC, left_id, right_id);
-
--- Derived candidate blocks keep routine hint refresh proportional to the
--- entities changed by a batch. They are disposable and are reconstructed by
--- `product rebuild-merge-hints`; canonical product identity never depends on
--- them.
-CREATE TABLE merge_hint_blocks (
-    id INTEGER PRIMARY KEY,
-    entity_type TEXT NOT NULL CHECK (
-        entity_type IN ('agent', 'work', 'concept')
-    ),
-    block_type TEXT NOT NULL CHECK (
-        block_type IN (
-            'label_fingerprint',
-            'label_trigram',
-            'work_year_title_fingerprint',
-            'work_year_title_trigram',
-            'work_medium_title_fingerprint',
-            'work_medium_title_trigram',
-            'work_primary_agent',
-            'agent_work_role',
-            'concept_work',
-            'concept_neighbor',
-            'external_identifier'
-        )
-    ),
-    block_key TEXT NOT NULL CHECK (length(block_key) > 0),
-    UNIQUE (entity_type, block_type, block_key),
-    CHECK (
-        block_type IN (
-            'label_fingerprint','label_trigram','external_identifier'
-        )
-        OR (
-            entity_type = 'work'
-            AND block_type IN (
-                'work_year_title_fingerprint',
-                'work_year_title_trigram',
-                'work_medium_title_fingerprint',
-                'work_medium_title_trigram',
-                'work_primary_agent'
-            )
-        )
-        OR (
-            entity_type = 'agent' AND block_type = 'agent_work_role'
-        )
-        OR (
-            entity_type = 'concept'
-            AND block_type IN ('concept_work','concept_neighbor')
-        )
-    )
-) STRICT;
-
-CREATE TABLE merge_hint_block_members (
-    id INTEGER PRIMARY KEY,
-    block_id INTEGER NOT NULL
-        REFERENCES merge_hint_blocks(id) ON DELETE CASCADE,
-    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    UNIQUE (entity_id, block_id)
-) STRICT;
-CREATE INDEX merge_hint_block_members_peer_idx
-ON merge_hint_block_members(block_id, entity_id);
-
 CREATE TRIGGER works_entity_type BEFORE INSERT ON works
 WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id) <> 'work'
 BEGIN SELECT RAISE(ABORT, 'work entity has wrong type'); END;
@@ -434,6 +441,26 @@ BEGIN SELECT RAISE(ABORT, 'work entity has wrong type'); END;
 CREATE TRIGGER manifestations_entity_type BEFORE INSERT ON manifestations
 WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id) <> 'manifestation'
 BEGIN SELECT RAISE(ABORT, 'manifestation entity has wrong type'); END;
+
+CREATE TRIGGER credits_entity_type BEFORE INSERT ON credits
+WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
+     NOT IN ('work','manifestation')
+BEGIN SELECT RAISE(ABORT, 'credit target must be a work or manifestation'); END;
+
+CREATE TRIGGER credits_entity_type_update BEFORE UPDATE OF entity_id ON credits
+WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
+     NOT IN ('work','manifestation')
+BEGIN SELECT RAISE(ABORT, 'credit target must be a work or manifestation'); END;
+
+CREATE TRIGGER events_entity_type BEFORE INSERT ON events
+WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
+     NOT IN ('work','manifestation')
+BEGIN SELECT RAISE(ABORT, 'event target must be a work or manifestation'); END;
+
+CREATE TRIGGER events_entity_type_update BEFORE UPDATE OF entity_id ON events
+WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
+     NOT IN ('work','manifestation')
+BEGIN SELECT RAISE(ABORT, 'event target must be a work or manifestation'); END;
 
 CREATE TRIGGER agents_entity_type BEFORE INSERT ON agents
 WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id) <> NEW.agent_type
@@ -521,155 +548,4 @@ WHEN EXISTS (
      ) <= 1
 BEGIN
     SELECT RAISE(ABORT, 'parent-guide assertion requires evidence');
-END;
-
-CREATE TRIGGER merge_hints_entity_family_insert
-BEFORE INSERT ON merge_hints
-WHEN NOT (
-    (
-        NEW.entity_type = 'agent'
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.left_id
-              AND entity_type IN ('person','organization','group')
-        )
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.right_id
-              AND entity_type IN ('person','organization','group')
-        )
-    )
-    OR (
-        NEW.entity_type = 'work'
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.left_id AND entity_type = 'work'
-        )
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.right_id AND entity_type = 'work'
-        )
-    )
-    OR (
-        NEW.entity_type = 'concept'
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.left_id AND entity_type = 'concept'
-        )
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.right_id AND entity_type = 'concept'
-        )
-    )
-)
-BEGIN SELECT RAISE(ABORT, 'merge hint entity family mismatch'); END;
-
-CREATE TRIGGER merge_hints_entity_family_update
-BEFORE UPDATE OF entity_type, left_id, right_id ON merge_hints
-WHEN NOT (
-    (
-        NEW.entity_type = 'agent'
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.left_id
-              AND entity_type IN ('person','organization','group')
-        )
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.right_id
-              AND entity_type IN ('person','organization','group')
-        )
-    )
-    OR (
-        NEW.entity_type = 'work'
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.left_id AND entity_type = 'work'
-        )
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.right_id AND entity_type = 'work'
-        )
-    )
-    OR (
-        NEW.entity_type = 'concept'
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.left_id AND entity_type = 'concept'
-        )
-        AND EXISTS (
-            SELECT 1 FROM entities
-            WHERE id = NEW.right_id AND entity_type = 'concept'
-        )
-    )
-)
-BEGIN SELECT RAISE(ABORT, 'merge hint entity family mismatch'); END;
-
-CREATE TRIGGER merge_hint_block_members_entity_family_insert
-BEFORE INSERT ON merge_hint_block_members
-WHEN NOT (
-    (
-        (SELECT entity_type FROM merge_hint_blocks WHERE id = NEW.block_id)
-            = 'agent'
-        AND (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
-            IN ('person','organization','group')
-    )
-    OR (
-        (SELECT entity_type FROM merge_hint_blocks WHERE id = NEW.block_id)
-            = 'work'
-        AND (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
-            = 'work'
-    )
-    OR (
-        (SELECT entity_type FROM merge_hint_blocks WHERE id = NEW.block_id)
-            = 'concept'
-        AND (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
-            = 'concept'
-    )
-)
-BEGIN SELECT RAISE(ABORT, 'merge hint block entity family mismatch'); END;
-
-CREATE TRIGGER merge_hint_block_members_entity_family_update
-BEFORE UPDATE OF block_id, entity_id ON merge_hint_block_members
-WHEN NOT (
-    (
-        (SELECT entity_type FROM merge_hint_blocks WHERE id = NEW.block_id)
-            = 'agent'
-        AND (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
-            IN ('person','organization','group')
-    )
-    OR (
-        (SELECT entity_type FROM merge_hint_blocks WHERE id = NEW.block_id)
-            = 'work'
-        AND (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
-            = 'work'
-    )
-    OR (
-        (SELECT entity_type FROM merge_hint_blocks WHERE id = NEW.block_id)
-            = 'concept'
-        AND (SELECT entity_type FROM entities WHERE id = NEW.entity_id)
-            = 'concept'
-    )
-)
-BEGIN SELECT RAISE(ABORT, 'merge hint block entity family mismatch'); END;
-
-CREATE TRIGGER merge_hint_blocks_identity_update_guard
-BEFORE UPDATE OF entity_type, block_type, block_key ON merge_hint_blocks
-WHEN EXISTS (
-       SELECT 1 FROM merge_hint_block_members WHERE block_id = OLD.id
-     )
- AND (
-       NEW.entity_type IS NOT OLD.entity_type
-       OR NEW.block_type IS NOT OLD.block_type
-       OR NEW.block_key IS NOT OLD.block_key
- )
-BEGIN SELECT RAISE(ABORT, 'populated merge hint block identity is immutable'); END;
-
-CREATE TRIGGER merge_hint_block_members_remove_orphan
-AFTER DELETE ON merge_hint_block_members
-WHEN NOT EXISTS (
-    SELECT 1 FROM merge_hint_block_members WHERE block_id = OLD.block_id
-)
-BEGIN
-    DELETE FROM merge_hint_blocks WHERE id = OLD.block_id;
 END;

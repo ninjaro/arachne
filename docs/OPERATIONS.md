@@ -3,7 +3,7 @@
 GitHub workflows and local commands invoke the same executable. Prefer grouped
 `build/arachne` commands wherever the binary owns the operation. The
 `scripts/arachne_ops.py` adapter remains for preflight, capability negotiation,
-and compatibility surfaces that add behavior beyond argument translation;
+and operational surfaces that add behavior beyond argument translation;
 product inbox commands remain fixed and configuration-free.
 
 ## Local setup
@@ -109,27 +109,15 @@ python3 scripts/arachne_ops.py intake \
 ```
 
 Product-database submissions are not opaque packages. A bot or maintainer writes
-exactly one strict, plain UTF-8 `arachne_batch_v2` object per `.json` file and
+exactly one strict, plain UTF-8 `arachne_batch` object per `.json` file and
 moves it into repository `inbox/`. ZIP files, sidecars, old mining variants, and
 arbitrary metadata are rejected.
 
-### One-way schema v6 to v7 migration
-
-Run the fixed migration once from the repository root before using current
-product commands against a schema-v6 database:
-
-```sh
-python3 scripts/migrate_product_v6_to_v7.py
-```
-
-The migration atomically rebuilds `database/art-islands.sqlite`, preserves
-every numeric `work_concepts.centrality` exactly, assigns
-`centrality_scale = none` to every existing assignment, validates integrity and
-foreign keys, and runs `VACUUM` before replacement. It does not infer a scale
-from any product or analytical data. Here `none` means the stored numeric value
-has not received pair-level semantic review; it does not mean binary,
-irrelevant, zero, or unknown centrality. Later corrections use normal
-miner-authored batches.
+The current commit supports only `schema/product.sql` and the batch contract
+shipped alongside it. There is no numeric product-schema negotiation or
+permanent migration command. A schema change updates the canonical database,
+schema, contracts, consumers, and tests together; use repository history for an
+older product state.
 
 ## Product inbox
 
@@ -282,7 +270,7 @@ ignored working JSONL outside the viewer's public tree and without research
 semantics; the native command rejects it unless its embedded identity matches
 the current database bytes.
 
-Inspect one work or agent without opening SQLite or the viewer:
+Inspect one work, manifestation, or agent without opening SQLite or the viewer:
 
 ```sh
 build/arachne product entity \
@@ -292,8 +280,11 @@ build/arachne product entity \
 ```
 
 The disposable entity projection includes its canonical subtype, names,
-external identifiers, credits, concepts, manifestations, measurements,
-financial facts, guide assertions, and linked evidence where applicable.
+external identifiers, direct credits, concepts, manifestations, measurements,
+financial facts, guide assertions, memberships, agent relations, events, and
+linked evidence where applicable. Work-level inspection also separates credits
+on its manifestations; work research and taste consumers use only credits whose
+target resolves directly to a work.
 
 `product taste-index` writes the same closed `taste_index_v1` artifact used by
 the browser. It precomputes sparse work vectors, bounded agent concept

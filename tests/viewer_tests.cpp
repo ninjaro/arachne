@@ -122,7 +122,7 @@ nlohmann::json product_export_with_agent() {
     );
     product["credits"] = nlohmann::json::array(
         { { { "id", 1 },
-            { "work_id", "work-a" },
+            { "entity_id", "work-a" },
             { "agent_id", "agent-a" },
             { "role", "director" },
             { "credit_order", 1 },
@@ -292,7 +292,7 @@ TEST(AriadneViewer, IntegerProductIdsUseExplicitProjectionNamespaces) {
     );
     product["credits"] = nlohmann::json::array(
         { { { "id", 5 },
-            { "work_id", "work-a" },
+            { "entity_id", "work-a" },
             { "agent_id", "agent-a" },
             { "role", "director" } } }
     );
@@ -339,6 +339,89 @@ TEST(AriadneViewer, IntegerProductIdsUseExplicitProjectionNamespaces) {
         catalog.at("works").at(0).at("advisories").at(0).at("id"),
         "parent-guide:4"
     );
+}
+
+TEST(AriadneViewer, StructuralAndManifestationMetadataRemainExplicit) {
+    auto product = product_export_with_agent();
+    product["entities"].push_back(
+        { { "id", "manifestation-a" }, { "entity_type", "manifestation" } }
+    );
+    product["manifestations"] = nlohmann::json::array(
+        { { { "entity_id", "manifestation-a" },
+            { "work_id", "work-a" },
+            { "manifestation_type", "release" },
+            { "release_year", 1951 },
+            { "label", nullptr } } }
+    );
+    product["credits"].push_back(
+        { { "id", 2 },
+          { "entity_id", "manifestation-a" },
+          { "agent_id", "agent-a" },
+          { "role", "distributor" },
+          { "importance", "key" } }
+    );
+    product["work_memberships"] = nlohmann::json::array(
+        { { { "id", 1 },
+            { "child_work_id", "work-b" },
+            { "parent_work_id", "work-a" },
+            { "membership_type", "part_of" },
+            { "position", 2 },
+            { "position_text", "Part II" } } }
+    );
+    product["agent_relations"] = nlohmann::json::array();
+    product["events"] = nlohmann::json::array(
+        { { { "id", 1 },
+            { "entity_id", "manifestation-a" },
+            { "event_type", "released" },
+            { "year_start", 1951 },
+            { "date_precision", "year" } } }
+    );
+
+    const auto projection = arachne::ariadne::viewer_builder::project(
+        product, candidate_export(), "product-1", "candidate-1"
+    );
+    const auto has_edge = [&](const std::string_view type,
+                              const std::string_view source,
+                              const std::string_view target) {
+        return std::ranges::any_of(projection.at("edges"), [&](const auto& edge) {
+            return edge.at("edge_type") == type && edge.at("source") == source
+                && edge.at("target") == target;
+        });
+    };
+    EXPECT_TRUE(has_edge("manifestation_of", "manifestation-a", "work-a"));
+    EXPECT_TRUE(has_edge("credit:distributor", "agent-a", "manifestation-a"));
+    EXPECT_TRUE(has_edge("membership:part_of", "work-b", "work-a"));
+    EXPECT_TRUE(has_edge("event:released", "manifestation-a", "event:1"));
+    const auto membership_edge = std::ranges::find_if(
+        projection.at("edges"), [](const auto& edge) {
+            return edge.at("edge_type") == "membership:part_of";
+        }
+    );
+    ASSERT_NE(membership_edge, projection.at("edges").end());
+    EXPECT_EQ(
+        membership_edge->at("provenance").at("explanation"),
+        "Accepted human-authored product relation."
+    );
+    const auto node = std::ranges::find_if(
+        projection.at("nodes"), [](const auto& value) {
+            return value.at("node_id") == "manifestation-a";
+        }
+    );
+    ASSERT_NE(node, projection.at("nodes").end());
+    EXPECT_EQ(node->at("label"), "manifestation-a");
+    EXPECT_EQ(node->at("attributes").at("manifestation_type"), "release");
+
+    const auto catalog
+        = arachne::ariadne::viewer_builder::catalog(product, "product-1");
+    const auto& manifestation
+        = catalog.at("works").at(0).at("manifestations").at(0);
+    ASSERT_EQ(manifestation.at("contributors").size(), 1U);
+    EXPECT_EQ(
+        manifestation.at("contributors").at(0).at("role"), "distributor"
+    );
+    ASSERT_EQ(manifestation.at("events").size(), 1U);
+    EXPECT_EQ(manifestation.at("events").at(0).at("eventType"), "released");
+    EXPECT_EQ(catalog.at("workMemberships").size(), 1U);
 }
 
 TEST(AriadneViewer, SimilarityProjectionIsOrderIndependentAndUsesNoHeuristics) {

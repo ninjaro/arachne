@@ -306,10 +306,14 @@ print("12345678;claix")
         database.parent.mkdir(parents=True)
         with sqlite3.connect(database) as connection:
             connection.executescript(
+                (ROOT / "schema" / "product.sql").read_text(encoding="utf-8")
+            )
+            connection.executescript(
                 """
-                PRAGMA user_version=7;
-                CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-                INSERT INTO records(value) VALUES('example');
+                INSERT INTO entities(id, entity_type)
+                VALUES('work-000001', 'work');
+                INSERT INTO works(entity_id, medium)
+                VALUES('work-000001', 'film');
                 """
             )
 

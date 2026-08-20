@@ -103,7 +103,7 @@ branches, Git LFS for the canonical SQLite database, and a least-privilege token
 Successful product batches are removed only after commit; rejected files move to
 `inbox/rejected/` and their concrete problems are stored in the database.
 
-The included Issue Form accepts one plain UTF-8 `arachne_batch_v2` JSON file for
+The included Issue Form accepts one plain UTF-8 `arachne_batch` JSON file for
 review. ZIP packages, sidecars, legacy variants, and arbitrary batch metadata are
 not product input.
 
@@ -113,7 +113,7 @@ declarative Pheidippides door registry, builds the compact external graph with a
 streaming HPC worker, fully recomputes candidate state, and removes disposable raw
 and scratch data after success. Point APIs remain bounded enrichment paths.
 
-Product changes use strict `arachne_batch_v2` JSON files in the repository
+Product changes use strict `arachne_batch` JSON files in the repository
 `inbox/`. See [Product inbox](docs/PRODUCT_INBOX.md) for the fixed validation and
 application commands, explicit update and merge operations, rejected-batch
 issues, and merge hints.
@@ -125,10 +125,10 @@ configuration, and recovery.
 
 - [Architecture and actor boundaries](docs/ARCHITECTURE.md)
 - [Operations and recovery](docs/OPERATIONS.md)
-- [Contract compatibility notes](contracts/VERSIONS.md)
+- [Contract conventions and versions](contracts/VERSIONS.md)
 - [Example configuration](config/README.md)
 
-The version-2 repository surface is designed to fail closed when persistent state,
+The repository surface is designed to fail closed when persistent state,
 credentials, capability negotiation, or reviewed publication approval is missing.
 Static scaffolding alone is not a production deployment; configure and protect the
 external state domain before enabling remote writes.

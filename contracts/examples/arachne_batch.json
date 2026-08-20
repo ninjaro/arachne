@@ -1,5 +1,5 @@
 {
-  "format": "arachne_batch_v2",
+  "format": "arachne_batch",
   "batch_id": "research-00421",
   "create": {
     "agents": [
@@ -38,6 +38,36 @@
         "release_year": 2024,
         "region_code": "DE",
         "label": "2024 reconstruction"
+      }
+    ],
+    "work_memberships": [
+      {
+        "child_work_id": "work-luminous-field",
+        "parent_work_id": "work-000321",
+        "membership_type": "part_of",
+        "position": 2,
+        "position_text": "Part II"
+      }
+    ],
+    "agent_relations": [
+      {
+        "subject_agent_id": "agent-lumen",
+        "relation_type": "member_of",
+        "object_agent_id": "agent-000411",
+        "from_year": 1970,
+        "to_year": 1974,
+        "period_text": "early 1970s",
+        "role_text": "artistic director"
+      }
+    ],
+    "events": [
+      {
+        "entity_id": "manifestation-luminous-field-2024",
+        "event_type": "exhibited",
+        "year_start": 2024,
+        "date_text": "2024-05",
+        "date_precision": "month",
+        "place_text": "Museum Example"
       }
     ],
     "names": [
@@ -99,9 +129,9 @@
     ],
     "credits": [
       {
-        "work_id": "work-luminous-field",
+        "entity_id": "manifestation-luminous-field-2024",
         "agent_id": "agent-lumen",
-        "role": "artist",
+        "role": "curator",
         "credit_order": 0,
         "importance": "primary"
       }
@@ -208,6 +238,15 @@
     "delete": {
       "names": [
         17
+      ],
+      "work_memberships": [
+        27
+      ],
+      "agent_relations": [
+        28
+      ],
+      "events": [
+        29
       ],
       "evidence": [
         88

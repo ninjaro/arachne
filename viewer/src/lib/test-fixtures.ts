@@ -1,5 +1,6 @@
 import type {
   ConceptAssignment,
+  DatePrecision,
   Domain,
   Work,
   WorkRelation,
@@ -34,7 +35,7 @@ export function fixtureWork({
   year: number | null;
   tags: Array<string | { id: string; label: string }>;
   label?: string;
-  precision?: string | null;
+  precision?: DatePrecision | null;
   startText?: string | null;
   endYear?: number | null;
   endText?: string | null;
@@ -60,6 +61,7 @@ export function fixtureWork({
     missingCentralityScaleCount: tags.length,
     missingCentralityScaleFraction: tags.length ? 1 : 0,
     contributors: [],
+    events: [],
     advisories: [],
     measurements: [],
     identifiers: [],
@@ -89,6 +91,8 @@ export function fixtureDomain(
     workById: new Map(works.map((work) => [work.id, work])),
     conceptById,
     workRelations,
+    workMemberships: [],
+    agentRelations: [],
     conceptOptions: [...conceptCounts.values()],
     mediumOptions: [{ value: "film", count: works.length }],
   };

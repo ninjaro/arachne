@@ -205,8 +205,10 @@ namespace {
             { "snapshot_id", std::move(snapshot_id) },
             { "source_ids", std::move(source_ids) },
             { "explanation",
-              "Accepted human-authored research relation with "
-              "assertion-specific evidence." },
+              unique_evidence.empty()
+                  ? "Accepted human-authored product relation."
+                  : "Accepted human-authored product relation with linked "
+                    "evidence." },
         };
         nlohmann::json attributes {
             { "derived", false },
@@ -732,6 +734,46 @@ nlohmann::ordered_json viewer_builder::project(
         };
         upsert_node(nodes, std::move(node));
     }
+    for (const auto& manifestation :
+         array_or_empty(product_export, "manifestations")) {
+        if (!manifestation.is_object()) {
+            continue;
+        }
+        const auto id = manifestation.value("entity_id", "");
+        if (id.empty()) {
+            continue;
+        }
+        nlohmann::ordered_json attributes {
+            { "manifestation_type",
+              manifestation.value("manifestation_type", "manifestation") },
+            { "work_id", manifestation.value("work_id", "") },
+            { "noncanonical", false },
+        };
+        for (const auto* field :
+             { "release_year", "region_code", "language_code", "label" }) {
+            if (manifestation.contains(field)
+                && !manifestation.at(field).is_null()) {
+                attributes[field] = manifestation.at(field);
+            }
+        }
+        std::string label
+            = preferred_names.contains(id) ? preferred_names.at(id) : id;
+        if (manifestation.contains("label")
+            && manifestation.at("label").is_string()) {
+            label = manifestation.at("label").get<std::string>();
+        }
+        upsert_node(
+            nodes,
+            { { "node_id", id },
+              { "node_type", "manifestation" },
+              { "label", label },
+              { "graph_domain", "product" },
+              { "provenance",
+                { { "origin", "human_authored" },
+                  { "snapshot_id", product_snapshot_for_provenance } } },
+              { "attributes", std::move(attributes) } }
+        );
+    }
     for (const auto& concept_record :
          array_or_empty(product_export, "concepts")) {
         if (!concept_record.is_object()) {
@@ -821,6 +863,38 @@ nlohmann::ordered_json viewer_builder::project(
             { { "node_id", id },
               { "node_type", "evidence" },
               { "label", std::move(label) },
+              { "graph_domain", "product" },
+              { "provenance",
+                { { "origin", "human_authored" },
+                  { "snapshot_id", product_snapshot_for_provenance } } },
+              { "attributes", std::move(attributes) } }
+        );
+    }
+    for (const auto& event : array_or_empty(product_export, "events")) {
+        if (!event.is_object()) {
+            continue;
+        }
+        const auto id = projection_identifier(event, "id", "event");
+        const auto entity_id = event.value("entity_id", "");
+        if (!id || entity_id.empty() || !nodes.contains(entity_id)) {
+            continue;
+        }
+        nlohmann::ordered_json attributes {
+            { "event_type", event.value("event_type", "event") },
+            { "entity_id", entity_id },
+        };
+        for (const auto* field :
+             { "year_start", "year_end", "date_text", "date_precision",
+               "place_text" }) {
+            if (event.contains(field) && !event.at(field).is_null()) {
+                attributes[field] = event.at(field);
+            }
+        }
+        upsert_node(
+            nodes,
+            { { "node_id", *id },
+              { "node_type", "event" },
+              { "label", event.value("event_type", "event") },
               { "graph_domain", "product" },
               { "provenance",
                 { { "origin", "human_authored" },
@@ -956,14 +1030,120 @@ nlohmann::ordered_json viewer_builder::project(
             continue;
         }
         const auto from = credit.value("agent_id", "");
-        const auto to = credit.value("work_id", "");
-        if (from.empty() || to.empty()) {
+        const auto to = credit.value("entity_id", "");
+        if (from.empty() || to.empty() || !nodes.contains(from)
+            || !nodes.contains(to)) {
             continue;
         }
         append_human_edge(
             edges, from, to, "credit:" + credit.value("role", "contributor"),
             projection_identifier(credit, "id", "credit")
                 .value_or(edge_id(from, to, "credit", "missing")),
+            product_snapshot_for_provenance
+        );
+    }
+    for (const auto& membership :
+         array_or_empty(product_export, "work_memberships")) {
+        if (!membership.is_object()) {
+            continue;
+        }
+        const auto from = membership.value("child_work_id", "");
+        const auto to = membership.value("parent_work_id", "");
+        const auto type = membership.value("membership_type", "");
+        if (from.empty() || to.empty() || type.empty()
+            || !nodes.contains(from) || !nodes.contains(to)) {
+            continue;
+        }
+        nlohmann::ordered_json attributes;
+        if (membership.contains("position")) {
+            attributes["position"] = membership.at("position");
+        }
+        if (membership.contains("position_text")) {
+            attributes["position_text"] = membership.at("position_text");
+        }
+        append_human_edge(
+            edges, from, to, "membership:" + type,
+            projection_identifier(membership, "id", "work-membership")
+                .value_or(edge_id(from, to, "membership", type)),
+            product_snapshot_for_provenance, nlohmann::json::array(),
+            attributes
+        );
+    }
+    for (const auto& manifestation :
+         array_or_empty(product_export, "manifestations")) {
+        if (!manifestation.is_object()) {
+            continue;
+        }
+        const auto from = manifestation.value("entity_id", "");
+        const auto to = manifestation.value("work_id", "");
+        if (from.empty() || to.empty() || !nodes.contains(from)
+            || !nodes.contains(to)) {
+            continue;
+        }
+        append_human_edge(
+            edges, from, to, "manifestation_of", "manifestation-link:" + from,
+            product_snapshot_for_provenance
+        );
+    }
+    for (const auto& relation :
+         array_or_empty(product_export, "work_relations")) {
+        if (!relation.is_object()) {
+            continue;
+        }
+        const auto from = relation.value("subject_work_id", "");
+        const auto to = relation.value("object_work_id", "");
+        const auto type = relation.value("relation_type", "");
+        if (from.empty() || to.empty() || type.empty()
+            || !nodes.contains(from) || !nodes.contains(to)) {
+            continue;
+        }
+        append_human_edge(
+            edges, from, to, "work_relation:" + type,
+            projection_identifier(relation, "id", "work-relation")
+                .value_or(edge_id(from, to, "work-relation", type)),
+            product_snapshot_for_provenance
+        );
+    }
+    for (const auto& relation :
+         array_or_empty(product_export, "agent_relations")) {
+        if (!relation.is_object()) {
+            continue;
+        }
+        const auto from = relation.value("subject_agent_id", "");
+        const auto to = relation.value("object_agent_id", "");
+        const auto type = relation.value("relation_type", "");
+        if (from.empty() || to.empty() || type.empty()
+            || !nodes.contains(from) || !nodes.contains(to)) {
+            continue;
+        }
+        nlohmann::ordered_json attributes;
+        for (const auto* field :
+             { "from_year", "to_year", "period_text", "role_text" }) {
+            if (relation.contains(field)) {
+                attributes[field] = relation.at(field);
+            }
+        }
+        append_human_edge(
+            edges, from, to, "agent_relation:" + type,
+            projection_identifier(relation, "id", "agent-relation")
+                .value_or(edge_id(from, to, "agent-relation", type)),
+            product_snapshot_for_provenance, nlohmann::json::array(),
+            attributes
+        );
+    }
+    for (const auto& event : array_or_empty(product_export, "events")) {
+        if (!event.is_object()) {
+            continue;
+        }
+        const auto from = event.value("entity_id", "");
+        const auto to = projection_identifier(event, "id", "event");
+        const auto type = event.value("event_type", "");
+        if (from.empty() || !to || type.empty() || !nodes.contains(from)
+            || !nodes.contains(*to)) {
+            continue;
+        }
+        append_human_edge(
+            edges, from, *to, "event:" + type, *to,
             product_snapshot_for_provenance
         );
     }
@@ -1366,6 +1546,7 @@ nlohmann::ordered_json viewer_builder::catalog(
         item["missingCentralityScaleCount"] = std::size_t { 0U };
         item["missingCentralityScaleFraction"] = 0.0;
         item["contributors"] = nlohmann::ordered_json::array();
+        item["events"] = nlohmann::ordered_json::array();
         item["advisories"] = nlohmann::ordered_json::array();
         item["measurements"] = nlohmann::ordered_json::array();
         item["identifiers"] = nlohmann::ordered_json::array();
@@ -1422,7 +1603,7 @@ nlohmann::ordered_json viewer_builder::catalog(
     }
 
     for (const auto& credit : array_or_empty(product_export, "credits")) {
-        const auto work_id = credit.value("work_id", "");
+        const auto work_id = credit.value("entity_id", "");
         const auto agent_id = credit.value("agent_id", "");
         const auto work = works.find(work_id);
         const auto agent = agents.find(agent_id);
@@ -1495,6 +1676,8 @@ nlohmann::ordered_json viewer_builder::catalog(
             { "id", id },
             { "type",
               manifestation.value("manifestation_type", "manifestation") },
+            { "contributors", nlohmann::ordered_json::array() },
+            { "events", nlohmann::ordered_json::array() },
         };
         copy_field(item, "releaseYear", manifestation, "release_year");
         copy_field(item, "regionCode", manifestation, "region_code");
@@ -1507,6 +1690,73 @@ nlohmann::ordered_json viewer_builder::catalog(
             }
         }
         work->second["manifestations"].push_back(std::move(item));
+    }
+
+    std::map<std::string, std::pair<std::string, std::size_t>, std::less<>>
+        manifestation_locations;
+    for (auto& [work_id, work] : works) {
+        auto& values = work["manifestations"];
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            const auto manifestation_id = values[index].value("id", "");
+            if (!manifestation_id.empty()) {
+                manifestation_locations.emplace(
+                    manifestation_id, std::pair { work_id, index }
+                );
+            }
+        }
+    }
+    for (const auto& credit : array_or_empty(product_export, "credits")) {
+        const auto target_id = credit.value("entity_id", "");
+        const auto location = manifestation_locations.find(target_id);
+        const auto agent = agents.find(credit.value("agent_id", ""));
+        if (location == manifestation_locations.end() || agent == agents.end()) {
+            continue;
+        }
+        auto item = agent->second;
+        item["role"] = credit.value("role", "contributor");
+        copy_field(item, "order", credit, "credit_order");
+        item["importance"] = credit.value("importance", "supporting");
+        copy_field(item, "creditedAs", credit, "credited_as");
+        works.at(location->second.first)["manifestations"]
+            [location->second.second]["contributors"]
+                .push_back(std::move(item));
+    }
+
+    std::vector<nlohmann::ordered_json> events;
+    for (const auto& event : array_or_empty(product_export, "events")) {
+        if (!event.is_object()) {
+            continue;
+        }
+        const auto event_id = projection_identifier(event, "id", "event");
+        const auto entity_id = event.value("entity_id", "");
+        if (!event_id || entity_id.empty()) {
+            continue;
+        }
+        nlohmann::ordered_json item {
+            { "id", *event_id },
+            { "entityId", entity_id },
+            { "eventType", event.value("event_type", "event") },
+        };
+        for (const auto [destination, source] :
+             std::array<std::pair<std::string_view, std::string_view>, 5> {
+                 std::pair { "yearStart", "year_start" },
+                 std::pair { "yearEnd", "year_end" },
+                 std::pair { "dateText", "date_text" },
+                 std::pair { "datePrecision", "date_precision" },
+                 std::pair { "placeText", "place_text" },
+             }) {
+            copy_field(item, destination, event, source);
+        }
+        events.push_back(item);
+        if (const auto work = works.find(entity_id); work != works.end()) {
+            work->second["events"].push_back(item);
+        } else if (const auto location
+                   = manifestation_locations.find(entity_id);
+                   location != manifestation_locations.end()) {
+            works.at(location->second.first)["manifestations"]
+                [location->second.second]["events"]
+                    .push_back(item);
+        }
     }
 
     for (const auto& fact : array_or_empty(product_export, "financial_facts")) {
@@ -1571,6 +1821,65 @@ nlohmann::ordered_json viewer_builder::catalog(
           };
     });
 
+    std::vector<nlohmann::ordered_json> work_memberships;
+    for (const auto& membership :
+         array_or_empty(product_export, "work_memberships")) {
+        if (!membership.is_object()) {
+            continue;
+        }
+        const auto child = membership.value("child_work_id", "");
+        const auto parent = membership.value("parent_work_id", "");
+        const auto type = membership.value("membership_type", "");
+        const auto id
+            = projection_identifier(membership, "id", "work-membership");
+        if (!id || child.empty() || parent.empty() || type.empty()
+            || !works.contains(child) || !works.contains(parent)) {
+            continue;
+        }
+        nlohmann::ordered_json item {
+            { "id", *id },
+            { "childId", child },
+            { "parentId", parent },
+            { "membershipType", type },
+        };
+        copy_field(item, "position", membership, "position");
+        copy_field(item, "positionText", membership, "position_text");
+        work_memberships.push_back(std::move(item));
+    }
+
+    std::vector<nlohmann::ordered_json> agent_relations;
+    for (const auto& relation :
+         array_or_empty(product_export, "agent_relations")) {
+        if (!relation.is_object()) {
+            continue;
+        }
+        const auto subject = relation.value("subject_agent_id", "");
+        const auto object = relation.value("object_agent_id", "");
+        const auto type = relation.value("relation_type", "");
+        const auto id
+            = projection_identifier(relation, "id", "agent-relation");
+        if (!id || subject.empty() || object.empty() || type.empty()
+            || !agents.contains(subject) || !agents.contains(object)) {
+            continue;
+        }
+        nlohmann::ordered_json item {
+            { "id", *id },
+            { "subjectId", subject },
+            { "objectId", object },
+            { "relationType", type },
+        };
+        for (const auto [destination, source] :
+             std::array<std::pair<std::string_view, std::string_view>, 4> {
+                 std::pair { "fromYear", "from_year" },
+                 std::pair { "toYear", "to_year" },
+                 std::pair { "periodText", "period_text" },
+                 std::pair { "roleText", "role_text" },
+             }) {
+            copy_field(item, destination, relation, source);
+        }
+        agent_relations.push_back(std::move(item));
+    }
+
     nlohmann::ordered_json work_array = nlohmann::ordered_json::array();
     for (auto& [id, work] : works) {
         static_cast<void>(id);
@@ -1594,6 +1903,9 @@ nlohmann::ordered_json viewer_builder::catalog(
         { "agents", std::move(agent_array) },
         { "works", std::move(work_array) },
         { "workRelations", std::move(work_relations) },
+        { "workMemberships", std::move(work_memberships) },
+        { "agentRelations", std::move(agent_relations) },
+        { "events", std::move(events) },
     };
 }
 

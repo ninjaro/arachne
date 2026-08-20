@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { buildAgentBrowseRows, filterAgents, sortAgents } from "./browse";
+import { parseQuery } from "./query";
 import { fixtureDomain, fixtureWork } from "./test-fixtures";
+import type { Agent } from "./types";
 
 function browseDomain() {
   const first = fixtureWork({ id: "work-1", year: 1954, tags: ["genre-epic"], label: "Seven Samurai" });
   const second = fixtureWork({ id: "work-2", year: 1950, tags: ["theme-noir"], label: "Rashomon" });
   const third = fixtureWork({ id: "work-3", year: 1961, tags: ["genre-drama"], label: "Yojimbo" });
-  const kurosawa = { id: "agent-1", label: "Akira Kurosawa", agentType: "person", identifiers: [] };
-  const studio = { id: "agent-2", label: "Toho", agentType: "organization", identifiers: [] };
+  const kurosawa: Agent = { id: "agent-1", label: "Akira Kurosawa", agentType: "person", identifiers: [] };
+  const studio: Agent = { id: "agent-2", label: "Toho", agentType: "organization", identifiers: [] };
   first.contributors = [
     { ...kurosawa, role: "director", order: 0, importance: "primary", creditedAs: null },
     { ...studio, role: "production_company", order: 1, importance: "primary", creditedAs: null },
@@ -49,5 +51,16 @@ describe("agent Browse projection", () => {
   it("orders equally relevant agents by label and id", () => {
     const rows = buildAgentBrowseRows(browseDomain()).reverse();
     expect(sortAgents(rows, false).map((row) => row.agent.label)).toEqual(["Akira Kurosawa", "Toho"]);
+  });
+
+  it("recognizes every current credit role as a role-specific field", () => {
+    for (const role of [
+      "engraver", "sculptor", "photographer", "editor", "cinematographer",
+      "platform", "translator", "illustrator", "printer", "curator",
+      "choreographer", "narrator", "songwriter", "arranger", "sound_engineer",
+      "designer", "animator",
+    ]) {
+      expect(parseQuery(`${role}:Example`).errors).toEqual([]);
+    }
   });
 });

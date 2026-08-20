@@ -656,7 +656,7 @@ struct written_run_manifest final {
             { "penelope", "penelope-store-2.0.0" } } },
         { "contract_versions",
           { { "controls",
-              { "arachne_batch_v2", "batch_envelope_v1", "fetch_plan_v1",
+              { "arachne_batch", "batch_envelope_v1", "fetch_plan_v1",
                 "fetch_request_v1", "acquired_artifact_v1",
                 "research_candidate_graph_plan_v1", "product_graph_snapshot_v1",
                 "research_candidate_graph_snapshot_v1", "viewer_projection_v1",
