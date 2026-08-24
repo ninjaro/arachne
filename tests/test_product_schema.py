@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -8,6 +9,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "schema" / "product.sql"
+CANONICAL_DATABASE = ROOT / "database" / "art-islands.sqlite"
+
+
+MONTH_ONLY_TEXT = re.compile(
+    r"(?:[+-]?\d{4}-(?:0[1-9]|1[0-2]))"
+    r"|(?:(?:January|February|March|April|May|June|July|August|September|"
+    r"October|November|December) [+-]?\d{1,4})"
+)
 
 
 def columns(connection: sqlite3.Connection, table: str) -> tuple[str, ...]:
@@ -306,6 +315,41 @@ class CurrentProductSchemaTests(unittest.TestCase):
                 VALUES('work-000099', 'autobiography')
                 """
             )
+
+    def test_canonical_obvious_month_values_use_month_precision(self) -> None:
+        canonical = sqlite3.connect(
+            f"file:{CANONICAL_DATABASE}?mode=ro",
+            uri=True,
+        )
+        try:
+            mismatches = [
+                ("works", str(entity_id), str(precision), str(value))
+                for entity_id, precision, value in canonical.execute(
+                    """
+                    SELECT entity_id, date_precision, date_start_text
+                    FROM works
+                    WHERE date_precision IN ('year', 'exact')
+                      AND date_start_text IS NOT NULL
+                    """
+                )
+                if MONTH_ONLY_TEXT.fullmatch(str(value))
+            ]
+            mismatches.extend(
+                ("events", str(identifier), str(precision), str(value))
+                for identifier, precision, value in canonical.execute(
+                    """
+                    SELECT id, date_precision, date_text
+                    FROM events
+                    WHERE date_precision IN ('year', 'exact')
+                      AND date_text IS NOT NULL
+                    """
+                )
+                if MONTH_ONLY_TEXT.fullmatch(str(value))
+            )
+        finally:
+            canonical.close()
+
+        self.assertEqual([], mismatches[:20])
 
 
 if __name__ == "__main__":

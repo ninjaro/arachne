@@ -40,7 +40,7 @@ external data. Neither Pheidippides nor Ariadne writes a graph database directly
 | `src/penelope/` | SQLite graph stores, staging, activation and exports |
 | `viewer/` | Static Ariadne viewer assets |
 | `hpc/wikidata/` | Bulk-first streaming Wikidata source-graph worker |
-| `scripts/` | Local/CI adapters, one-way schema conversion, and repository checks |
+| `scripts/` | Local/CI adapters, current-schema validation, and repository checks |
 | `.github/workflows/` | Validation, intake, graph operations and verified immutable publication |
 
 ## Build and test

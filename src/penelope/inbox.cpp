@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
 #include <cstdint>
@@ -172,202 +173,140 @@ private:
     sqlite3_stmt* value_ { nullptr };
 };
 
-void require_current_product_structure(sqlite3* const sql) {
-    const std::set<std::string, std::less<>> expected_tables {
-        "agents",
-        "agent_relations",
-        "applied_batches",
-        "concept_relation_evidence",
-        "concept_relations",
-        "concepts",
-        "credits",
-        "entities",
-        "events",
-        "evidence",
-        "external_ids",
-        "financial_facts",
-        "ingest_issues",
-        "manifestations",
-        "measurements",
-        "names",
-        "parent_guide_assertions",
-        "parent_guide_evidence",
-        "sources",
-        "work_concept_evidence",
-        "work_concepts",
-        "work_memberships",
-        "works",
-    };
-    std::set<std::string, std::less<>> actual_tables;
-    statement tables(
-        sql,
-        "SELECT name FROM sqlite_schema WHERE type='table' "
-        "AND name NOT LIKE 'sqlite_%'"
-    );
-    while (tables.step()) {
-        actual_tables.emplace(tables.text(0));
+struct schema_definition {
+    std::string table;
+    std::string sql;
+
+    bool operator==(const schema_definition&) const = default;
+};
+
+using schema_definitions
+    = std::map<std::string, schema_definition, std::less<>>;
+
+[[nodiscard]] std::string normalize_schema_sql(std::string_view sql) {
+    while (!sql.empty() && sql.back() == ';') {
+        sql.remove_suffix(1);
     }
-    if (actual_tables != expected_tables) {
-        throw database_error(
-            "product database table set does not match the current schema"
+    std::string result;
+    result.reserve(sql.size());
+    bool separated = false;
+    for (const char character : sql) {
+        if (std::isspace(static_cast<unsigned char>(character)) != 0) {
+            separated = !result.empty();
+            continue;
+        }
+        if (separated) {
+            result.push_back(' ');
+            separated = false;
+        }
+        result.push_back(character);
+    }
+    return result;
+}
+
+[[nodiscard]] schema_definitions schema_contract(
+    sqlite3* const sql, const std::string_view type
+) {
+    schema_definitions result;
+    statement objects(
+        sql,
+        "SELECT name,tbl_name,sql FROM sqlite_schema WHERE type=? "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    );
+    objects.bind(1, type);
+    while (objects.step()) {
+        result.emplace(
+            objects.text(0),
+            schema_definition {
+                .table = objects.text(1),
+                .sql = normalize_schema_sql(objects.text(2)),
+            }
         );
     }
+    return result;
+}
 
-    const std::map<std::string, std::vector<std::string>, std::less<>>
-        expected_columns {
-            { "agent_relations",
-              { "id", "subject_agent_id", "relation_type", "object_agent_id",
-                "from_year", "to_year", "period_text", "role_text" } },
-            { "agents",
-              { "entity_id", "agent_type", "birth_year", "death_year" } },
-            { "applied_batches", { "batch_id" } },
-            { "concept_relation_evidence",
-              { "id", "assertion_id", "evidence_id" } },
-            { "concept_relations",
-              { "id", "subject_concept_id", "relation_type",
-                "object_concept_id", "strength", "from_year", "to_year",
-                "region_code", "confidence" } },
-            { "concepts", { "entity_id", "concept_type", "slug" } },
-            { "credits",
-              { "id", "entity_id", "agent_id", "role", "credit_order",
-                "importance", "credited_as" } },
-            { "entities", { "id", "entity_type" } },
-            { "events",
-              { "id", "entity_id", "event_type", "year_start", "year_end",
-                "date_text", "date_precision", "place_text" } },
-            { "evidence",
-              { "id", "source_id", "exact_quote", "quote_language",
-                "quote_translation", "locator_json", "stance" } },
-            { "external_ids",
-              { "id", "entity_id", "scheme", "value", "canonical_url" } },
-            { "financial_facts",
-              { "id", "work_id", "fact_type", "amount_min", "amount_max",
-                "currency_code", "value_year", "is_estimate", "confidence" } },
-            { "ingest_issues",
-              { "batch_id", "code", "json_path", "message", "value_json",
-                "status" } },
-            { "manifestations",
-              { "entity_id", "work_id", "manifestation_type", "release_year",
-                "region_code", "language_code", "label" } },
-            { "measurements",
-              { "id", "entity_id", "measurement_type", "value", "unit",
-                "qualifier" } },
-            { "names",
-              { "id", "entity_id", "name_type", "language_code", "script_code",
-                "value", "is_preferred" } },
-            { "parent_guide_assertions",
-              { "id", "work_id", "concept_id", "category", "intensity",
-                "explicitness", "frequency", "centrality", "realism",
-                "spoiler_level", "confidence" } },
-            { "parent_guide_evidence",
-              { "id", "assertion_id", "evidence_id" } },
-            { "sources",
-              { "id", "source_type", "title", "bibliography_text",
-                "author_text", "publisher", "publication_date", "url", "doi",
-                "isbn", "language_code" } },
-            { "work_concept_evidence",
-              { "id", "assertion_id", "evidence_id" } },
-            { "work_concepts",
-              { "id", "work_id", "concept_id", "relation_type", "centrality",
-                "centrality_scale", "historical_role", "confidence" } },
-            { "work_memberships",
-              { "id", "child_work_id", "parent_work_id", "membership_type",
-                "position", "position_text" } },
-            { "works",
-              { "entity_id", "medium", "year_start", "year_end",
-                "date_precision", "date_start_text", "date_end_text",
-                "date_qualifier", "language_code", "country_code",
-                "production_info_json" } },
-        };
-    for (const auto& [table, columns] : expected_columns) {
-        std::vector<std::string> actual_columns;
-        statement info(sql, "PRAGMA table_info(\"" + table + "\")");
-        while (info.step()) {
-            actual_columns.emplace_back(info.text(1));
-        }
-        if (actual_columns != columns) {
+void require_matching_schema_objects(
+    sqlite3* const actual, sqlite3* const expected,
+    const std::string_view type
+) {
+    const schema_definitions actual_objects = schema_contract(actual, type);
+    const schema_definitions expected_objects = schema_contract(expected, type);
+    if (actual_objects == expected_objects) {
+        return;
+    }
+
+    std::set<std::string, std::less<>> actual_names;
+    std::set<std::string, std::less<>> expected_names;
+    for (const auto& [name, unused] : actual_objects) {
+        actual_names.emplace(name);
+    }
+    for (const auto& [name, unused] : expected_objects) {
+        expected_names.emplace(name);
+    }
+    if (actual_names != expected_names) {
+        throw database_error(
+            "product database " + std::string(type)
+            + " set does not match the current schema"
+        );
+    }
+    for (const auto& [name, definition] : actual_objects) {
+        if (definition != expected_objects.at(name)) {
             throw database_error(
-                "product database columns do not match the current schema: "
-                + table
+                "product database " + std::string(type)
+                + " definition does not match the current schema: " + name
             );
         }
     }
+}
 
-    const std::set<std::string, std::less<>> expected_indexes {
-        "agent_relations_logical_unique",
-        "agent_relations_object_idx",
-        "agent_relations_subject_idx",
-        "concept_relations_object_idx",
-        "credits_agent_idx",
-        "credits_entity_idx",
-        "credits_logical_unique",
-        "events_entity_idx",
-        "events_logical_unique",
-        "events_type_idx",
-        "evidence_logical_unique",
-        "external_ids_entity_idx",
-        "financial_facts_logical_unique",
-        "ingest_issues_status_idx",
-        "measurements_logical_unique",
-        "names_entity_idx",
-        "names_logical_unique",
-        "sources_bibliography_fallback_unique",
-        "sources_doi_unique",
-        "sources_isbn_unique",
-        "sources_url_unique",
-        "work_concepts_concept_idx",
-        "work_memberships_child_idx",
-        "work_memberships_logical_unique",
-        "work_memberships_parent_idx",
-    };
-    std::set<std::string, std::less<>> actual_indexes;
-    statement indexes(
-        sql,
-        "SELECT name FROM sqlite_schema WHERE type='index' "
-        "AND name NOT LIKE 'sqlite_autoindex_%'"
-    );
-    while (indexes.step()) {
-        actual_indexes.emplace(indexes.text(0));
+void require_current_product_structure(
+    sqlite3* const actual, const std::string_view current_schema
+) {
+    sqlite3* expected = nullptr;
+    if (sqlite3_open_v2(
+            ":memory:", &expected,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MEMORY,
+            nullptr
+        )
+        != SQLITE_OK) {
+        const std::string message
+            = sqlite_message(expected, "open current product schema contract");
+        if (expected != nullptr) {
+            sqlite3_close(expected);
+        }
+        throw database_error(message);
     }
-    if (actual_indexes != expected_indexes) {
-        throw database_error(
-            "product database index set does not match the current schema"
-        );
-    }
-
-    const std::set<std::string, std::less<>> expected_triggers {
-        "agents_entity_type",
-        "agents_entity_type_update",
-        "concept_relation_last_evidence_delete",
-        "concepts_entity_type",
-        "credits_entity_type",
-        "credits_entity_type_update",
-        "entities_agent_type_update",
-        "entities_subtype_update_guard",
-        "events_entity_type",
-        "events_entity_type_update",
-        "manifestations_entity_type",
-        "parent_guide_last_evidence_delete",
-        "work_concept_last_evidence_delete",
-        "works_entity_type",
-    };
-    std::set<std::string, std::less<>> actual_triggers;
-    statement triggers(
-        sql, "SELECT name FROM sqlite_schema WHERE type='trigger'"
-    );
-    while (triggers.step()) {
-        actual_triggers.emplace(triggers.text(0));
-    }
-    if (actual_triggers != expected_triggers) {
-        throw database_error(
-            "product database trigger set does not match the current schema"
-        );
+    try {
+        char* error = nullptr;
+        if (sqlite3_exec(
+                expected, std::string(current_schema).c_str(), nullptr,
+                nullptr, &error
+            )
+            != SQLITE_OK) {
+            const std::string message
+                = error == nullptr ? sqlite3_errmsg(expected) : error;
+            sqlite3_free(error);
+            throw database_error(
+                "cannot load current product schema contract: " + message
+            );
+        }
+        require_matching_schema_objects(actual, expected, "table");
+        require_matching_schema_objects(actual, expected, "index");
+        require_matching_schema_objects(actual, expected, "trigger");
+        sqlite3_close(expected);
+    } catch (...) {
+        sqlite3_close(expected);
+        throw;
     }
 }
 
 class database final {
 public:
-    database(const fs::path& path, const bool writable) {
+    database(
+        const fs::path& path, const bool writable,
+        const std::string_view current_schema
+    ) {
         const std::string native = path.string();
         const int flags = writable
             ? SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
@@ -383,8 +322,14 @@ public:
         }
         sqlite3_extended_result_codes(value_, 1);
         sqlite3_busy_timeout(value_, 10'000);
-        execute("PRAGMA foreign_keys = ON");
-        require_current_product_structure(value_);
+        try {
+            execute("PRAGMA foreign_keys = ON");
+            require_current_product_structure(value_, current_schema);
+        } catch (...) {
+            sqlite3_close(value_);
+            value_ = nullptr;
+            throw;
+        }
     }
 
     database(const database&) = delete;
@@ -4953,7 +4898,7 @@ void require_real_database_file(const fs::path& path) {
 }
 
 void ensure_product_database(
-    const fs::path& repository_root, const fs::path& path
+    const fs::path& path, const std::string_view current_schema
 ) {
     struct stat state {};
     if (::lstat(path.c_str(), &state) == 0) {
@@ -4981,9 +4926,10 @@ void ensure_product_database(
     }
     try {
         char* error = nullptr;
-        const std::string schema
-            = read_schema(repository_root / "schema" / "product.sql");
-        if (sqlite3_exec(raw, schema.c_str(), nullptr, nullptr, &error)
+        if (sqlite3_exec(
+                raw, std::string(current_schema).c_str(), nullptr, nullptr,
+                &error
+            )
             != SQLITE_OK) {
             const std::string message
                 = error == nullptr ? sqlite3_errmsg(raw) : error;
@@ -5220,8 +5166,10 @@ run_inbox(const fs::path& repository_root, const bool apply) {
     const fs::path inbox = repository_root / "inbox";
     const fs::path database_path
         = repository_root / "database" / "art-islands.sqlite";
+    const std::string current_schema
+        = read_schema(repository_root / "schema" / "product.sql");
     if (apply) {
-        ensure_product_database(repository_root, database_path);
+        ensure_product_database(database_path, current_schema);
     } else {
         require_real_database_file(database_path);
     }
@@ -5231,7 +5179,7 @@ run_inbox(const fs::path& repository_root, const bool apply) {
     for (auto& snapshot : snapshots) {
         batches.push_back(parse_batch(std::move(snapshot)));
     }
-    database product(database_path, apply);
+    database product(database_path, apply, current_schema);
     reject_duplicate_pending_ids(batches, product.native());
     auto allocation = initial_allocation_state(product);
     for (auto& batch : batches) {

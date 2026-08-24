@@ -8,6 +8,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -152,6 +153,38 @@ public:
         sqlite3_close(database);
     }
 
+    void replace_schema_fragment(
+        const std::string& before, const std::string& after
+    ) const {
+        const fs::path path = root_ / "schema" / "product.sql";
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error("could not open fixture schema");
+        }
+        const std::string schema {
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()
+        };
+        if (input.bad()) {
+            throw std::runtime_error("could not read fixture schema");
+        }
+        const std::size_t position = schema.find(before);
+        if (position == std::string::npos
+            || schema.find(before, position + before.size())
+                != std::string::npos) {
+            throw std::runtime_error(
+                "fixture schema fragment was not uniquely found"
+            );
+        }
+        std::string replaced = schema;
+        replaced.replace(position, before.size(), after);
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << replaced;
+        if (!output) {
+            throw std::runtime_error("could not write fixture schema");
+        }
+    }
+
 private:
     fs::path root_;
 };
@@ -233,6 +266,25 @@ TEST(ProductInbox, RefusesCurrentSchemaMissingNaturalUniquenessIndex) {
     }
 }
 
+TEST(ProductInbox, RefusesSameNamedIndexWithDriftedDefinition) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "DROP INDEX names_logical_unique;"
+        "CREATE INDEX names_logical_unique ON names(entity_id)"
+    );
+
+    try {
+        (void)arachne::penelope::check_product_inbox(fixture.root());
+        FAIL() << "same-named index with a drifted definition was accepted";
+    } catch (const arachne::penelope::inbox_error& error) {
+        EXPECT_EQ(
+            std::string(error.what()),
+            "product database index definition does not match the current "
+            "schema: names_logical_unique"
+        );
+    }
+}
+
 TEST(ProductInbox, RefusesCurrentSchemaMissingInvariantTrigger) {
     inbox_fixture fixture;
     fixture.execute("DROP TRIGGER works_entity_type");
@@ -244,6 +296,45 @@ TEST(ProductInbox, RefusesCurrentSchemaMissingInvariantTrigger) {
         EXPECT_EQ(
             std::string(error.what()),
             "product database trigger set does not match the current schema"
+        );
+    }
+}
+
+TEST(ProductInbox, RefusesSameNamedTriggerWithDriftedDefinition) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "DROP TRIGGER works_entity_type;"
+        "CREATE TRIGGER works_entity_type BEFORE INSERT ON works "
+        "BEGIN SELECT 1; END"
+    );
+
+    try {
+        (void)arachne::penelope::check_product_inbox(fixture.root());
+        FAIL() << "same-named trigger with a drifted definition was accepted";
+    } catch (const arachne::penelope::inbox_error& error) {
+        EXPECT_EQ(
+            std::string(error.what()),
+            "product database trigger definition does not match the current "
+            "schema: works_entity_type"
+        );
+    }
+}
+
+TEST(ProductInbox, RefusesSameColumnTableWithDriftedDefinition) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "DROP TABLE applied_batches;"
+        "CREATE TABLE applied_batches(batch_id TEXT PRIMARY KEY)"
+    );
+
+    try {
+        (void)arachne::penelope::check_product_inbox(fixture.root());
+        FAIL() << "same-column table with a drifted definition was accepted";
+    } catch (const arachne::penelope::inbox_error& error) {
+        EXPECT_EQ(
+            std::string(error.what()),
+            "product database table definition does not match the current "
+            "schema: applied_batches"
         );
     }
 }
@@ -267,7 +358,8 @@ TEST(ProductInbox, RefusesUnexpectedCurrentTableColumns) {
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
             std::string(error.what()),
-            "product database columns do not match the current schema: works"
+            "product database table definition does not match the current "
+            "schema: works"
         );
     }
 }
@@ -304,11 +396,19 @@ TEST(ProductInbox, RejectedFilenameCollisionsUseDeterministicSuffixes) {
 
 TEST(ProductInbox, IssueStorageFailureIsReportedAndLeavesInputInPlace) {
     inbox_fixture fixture;
+    fixture.replace_schema_fragment(
+        "CREATE TRIGGER works_entity_type BEFORE INSERT ON works\n"
+        "WHEN (SELECT entity_type FROM entities WHERE id = NEW.entity_id) "
+        "<> 'work'\n"
+        "BEGIN SELECT RAISE(ABORT, 'work entity has wrong type'); END;",
+        "CREATE TRIGGER works_entity_type BEFORE INSERT ON ingest_issues\n"
+        "BEGIN SELECT RAISE(ABORT, 'test issue storage failure'); END;"
+    );
     fixture.execute(
         "DROP TRIGGER works_entity_type;"
         "CREATE TRIGGER works_entity_type "
         "BEFORE INSERT ON ingest_issues "
-        "BEGIN SELECT RAISE(ABORT,'test issue storage failure'); END"
+        "BEGIN SELECT RAISE(ABORT, 'test issue storage failure'); END"
     );
     json batch = empty_batch("strict-storage-failure");
     batch["metadata"] = true;

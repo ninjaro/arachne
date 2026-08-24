@@ -15,6 +15,7 @@ import {
   schemeLabel,
 } from "../lib/format";
 import { buildQueryToken } from "../lib/query";
+import { manifestationCreditsForAgent } from "../lib/agent-credits";
 import type { ImageHintProductIdentity } from "../lib/image-hints";
 import type { RateHandler } from "./common";
 import {
@@ -456,7 +457,12 @@ export function AgentEntityBody({
       ),
     [agent.id, domain.works],
   );
+  const manifestationCredits = useMemo(
+    () => manifestationCreditsForAgent(domain.works, agent.id),
+    [agent.id, domain.works],
+  );
   const visibleWorks = creditedWorks.slice(0, 100);
+  const visibleManifestationCredits = manifestationCredits.slice(0, 100);
   const relations = domain.agentRelations.filter(
     (relation) => relation.subjectId === agent.id || relation.objectId === agent.id,
   );
@@ -510,6 +516,43 @@ export function AgentEntityBody({
           {creditedWorks.length > visibleWorks.length ? (
             <p className="window-note">
               Showing the first {visibleWorks.length.toLocaleString()} works.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+
+      {manifestationCredits.length ? (
+        <section>
+          <h3>
+            Manifestation credits ({manifestationCredits.length.toLocaleString()})
+          </h3>
+          <ul className="plain-list agent-work-list">
+            {visibleManifestationCredits.map((reference, index) => (
+              <li
+                key={`${reference.manifestation.id}:${reference.contributor.role}:${index}`}
+              >
+                <button
+                  type="button"
+                  className="detail-filter-link"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpen(reference.work.id);
+                  }}
+                >
+                  {reference.work.label}
+                </button>
+                {` · ${reference.manifestation.label || humanize(reference.manifestation.type)}`}
+                {` · ${humanize(reference.contributor.role)}`}
+                {reference.contributor.creditedAs &&
+                reference.contributor.creditedAs !== reference.contributor.label
+                  ? ` as ${reference.contributor.creditedAs}`
+                  : ""}
+              </li>
+            ))}
+          </ul>
+          {manifestationCredits.length > visibleManifestationCredits.length ? (
+            <p className="window-note">
+              Showing the first {visibleManifestationCredits.length.toLocaleString()} credits.
             </p>
           ) : null}
         </section>

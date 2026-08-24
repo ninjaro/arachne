@@ -16,7 +16,7 @@ current Arachne product database.
 - rated/recommended Islands graph with disconnected components preserved
 - draggable multi-window work details
 - first-class agents with external identifiers, explicit agent relationships,
-  and direct work-credit references
+  and direct work- and manifestation-credit references
 - concepts, content-guide assertions, measurements, work identifiers,
   structural work memberships, dated events, manifestations (including their
   own credits/events), and financial facts from the current database
@@ -197,9 +197,10 @@ local hints.
 `public/data/catalog.json` is deliberately not committed. The full old
 `projection.json` contains provenance nodes that the catalog UI does not need and
 was about 79 MiB. The browser read model is generated directly from the
-canonical SQLite database and is about 27 MiB for the current corpus, including
-its first-class `agents` collection. Each contributor retains its agent identity
-fields and resolves by `id` to that collection.
+canonical SQLite database and is about 66 MiB for the current corpus, including
+first-class agents, structural relations, and work/manifestation events. Each
+contributor retains its agent identity fields and resolves by `id` to that
+collection.
 
 The SQLite database remains the source of truth. `catalog.json`,
 `research.json`, and `taste-index.json` are disposable viewer projections. The optional
