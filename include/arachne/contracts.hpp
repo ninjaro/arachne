@@ -25,8 +25,6 @@ enum class contract_name {
     research_candidate_graph_plan,
     product_graph_snapshot,
     research_candidate_graph_snapshot,
-    viewer_projection,
-    site_bundle,
 };
 
 /** One independently actionable validation failure. */

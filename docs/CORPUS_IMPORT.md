@@ -23,13 +23,15 @@ or structural research is wanted, opt in separately:
 build/arachne product rebuild-merge-hints export-merge-hints
 ```
 
-Place one plain UTF-8 `arachne_batch` JSON object in `inbox/`. The commands
-always use `inbox/` and `database/art-islands.sqlite` relative to the repository
-root; they do not accept path options.
+Place one plain UTF-8 `arachne_batch` JSON object in `inbox/`. The commands use
+that fixed code-repository inbox and the selected external state repository's
+`database/art-islands.sqlite`; they do not accept path options. The state root
+is `../arachne-data` by default or the local path in
+`ARACHNE_STATE_REPOSITORY`.
 
 Miner-facing choices about memberships, relations, manifestation credits,
 events, evidence, and the JSON tail are documented in the
-[mining guidelines](../database/mining.md).
+[mining guidelines](MINING.md).
 
 See [Product inbox](PRODUCT_INBOX.md) for the current batch shape, create and
 update semantics, explicit merges, rejected-batch issues, idempotency, and the

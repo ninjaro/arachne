@@ -15,7 +15,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MATERIALIZER = ROOT / "scripts" / "materialize_local_product_snapshot.py"
-CATALOG_BUILDER = ROOT / "viewer" / "scripts" / "build_catalog.py"
+PRODUCT_EXPORTER = ROOT / "scripts" / "export_product_jsonl.py"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 STABLE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 PRODUCT_SCHEMA = ROOT / "schema" / "product.sql"
@@ -77,9 +77,9 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         database: Path | None = None,
         graph_store: Path | None = None,
         control: Path | None = None,
+        replace_control: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
+        command = [
                 sys.executable,
                 str(MATERIALIZER),
                 "--database",
@@ -88,7 +88,11 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
                 str(graph_store or self.graph_store),
                 "--output-control",
                 str(control or self.control),
-            ],
+            ]
+        if replace_control:
+            command.append("--replace-output-control")
+        return subprocess.run(
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -215,7 +219,7 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
             {
                 "graph.sqlite",
                 "product.jsonl",
-                "snapshot-control.json",
+                "metadata.json",
                 "structural-validation.json",
             },
         )
@@ -231,6 +235,18 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         second_document = json.loads(second_control.read_text(encoding="utf-8"))
         self.assertEqual(first_document, second_document)
         self.assertFalse(list(self.graph_store.rglob("*.stage-*")))
+
+    def test_can_atomically_replace_an_active_control(self) -> None:
+        first = self.invoke(replace_control=True)
+        second = self.invoke(replace_control=True)
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(
+            json.loads(self.control.read_text(encoding="utf-8"))["content_sha256"],
+            digest(self.database),
+        )
+        self.assertFalse(list(self.root.glob(f".{self.control.name}.*.tmp")))
 
     def test_rejects_a_tampered_existing_snapshot(self) -> None:
         first = self.invoke()
@@ -252,7 +268,7 @@ class LocalProductSnapshotMaterializerTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         control = json.loads(self.control.read_text(encoding="utf-8"))
         database_artifact = self.graph_store / control["database"]["storage_ref"]
-        snapshot_control = database_artifact.parent / "snapshot-control.json"
+        snapshot_control = database_artifact.parent / "metadata.json"
         cached = json.loads(snapshot_control.read_text(encoding="utf-8"))
         cached["activated_at"] = "not-a-timestamp"
         snapshot_control.write_text(
@@ -327,11 +343,9 @@ class CatalogExportOnlyTests(unittest.TestCase):
         return subprocess.run(
             [
                 sys.executable,
-                str(CATALOG_BUILDER),
+                str(PRODUCT_EXPORTER),
                 str(database),
-                "--product-export",
                 str(output),
-                "--export-only",
             ],
             check=False,
             capture_output=True,

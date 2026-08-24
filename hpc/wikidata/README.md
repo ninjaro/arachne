@@ -7,7 +7,7 @@ downloader, validator, retry loop, or Wikidata extraction pipeline.
 
 ## Normal run
 
-Use the current public repository HEAD:
+Use sibling code and private state checkouts:
 
 ```bash
 cd "$HOME"
@@ -16,18 +16,16 @@ git clone https://github.com/ninjaro/arachne.git
 cd arachne
 
 git pull --ff-only
-git lfs pull
 scripts/build.sh
 
-hpc/wikidata/run prepare
+ARACHNE_STATE_REPOSITORY="$HOME/arachne-data" hpc/wikidata/run prepare
 ```
 
 `prepare` creates a run beneath `$HPCWORK/arachne/wikidata`, materializes its
-operations configuration, locates the reviewed product snapshot, and translates
-the official dump fetch plan. When the public state has no activated snapshot
-control, it validates the checkout's canonical `database/art-islands.sqlite`
-and materializes a content-addressed, run-local snapshot control and generic
-export through the existing product tools. It does not download the dump or
+operations configuration, validates the selected canonical database, creates a
+content-addressed transient snapshot and generic export beneath that run, and
+translates the official dump fetch plan. It does not commit a product graph,
+download the dump, or
 start heavy computation.
 
 Acquire the large dump on either RWTH high-bandwidth file-transfer node:
@@ -126,28 +124,24 @@ hpc/wikidata/run prepare --help
 Use `--run-root PATH` when `$HPCWORK/arachne/wikidata` is not appropriate. An
 advanced command may select a particular prepared run with `--metadata PATH`.
 
-The default persistent-state checkout is
-`$HPCWORK/arachne/wikidata/.arachne-state`. `prepare` creates it from
-`https://github.com/ninjaro/arachne.git` once, then reuses it with
-`git pull --ff-only` and `git lfs pull`. This is another checkout of the same
-public repository, not an unknown or private state repository. Read-only setup
-does not require a GitHub token; authentication becomes relevant only for a
-later operation that actually pushes reviewed state.
+The default state root is the sibling `../arachne-data`; set the local-path
+`ARACHNE_STATE_REPOSITORY` or pass `--state-root` when CLAIX checkouts are not
+siblings. `prepare` never clones or updates the private state checkout. Update
+and hydrate its LFS objects deliberately before preparing a run.
 
 For an existing reviewed worktree, use:
 
 ```bash
-hpc/wikidata/run prepare --state-root /path/to/arachne-state
+hpc/wikidata/run prepare --state-root /path/to/arachne-data
 ```
 
-An existing `graphs/product/active.json` is preferred inside that state
-checkout. Otherwise `prepare` derives the verified run-local snapshot described
-above from the checkout's canonical database. If a reviewed checkout uses a
-different control path, select it explicitly:
+A fresh run-local product snapshot is derived by default, avoiding a second
+committed database/export. An exact reviewed control can still be selected
+explicitly for a diagnostic run:
 
 ```bash
 hpc/wikidata/run prepare \
-  --state-root /path/to/arachne-state \
+  --state-root /path/to/arachne-data \
   --product-control graphs/product/snapshots/product-20260809/metadata.json
 ```
 

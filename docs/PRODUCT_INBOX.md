@@ -6,13 +6,13 @@ canonical product database. It accepts one current, closed format:
 
 ## Fixed repository interface
 
-Bots and operators use fixed paths relative to the repository root:
+Bots and operators use a fixed code inbox plus the selected external state root:
 
 ```text
 inbox/
 inbox/rejected/
-database/art-islands.sqlite
-database/merge-hint-decisions.json
+../arachne-data/database/art-islands.sqlite
+../arachne-data/database/merge-hint-decisions.json
 .arachne/merge-hints-review.json
 .arachne/tmp/merge-hints.sqlite
 build/arachne
@@ -40,8 +40,9 @@ the bytes through Pheidippides, places them at the fixed `inbox/` path, runs
 `check-inbox`, and proposes the validated file in a pull request. It never
 applies the database in the intake job. After that pull request is merged, the
 separately serialized product-integration workflow runs `check-inbox` followed
-by `apply-inbox`. It proposes only the canonical product change for review;
-heavy hint analysis is an opt-in local operation.
+by `apply-inbox`, publishes the validated canonical state directly from the
+captured current `arachne-data/main`, and proposes only successful source inbox
+cleanup. Heavy hint analysis is an opt-in local operation.
 
 Only plain UTF-8 JSON files are accepted. Each file contains exactly one batch
 object. ZIP files, archive members, sidecars, CSV, Markdown, hashes, run
@@ -362,7 +363,7 @@ build/arachne product rebuild-merge-hints export-merge-hints
 ```
 
 Rebuild creates `.arachne/tmp/merge-hints.sqlite` as writable `main` and attaches
-`database/art-islands.sqlite` read-only as `product`. Canonical entities, names,
+the selected state's `database/art-islands.sqlite` read-only as `product`. Canonical entities, names,
 identifiers, credits, works, concepts, assertions, and measurements are queried
 through `product.*`; they are not copied into the temporary database. Identity
 blocks and candidate signals remain dedicated tables. Generic observations are
@@ -377,12 +378,11 @@ performs a hidden rebuild. A successful export atomically writes
 `.arachne/merge-hints-review.json`, which contains only selected identity
 candidates and bounded review metadata. The structural `analysis` remains in
 the local SQLite store; export does not delete that store. The next explicit
-rebuild replaces stale disposable analysis cleanly. The old
-`database/merge-hints-review.json` compatibility path is ignored by Git and is
-not product data.
+rebuild replaces stale disposable analysis cleanly. There is no compatibility
+path in the product database.
 
 Ignored human decisions survive disposable rebuilds in the fixed, versioned
-`database/merge-hint-decisions.json` artifact. Its closed form is:
+`arachne-data/database/merge-hint-decisions.json` artifact. Its closed form is:
 
 ```json
 {"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[{"family":"work","left_id":"work-000001","right_id":"work-000002"}]}

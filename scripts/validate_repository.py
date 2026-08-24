@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from .state_manifest import check as check_state_manifest
+except ImportError:
+    from state_manifest import check as check_state_manifest
+
 
 CONTROL_CONTRACTS = (
     "batch_envelope_v1",
@@ -19,15 +24,12 @@ CONTROL_CONTRACTS = (
     "research_candidate_graph_plan_v1",
     "product_graph_snapshot_v1",
     "research_candidate_graph_snapshot_v1",
-    "viewer_projection_v1",
-    "site_bundle_v1",
 )
 
 ARTIFACT_FORMATS = (
     "external_candidate_source_graph_v1",
     "wikidata_image_hints_v1",
     "research_candidate_graph_materialization_v1",
-    "viewer_projection_data_v1",
 )
 
 PRODUCT_BATCH_FORMAT = "arachne_batch"
@@ -38,7 +40,6 @@ WORKFLOWS = (
     "product-integration.yml",
     "candidate-rebuild.yml",
     "source-refresh.yml",
-    "publication.yml",
     "manual-dispatch.yml",
 )
 
@@ -141,6 +142,11 @@ def check_configuration(root: Path) -> None:
             f"{path}: project_timezone must be an IANA timezone string")
     paths = config.get("paths")
     require(isinstance(paths, dict), f"{path}: paths must be an object")
+    require("publication" not in config, f"{path}: publication belongs to arachne-demo")
+    require(
+        "viewer_templates" not in paths and "site_output" not in paths,
+        f"{path}: viewer paths belong to arachne-demo",
+    )
     for key in (
         "queue",
         "remainders",
@@ -148,8 +154,6 @@ def check_configuration(root: Path) -> None:
         "graph_store",
         "artifact_store",
         "lock_root",
-        "viewer_templates",
-        "site_output",
         "legacy_inbox_baseline",
     ):
         require(isinstance(paths.get(key), str) and paths[key],
@@ -208,13 +212,15 @@ def check_repository_surface(root: Path) -> None:
         path = root / "docs" / document
         require(path.is_file(), f"missing documentation: {path}")
     required_scripts = {
-        "publication bundle resolver": "resolve_site_bundle.py",
         "source refresh cadence gate": "source_refresh_gate.py",
         "Wikidata bulk plan adapter": "wikidata_bulk_fetch_plan.py",
         "product batch materializer": "materialize_product_batch.py",
         "local product snapshot materializer": (
             "materialize_local_product_snapshot.py"
         ),
+        "canonical product JSONL exporter": "export_product_jsonl.py",
+        "state compatibility manifest guard": "state_manifest.py",
+        "serialized state publisher": "publish_state_repository.py",
     }
     for label, name in required_scripts.items():
         path = root / "scripts" / name
@@ -239,9 +245,7 @@ def check_repository_surface(root: Path) -> None:
         "schema/product_v6.sql",
         "schema/product_v7.sql",
         "corpus-import",
-        "viewer/README-MIGRATION.md",
-        "viewer/patches",
-        "viewer/scripts/apply_production_integration.py",
+        "viewer",
     )
     for relative in forbidden_legacy_paths:
         require(
@@ -267,10 +271,29 @@ def check_repository_surface(root: Path) -> None:
         ).read_text(encoding="utf-8"),
         "product schema must not use PRAGMA user_version as an application contract",
     )
+    for relative in (
+        "database/art-islands.sqlite",
+        "database/merge-hint-decisions.json",
+        ".github/dependabot.yml",
+        ".github/workflows/publication.yml",
+    ):
+        require(
+            not (root / relative).exists(),
+            f"split repository must not retain {relative}",
+        )
+    workflow_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (root / ".github" / "workflows").glob("*.yml")
+    )
+    require(
+        "actions/deploy-pages" not in workflow_text
+        and "actions/upload-pages-artifact" not in workflow_text,
+        "Arachne must not retain a Pages deployment workflow",
+    )
 
 
-def check_merge_hint_decisions(root: Path) -> None:
-    path = root / "database" / "merge-hint-decisions.json"
+def check_merge_hint_decisions(state_root: Path) -> None:
+    path = state_root / "database" / "merge-hint-decisions.json"
     document = load_json(path)
     require(isinstance(document, dict), f"{path}: root must be an object")
     require(
@@ -313,7 +336,7 @@ def check_merge_hint_decisions(root: Path) -> None:
     )
 
 
-def check_merge_hint_decision_references(root: Path) -> None:
+def check_merge_hint_decision_references(state_root: Path) -> None:
     """Verify ignored-pair identities against the canonical product database.
 
     Keep this check separate from ``check_merge_hint_decisions`` so callers can
@@ -321,9 +344,9 @@ def check_merge_hint_decision_references(root: Path) -> None:
     a product database fixture.
     """
 
-    check_merge_hint_decisions(root)
-    decisions_path = root / "database" / "merge-hint-decisions.json"
-    database_path = root / "database" / "art-islands.sqlite"
+    check_merge_hint_decisions(state_root)
+    decisions_path = state_root / "database" / "merge-hint-decisions.json"
+    database_path = state_root / "database" / "art-islands.sqlite"
     require(
         database_path.is_file(),
         f"missing canonical product database: {database_path}",
@@ -376,6 +399,11 @@ def parser() -> argparse.ArgumentParser:
         default=Path(__file__).resolve().parents[1],
         help="repository root (defaults to the parent of scripts/)",
     )
+    result.add_argument(
+        "--state-root",
+        type=Path,
+        help="explicit arachne-data checkout to validate for compatibility",
+    )
     return result
 
 
@@ -387,8 +415,11 @@ def main() -> int:
         check_artifacts(root)
         check_configuration(root)
         check_repository_surface(root)
-        check_merge_hint_decision_references(root)
-    except CheckFailure as error:
+        if arguments.state_root is not None:
+            state = arguments.state_root.resolve(strict=True)
+            check_state_manifest(root, state)
+            check_merge_hint_decision_references(state)
+    except (CheckFailure, OSError, RuntimeError) as error:
         print(f"repository validation failed: {error}", file=sys.stderr)
         return 2
     print("repository contracts and operations surface are structurally valid")

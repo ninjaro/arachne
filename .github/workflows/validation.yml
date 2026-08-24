@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - docs
   workflow_dispatch:
 
 permissions:
@@ -15,8 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          lfs: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.14"
@@ -31,9 +30,6 @@ jobs:
           python3 scripts/validate_repository.py
           yamllint .github/workflows .github/ISSUE_TEMPLATE/arachne-batch.yml
 
-      - name: Validate canonical product database
-        run: python3 scripts/check_product_database_clean.py
-
       - name: Validate Python and shell syntax
         run: |
           python3 -m compileall -q scripts tests hpc
@@ -46,8 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          lfs: true
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -63,5 +57,41 @@ jobs:
           ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/run_checks.sh
 
-      - name: Validate fixed product inbox
-        run: build/arachne product check-inbox
+  state-compatibility:
+    if: >-
+      github.event_name != 'pull_request' &&
+      vars.ARACHNE_STATE_REPOSITORY == 'ninjaro/arachne-data'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout authoritative state read-only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: main
+          token: ${{ secrets.ARACHNE_DATA_READ_TOKEN }}
+          path: .arachne/ci-state
+          lfs: true
+          persist-credentials: false
+      - name: Install state validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libutf8proc-dev \
+            nlohmann-json3-dev
+      - name: Build state-aware Arachne
+        env:
+          ARACHNE_BUILD_TESTS: "OFF"
+        run: scripts/build.sh
+      - name: Validate code/data compatibility and pending batches
+        env:
+          ARACHNE_STATE_REPOSITORY: ${{ github.workspace }}/.arachne/ci-state
+        run: |
+          python3 scripts/state_manifest.py check
+          python3 scripts/validate_repository.py \
+            --state-root "${ARACHNE_STATE_REPOSITORY}"
+          python3 scripts/check_product_database_clean.py \
+            "${ARACHNE_STATE_REPOSITORY}/database/art-islands.sqlite"
+          build/arachne product check-inbox

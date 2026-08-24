@@ -26,14 +26,16 @@ public:
         root_ = fs::temp_directory_path()
             / ("arachne-inbox-test-" + std::to_string(::getpid()) + "-"
                + std::to_string(++fixture_sequence));
+        state_ = root_ / "state";
         fs::create_directories(root_ / "inbox");
-        fs::create_directories(root_ / "database");
+        fs::create_directories(state_ / "database");
         fs::create_directories(root_ / "schema");
         fs::copy_file(
             fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product.sql",
             root_ / "schema" / "product.sql"
         );
-        const auto initialized = arachne::penelope::apply_product_inbox(root_);
+        const auto initialized
+            = arachne::penelope::apply_product_inbox(root_, state_);
         if (!initialized.ok) {
             throw std::runtime_error("could not initialize inbox fixture");
         }
@@ -48,6 +50,8 @@ public:
     }
 
     [[nodiscard]] const fs::path& root() const { return root_; }
+
+    [[nodiscard]] const fs::path& state() const { return state_; }
 
     void write(const std::string& filename, const json& document) const {
         std::ofstream output(root_ / "inbox" / filename, std::ios::binary);
@@ -69,7 +73,7 @@ public:
     [[nodiscard]] std::int64_t integer(const std::string& sql) const {
         sqlite3* database = nullptr;
         if (sqlite3_open_v2(
-                (root_ / "database" / "art-islands.sqlite").c_str(), &database,
+                (state_ / "database" / "art-islands.sqlite").c_str(), &database,
                 SQLITE_OPEN_READONLY, nullptr
             )
             != SQLITE_OK) {
@@ -96,7 +100,7 @@ public:
     [[nodiscard]] std::string text(const std::string& sql) const {
         sqlite3* database = nullptr;
         if (sqlite3_open_v2(
-                (root_ / "database" / "art-islands.sqlite").c_str(), &database,
+                (state_ / "database" / "art-islands.sqlite").c_str(), &database,
                 SQLITE_OPEN_READONLY, nullptr
             )
             != SQLITE_OK) {
@@ -104,7 +108,7 @@ public:
         }
         sqlite3_stmt* query = nullptr;
         if (sqlite3_prepare_v2(database, sql.c_str(), -1, &query, nullptr)
-            != SQLITE_OK
+                != SQLITE_OK
             || sqlite3_step(query) != SQLITE_ROW) {
             sqlite3_finalize(query);
             sqlite3_close(database);
@@ -122,7 +126,7 @@ public:
     void execute(const std::string& sql) const {
         sqlite3* database = nullptr;
         if (sqlite3_open_v2(
-                (root_ / "database" / "art-islands.sqlite").c_str(), &database,
+                (state_ / "database" / "art-islands.sqlite").c_str(), &database,
                 SQLITE_OPEN_READWRITE, nullptr
             )
             != SQLITE_OK) {
@@ -161,10 +165,8 @@ public:
         if (!input) {
             throw std::runtime_error("could not open fixture schema");
         }
-        const std::string schema {
-            std::istreambuf_iterator<char>(input),
-            std::istreambuf_iterator<char>()
-        };
+        const std::string schema { std::istreambuf_iterator<char>(input),
+                                   std::istreambuf_iterator<char>() };
         if (input.bad()) {
             throw std::runtime_error("could not read fixture schema");
         }
@@ -187,6 +189,7 @@ public:
 
 private:
     fs::path root_;
+    fs::path state_;
 };
 
 [[nodiscard]] json empty_batch(const std::string& id) {
@@ -240,7 +243,9 @@ TEST(ProductInbox, RejectsUnknownFieldsAndDoesNotWriteDuringCheck) {
     batch["metadata"] = { { "model", "forbidden" } };
     fixture.write("strict.json", batch);
 
-    const auto result = arachne::penelope::check_product_inbox(fixture.root());
+    const auto result = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(result.ok);
     ASSERT_EQ(result.rejected_count, 1U);
@@ -256,7 +261,9 @@ TEST(ProductInbox, RefusesCurrentSchemaMissingNaturalUniquenessIndex) {
     fixture.execute("DROP INDEX names_logical_unique");
 
     try {
-        (void)arachne::penelope::check_product_inbox(fixture.root());
+        (void)arachne::penelope::check_product_inbox(
+            fixture.root(), fixture.state()
+        );
         FAIL() << "current database without names_logical_unique was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
@@ -274,7 +281,9 @@ TEST(ProductInbox, RefusesSameNamedIndexWithDriftedDefinition) {
     );
 
     try {
-        (void)arachne::penelope::check_product_inbox(fixture.root());
+        (void)arachne::penelope::check_product_inbox(
+            fixture.root(), fixture.state()
+        );
         FAIL() << "same-named index with a drifted definition was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
@@ -290,7 +299,9 @@ TEST(ProductInbox, RefusesCurrentSchemaMissingInvariantTrigger) {
     fixture.execute("DROP TRIGGER works_entity_type");
 
     try {
-        (void)arachne::penelope::check_product_inbox(fixture.root());
+        (void)arachne::penelope::check_product_inbox(
+            fixture.root(), fixture.state()
+        );
         FAIL() << "current database without works_entity_type was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
@@ -309,7 +320,9 @@ TEST(ProductInbox, RefusesSameNamedTriggerWithDriftedDefinition) {
     );
 
     try {
-        (void)arachne::penelope::check_product_inbox(fixture.root());
+        (void)arachne::penelope::check_product_inbox(
+            fixture.root(), fixture.state()
+        );
         FAIL() << "same-named trigger with a drifted definition was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
@@ -328,7 +341,9 @@ TEST(ProductInbox, RefusesSameColumnTableWithDriftedDefinition) {
     );
 
     try {
-        (void)arachne::penelope::check_product_inbox(fixture.root());
+        (void)arachne::penelope::check_product_inbox(
+            fixture.root(), fixture.state()
+        );
         FAIL() << "same-column table with a drifted definition was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
@@ -343,7 +358,9 @@ TEST(ProductInbox, AcceptsCurrentStructureRegardlessOfUserVersion) {
     inbox_fixture fixture;
     fixture.execute("PRAGMA user_version=912");
 
-    const auto result = arachne::penelope::check_product_inbox(fixture.root());
+    const auto result = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     EXPECT_TRUE(result.ok) << issues_text(result);
 }
@@ -353,7 +370,9 @@ TEST(ProductInbox, RefusesUnexpectedCurrentTableColumns) {
     fixture.execute("ALTER TABLE works ADD COLUMN compatibility_note TEXT");
 
     try {
-        (void)arachne::penelope::check_product_inbox(fixture.root());
+        (void)arachne::penelope::check_product_inbox(
+            fixture.root(), fixture.state()
+        );
         FAIL() << "database with an unexpected works column was accepted";
     } catch (const arachne::penelope::inbox_error& error) {
         EXPECT_EQ(
@@ -378,7 +397,9 @@ TEST(ProductInbox, RejectedFilenameCollisionsUseDeterministicSuffixes) {
     batch["metadata"] = true;
     fixture.write("strict.json", batch);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(result.ok);
     EXPECT_FALSE(fs::exists(fixture.root() / "inbox" / "strict.json"));
@@ -414,7 +435,9 @@ TEST(ProductInbox, IssueStorageFailureIsReportedAndLeavesInputInPlace) {
     batch["metadata"] = true;
     fixture.write("strict.json", batch);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(result.ok);
     ASSERT_EQ(result.batches.size(), 1U);
@@ -489,12 +512,16 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
     };
     fixture.write("create.json", batch);
 
-    const auto checked = arachne::penelope::check_product_inbox(fixture.root());
+    const auto checked = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(checked.ok) << issues_text(checked);
     ASSERT_EQ(checked.valid_count, 1U);
     EXPECT_TRUE(fs::exists(fixture.root() / "inbox" / "create.json"));
 
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(applied.ok);
     ASSERT_EQ(applied.applied_count, 1U);
     EXPECT_FALSE(fs::exists(fixture.root() / "inbox" / "create.json"));
@@ -526,7 +553,9 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
         { "evidence", json::array({ 1 }) },
     };
     fixture.write("cleanup.json", cleanup);
-    const auto cleaned = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto cleaned = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(cleaned.ok) << issues_text(cleaned);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 0);
@@ -596,7 +625,9 @@ TEST(ProductInbox, CreatesAndDeletesCurrentProductRelationshipsUsingLocalIds) {
     };
     fixture.write("relationships.json", batch);
 
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_memberships"), 1);
@@ -624,7 +655,9 @@ TEST(ProductInbox, CreatesAndDeletesCurrentProductRelationshipsUsingLocalIds) {
     };
     fixture.write("cleanup.json", cleanup);
 
-    const auto deleted = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto deleted = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(deleted.ok) << issues_text(deleted);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_memberships"), 0);
@@ -674,8 +707,9 @@ TEST(ProductInbox, RejectsInvalidCurrentRelationshipsAndOldCreditTarget) {
     };
     fixture.write("invalid.json", batch);
 
-    const auto rejected
-        = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto rejected = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(rejected.ok);
     const std::string issues = issues_text(rejected);
@@ -717,8 +751,9 @@ TEST(ProductInbox, RejectsAgentTargetsForEventsAndCredits) {
     };
     fixture.write("wrong-targets.json", batch);
 
-    const auto rejected
-        = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto rejected = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(rejected.ok);
     EXPECT_NE(
@@ -741,7 +776,9 @@ TEST(ProductInbox, NewWorkConceptRequiresReviewedCentralityScale) {
     );
     fixture.write("missing.json", batch);
 
-    const auto missing = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto missing = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(missing.ok);
     EXPECT_NE(
@@ -753,7 +790,9 @@ TEST(ProductInbox, NewWorkConceptRequiresReviewedCentralityScale) {
     batch["batch_id"] = "new-scale-none";
     batch["create"]["work_concepts"][0]["centrality_scale"] = "none";
     fixture.write("none.json", batch);
-    const auto none = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto none = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(none.ok);
     EXPECT_NE(issues_text(none).find("unknown_enum"), std::string::npos);
@@ -771,7 +810,9 @@ TEST(ProductInbox, UnrelatedLegacyAssignmentUpdateMayLeaveScaleUnreviewed) {
     );
     fixture.write("update.json", batch);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(result.ok) << issues_text(result);
     EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 73);
@@ -797,8 +838,9 @@ TEST(ProductInbox, LegacyCentralityChangeRequiresReviewedScaleInSameBatch) {
     );
     fixture.write("invalid.json", batch);
 
-    const auto rejected
-        = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto rejected = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(rejected.ok);
     EXPECT_NE(
@@ -814,7 +856,9 @@ TEST(ProductInbox, LegacyCentralityChangeRequiresReviewedScaleInSameBatch) {
     batch["batch_id"] = "legacy-centrality-reviewed";
     batch["update"]["work_concepts"][0]["set"]["centrality_scale"] = "ordinal";
     fixture.write("valid.json", batch);
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 80);
@@ -834,7 +878,9 @@ TEST(ProductInbox, ScaleOnlyLegacyReviewPreservesStoredCentrality) {
     );
     fixture.write("update.json", batch);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(result.ok) << issues_text(result);
     EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 73);
@@ -857,7 +903,9 @@ TEST(ProductInbox, ReviewedAssignmentCanReviseCentralityWithoutNewDebt) {
     );
     fixture.write("update.json", batch);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(result.ok) << issues_text(result);
     EXPECT_EQ(fixture.integer("SELECT centrality FROM work_concepts"), 100);
@@ -870,7 +918,7 @@ TEST(ProductInbox, AllocatesDistinctIdsAcrossAllPendingBatches) {
     inbox_fixture fixture;
     for (const auto& [filename, batch_id, suffix] :
          { std::tuple { "first.json", "multi-001", "one" },
-             std::tuple { "second.json", "multi-002", "two" } }) {
+           std::tuple { "second.json", "multi-002", "two" } }) {
         json batch = empty_batch(batch_id);
         batch["create"] = {
             { "works",
@@ -910,7 +958,9 @@ TEST(ProductInbox, AllocatesDistinctIdsAcrossAllPendingBatches) {
         fixture.write(filename, batch);
     }
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(result.ok) << issues_text(result);
     EXPECT_EQ(result.applied_count, 2U);
@@ -936,7 +986,9 @@ TEST(ProductInbox, RejectsCanonicalLookingLocalIds) {
     );
     fixture.write("shadow.json", batch);
 
-    const auto result = arachne::penelope::check_product_inbox(fixture.root());
+    const auto result = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(result.ok);
     EXPECT_NE(issues_text(result).find("reserved_local_id"), std::string::npos);
@@ -975,7 +1027,10 @@ TEST(ProductInbox, EvidenceDeleteCannotOrphanNewAssertion) {
           ) },
     };
     fixture.write("seed.json", seed);
-    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+    ASSERT_TRUE(
+        arachne::penelope::apply_product_inbox(fixture.root(), fixture.state())
+            .ok
+    );
 
     json conflict = empty_batch("evidence-conflict");
     conflict["create"]["work_concepts"] = json::array(
@@ -990,7 +1045,9 @@ TEST(ProductInbox, EvidenceDeleteCannotOrphanNewAssertion) {
     conflict["update"]["delete"] = { { "evidence", json::array({ 1 }) } };
     fixture.write("conflict.json", conflict);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(result.ok);
     EXPECT_NE(
@@ -1012,8 +1069,9 @@ TEST(ProductInbox, EvidenceDeleteCannotOrphanNewAssertion) {
     );
     mixed["update"]["delete"] = { { "evidence", json::array({ 1 }) } };
     fixture.write("mixed.json", mixed);
-    const auto mixed_result
-        = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto mixed_result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(mixed_result.ok);
     EXPECT_NE(
@@ -1039,7 +1097,9 @@ TEST(ProductInbox, DeletesOnlyClosedIngestIssuesExplicitly) {
             { "json_path", "/create/works/0" } } }
     );
     fixture.write("cleanup.json", cleanup);
-    const auto cleaned = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto cleaned = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(cleaned.ok) << issues_text(cleaned);
     EXPECT_EQ(
         fixture.integer(
@@ -1056,8 +1116,9 @@ TEST(ProductInbox, DeletesOnlyClosedIngestIssuesExplicitly) {
             { "json_path", "/create/works/0" } } }
     );
     fixture.write("forbidden.json", forbidden);
-    const auto rejected
-        = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto rejected = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_FALSE(rejected.ok);
     EXPECT_NE(
         issues_text(rejected).find("open_issue_delete_forbidden"),
@@ -1074,7 +1135,9 @@ TEST(ProductInbox, DeletesOnlyClosedIngestIssuesExplicitly) {
 TEST(ProductInbox, StructurallyValidRepeatedBatchSkipsItsOperations) {
     inbox_fixture fixture;
     fixture.write("first.json", empty_batch("repeat-001"));
-    const auto first = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto first = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(first.ok) << issues_text(first);
 
     json repeated = empty_batch("repeat-001");
@@ -1086,7 +1149,9 @@ TEST(ProductInbox, StructurallyValidRepeatedBatchSkipsItsOperations) {
     );
     fixture.write("again.json", repeated);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(result.ok);
     ASSERT_EQ(result.already_applied_count, 1U);
     EXPECT_FALSE(fs::exists(fixture.root() / "inbox" / "again.json"));
@@ -1107,7 +1172,9 @@ TEST(ProductInbox, RollsBackConstraintFailureAndRecordsIssue) {
     );
     fixture.write("collision.json", batch);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_FALSE(result.ok);
     ASSERT_EQ(result.rejected_count, 1U);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 0);
@@ -1167,7 +1234,9 @@ TEST(ProductInbox, ExplicitAgentMergeRewritesAndDeduplicatesCredits) {
           ) },
     };
     fixture.write("seed.json", seed);
-    const auto seeded = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(seeded.ok) << issues_text(seeded);
     ASSERT_EQ(fixture.integer("SELECT count(*) FROM credits"), 2);
 
@@ -1180,7 +1249,9 @@ TEST(ProductInbox, ExplicitAgentMergeRewritesAndDeduplicatesCredits) {
     );
     fixture.write("merge.json", merge);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(result.ok);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 1);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM credits"), 1);
@@ -1244,7 +1315,10 @@ TEST(ProductInbox, AgentMergeReconcilesBothRelationEndpoints) {
           ) },
     };
     fixture.write("seed.json", seed);
-    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+    ASSERT_TRUE(
+        arachne::penelope::apply_product_inbox(fixture.root(), fixture.state())
+            .ok
+    );
 
     json merge = empty_batch("agent-relation-merge");
     merge["merge"]["agents"] = json::array(
@@ -1255,7 +1329,9 @@ TEST(ProductInbox, AgentMergeReconcilesBothRelationEndpoints) {
     );
     fixture.write("merge.json", merge);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(result.ok) << issues_text(result);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 2);
@@ -1329,7 +1405,10 @@ TEST(ProductInbox, WorkMergeReconcilesMembershipsEventsAndDirectCredits) {
           ) },
     };
     fixture.write("seed.json", seed);
-    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+    ASSERT_TRUE(
+        arachne::penelope::apply_product_inbox(fixture.root(), fixture.state())
+            .ok
+    );
 
     json merge = empty_batch("work-structure-merge");
     merge["merge"]["works"] = json::array(
@@ -1340,7 +1419,9 @@ TEST(ProductInbox, WorkMergeReconcilesMembershipsEventsAndDirectCredits) {
     );
     fixture.write("merge.json", merge);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(result.ok) << issues_text(result);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM works"), 2);
@@ -1381,7 +1462,9 @@ TEST(ProductInbox, RejectsDuplicateLocalIdsAndUnresolvedReferences) {
     };
     fixture.write("references.json", batch);
 
-    const auto result = arachne::penelope::check_product_inbox(fixture.root());
+    const auto result = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_FALSE(result.ok);
     ASSERT_EQ(result.batches.size(), 1U);
     const std::string issues = issues_text(result);
@@ -1399,7 +1482,9 @@ TEST(ProductInbox, RejectsUnresolvedLocalReferenceBeforeTransaction) {
     );
     fixture.write("unresolved.json", batch);
 
-    const auto result = arachne::penelope::check_product_inbox(fixture.root());
+    const auto result = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_FALSE(result.ok);
     EXPECT_NE(issues_text(result).find("unknown_reference"), std::string::npos);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM entities"), 0);
@@ -1415,7 +1500,9 @@ TEST(ProductInbox, AppliesExplicitSetAndUnset) {
             { "year_start", 1975 } } }
     );
     fixture.write("seed.json", seed);
-    const auto seeded = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(seeded.ok) << issues_text(seeded);
 
     json update = empty_batch("update-apply");
@@ -1425,7 +1512,9 @@ TEST(ProductInbox, AppliesExplicitSetAndUnset) {
             { "unset", json::array({ "language_code" }) } } }
     );
     fixture.write("update.json", update);
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(
         fixture.text(
@@ -1457,7 +1546,9 @@ TEST(ProductInbox, AppliesSourceUpdatesByIntegerId) {
             { "isbn", "9780000000001" } } }
     );
     fixture.write("seed.json", seed);
-    const auto seeded = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(seeded.ok) << issues_text(seeded);
 
     json update = empty_batch("source-update-apply");
@@ -1467,7 +1558,9 @@ TEST(ProductInbox, AppliesSourceUpdatesByIntegerId) {
             { "unset", json::array() } } }
     );
     fixture.write("update.json", update);
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(
@@ -1485,7 +1578,10 @@ TEST(ProductInbox, RejectsRepeatedUpdateTargetsBeforeMutation) {
             { "year_start", 1900 } } }
     );
     fixture.write("seed.json", seed);
-    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+    ASSERT_TRUE(
+        arachne::penelope::apply_product_inbox(fixture.root(), fixture.state())
+            .ok
+    );
 
     json update = empty_batch("duplicate-update");
     update["update"]["works"] = json::array(
@@ -1497,7 +1593,9 @@ TEST(ProductInbox, RejectsRepeatedUpdateTargetsBeforeMutation) {
             { "unset", json::array() } } }
     );
     fixture.write("update.json", update);
-    const auto checked = arachne::penelope::check_product_inbox(fixture.root());
+    const auto checked = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(checked.ok);
     EXPECT_NE(
@@ -1532,7 +1630,10 @@ TEST(ProductInbox, ExplicitDeleteAndCreateAtomicallyReplacesRelationship) {
           ) },
     };
     fixture.write("seed.json", seed);
-    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+    ASSERT_TRUE(
+        arachne::penelope::apply_product_inbox(fixture.root(), fixture.state())
+            .ok
+    );
 
     json replacement = empty_batch("replace-credit");
     replacement["create"]["credits"] = json::array(
@@ -1543,7 +1644,9 @@ TEST(ProductInbox, ExplicitDeleteAndCreateAtomicallyReplacesRelationship) {
     );
     replacement["update"]["delete"]["credits"] = json::array({ 1 });
     fixture.write("replacement.json", replacement);
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM credits"), 1);
@@ -1557,7 +1660,10 @@ TEST(ProductInbox, SchemaKeepsAgentSubtypeSynchronized) {
         { { { "local_id", "agent-local" }, { "agent_type", "person" } } }
     );
     fixture.write("seed.json", seed);
-    ASSERT_TRUE(arachne::penelope::apply_product_inbox(fixture.root()).ok);
+    ASSERT_TRUE(
+        arachne::penelope::apply_product_inbox(fixture.root(), fixture.state())
+            .ok
+    );
 
     fixture.execute(
         "UPDATE agents SET agent_type='organization' "
@@ -1599,7 +1705,9 @@ TEST(ProductInbox, MergeConflictRollsBackUnlessExplicitlyResolved) {
             { "birth_year", 1901 } } }
     );
     fixture.write("seed.json", seed);
-    const auto seeded = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(seeded.ok) << issues_text(seeded);
 
     json conflict = empty_batch("conflict-merge");
@@ -1610,8 +1718,9 @@ TEST(ProductInbox, MergeConflictRollsBackUnlessExplicitlyResolved) {
             { "unset", json::array() } } }
     );
     fixture.write("conflict.json", conflict);
-    const auto rejected
-        = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto rejected = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_FALSE(rejected.ok);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 2);
     EXPECT_EQ(
@@ -1630,7 +1739,9 @@ TEST(ProductInbox, MergeConflictRollsBackUnlessExplicitlyResolved) {
             { "unset", json::array() } } }
     );
     fixture.write("resolved.json", resolved);
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 1);
 }
@@ -1647,7 +1758,9 @@ TEST(ProductInbox, ConceptMergeCanAdoptMemberSlugWithoutAliasRows) {
             { "slug", "final-slug" } } }
     );
     fixture.write("seed.json", seed);
-    const auto seeded = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(seeded.ok) << issues_text(seeded);
 
     json merge = empty_batch("concept-merge");
@@ -1658,7 +1771,9 @@ TEST(ProductInbox, ConceptMergeCanAdoptMemberSlugWithoutAliasRows) {
             { "unset", json::array() } } }
     );
     fixture.write("merge.json", merge);
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 1);
     EXPECT_EQ(
@@ -1729,7 +1844,9 @@ TEST(ProductInbox, ConceptMergeDeduplicatesAssertionsAndPreservesEvidence) {
           ) },
     };
     fixture.write("seed.json", seed);
-    const auto seeded = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
     ASSERT_TRUE(seeded.ok) << issues_text(seeded);
 
     json merge = empty_batch("concept-evidence-merge");
@@ -1740,7 +1857,9 @@ TEST(ProductInbox, ConceptMergeDeduplicatesAssertionsAndPreservesEvidence) {
             { "unset", json::array() } } }
     );
     fixture.write("merge.json", merge);
-    const auto applied = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_TRUE(applied.ok) << issues_text(applied);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 1);
@@ -1778,7 +1897,9 @@ TEST(ProductInbox, ConceptMergeNeverChoosesBetweenDifferentPairScales) {
     );
     fixture.write("merge.json", merge);
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(result.ok);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM concepts"), 2);
@@ -1802,7 +1923,9 @@ TEST(ProductInbox, MalformedJsonWithoutBatchIdStaysInPlace) {
     inbox_fixture fixture;
     fixture.write_bytes("bad.json", "{\"format\":\"arachne_batch\",");
 
-    const auto result = arachne::penelope::apply_product_inbox(fixture.root());
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
 
     ASSERT_FALSE(result.ok);
     EXPECT_TRUE(fs::exists(fixture.root() / "inbox" / "bad.json"));

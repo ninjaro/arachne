@@ -67,7 +67,7 @@ target_link_libraries(
 )
 target_compile_features(pheidippides_transport PUBLIC cxx_std_23)
 
-# Ariadne owns algorithms, projections, and the static viewer.
+# Ariadne owns candidate, catalog, research, and taste semantics.
 add_library(ariadne_engine STATIC
     src/ariadne/candidates.cpp
     src/ariadne/merge_hints.cpp
@@ -75,7 +75,7 @@ add_library(ariadne_engine STATIC
     src/ariadne/structural_hint_finalizer.cpp
     src/ariadne/structural_hints.cpp
     src/ariadne/product.cpp
-    src/ariadne/viewer.cpp
+    src/ariadne/catalog.cpp
 )
 target_include_directories(
     ariadne_engine
@@ -189,7 +189,7 @@ if(BUILD_TESTS)
         tests/coordinator_tests.cpp
         tests/ariadne_tests.cpp
         tests/product_projection_tests.cpp
-        tests/viewer_tests.cpp
+        tests/catalog_tests.cpp
     )
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/candidate_store_tests.cpp")
         list(APPEND ARACHNE_CORE_TEST_SOURCES tests/candidate_store_tests.cpp)
@@ -247,10 +247,6 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_workflow_yaml -v
     )
     add_test(
-        NAME publication_adapter_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_publication_adapter -v
-    )
-    add_test(
         NAME image_hint_staging_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_stage_image_hints -v
     )
@@ -274,11 +270,6 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_product_schema -v
     )
     add_test(
-        NAME product_projection_catalog_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest
-            tests.test_product_projection_catalog -v
-    )
-    add_test(
         NAME source_refresh_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_source_refresh -v
     )
@@ -290,10 +281,9 @@ if(BUILD_TESTS)
     )
     set_tests_properties(
         actor_boundary_tests intake_adapter_tests workflow_yaml_tests
-        publication_adapter_tests image_hint_staging_tests
+        image_hint_staging_tests
         wikidata_hpc_worker_tests wikidata_hpc_run_tests
         local_product_snapshot_materializer_tests product_schema_tests
-        product_projection_catalog_tests
         source_refresh_tests
         operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

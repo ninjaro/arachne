@@ -1,8 +1,9 @@
 # Configuration
 
-Copy `arachne.example.json` to the ignored `arachne.local.json`. Relative paths are
-resolved from the repository root. Create `paths.queue` and `paths.remainders`
-before local preflight.
+The reviewed operational configuration lives at
+`../arachne-data/config/arachne.json`. Relative paths resolve from the directory
+containing the selected config file. `arachne.example.json` documents the core
+shape without demo/publication paths.
 
 The storage split is intentional:
 
@@ -13,8 +14,8 @@ The storage split is intentional:
 - `remainders` is reserved for future untransferred portions. It is currently
   unused: without evidence-based transfer/remainder schemas, a failed batch stays
   whole in the queue and database mutation does not begin.
-- `graph_store` contains Penelope's immutable SQLite snapshots. The active product
-  snapshot there is the durable accepted result and must use Git LFS.
+- `graph_store` contains replaceable Penelope candidate snapshots. Product
+  snapshots are generated transiently from the canonical Git-LFS SQLite.
 - candidate snapshots under `graph_store` and HPC intermediates are replaceable
   and may be stale.
 
@@ -45,15 +46,11 @@ Use `authentication.mode: bearer_env` or `header_env` with an environment-variab
 HTTP without explicit development permission, malformed policies, and duplicate
 door or endpoint IDs fail before network work.
 
-Do not commit `arachne.local.json`, credentials, or local temporary state. For
-remote operations, use a reviewed checkout or worktree of
-`https://github.com/ninjaro/arachne.git` and place the reviewed copy at
-`config/arachne.json`. A `.arachne-state` checkout may isolate mutable state, but
-it is another checkout of this repository, not an unknown private repository.
-The workflow materializer replaces path fields with runner-local state paths
-while retaining reviewed scheduling, candidate, security, and publication
-policy. Keep the project's `.gitattributes` active so canonical SQLite files are
-Git LFS objects.
+Do not put credentials in configuration. Remote operations check out private
+`ninjaro/arachne-data` separately and materialize absolute runner-local paths.
+The dedicated writer GitHub App, read-only state credential, demo credential,
+and Renovate identity remain separate. Git LFS rules for canonical SQLite live
+in `arachne-data`, not this code repository.
 
 The executable consumes the configuration directly. `scripts/arachne_ops.py` also
 uses it for fail-fast checks and passes it unchanged to the versioned CLI surface.

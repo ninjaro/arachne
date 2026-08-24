@@ -477,20 +477,36 @@ def verify_product(
     ]
     if len(exports) != 1:
         raise WorkerError("product snapshot must declare one product-jsonl export")
+    roots: list[Path] = []
+    for candidate in (control_path.parent, graph_store):
+        resolved = candidate.resolve(strict=True)
+        if resolved not in roots:
+            roots.append(resolved)
+    database_ref = control["database"]["storage_ref"]
+    matching_roots = [
+        root
+        for root in roots
+        if (root / PurePosixPath(database_ref)).is_file()
+    ]
+    if len(matching_roots) != 1:
+        raise WorkerError(
+            "product snapshot artifacts cannot be resolved unambiguously"
+        )
+    product_store = matching_roots[0]
     _database_path, _database_ref, database_digest, _database_size = (
-        verified_artifact(graph_store, control["database"], "product database")
+        verified_artifact(product_store, control["database"], "product database")
     )
     if database_digest != control["content_sha256"]:
         raise WorkerError(
             "product database SHA-256 disagrees with product snapshot content"
         )
     verified_artifact(
-        graph_store,
+        product_store,
         validation["report"],
         "product structural validation report",
     )
     path, _storage_ref, digest, _size = verified_artifact(
-        graph_store, exports[0]["artifact"], "product export"
+        product_store, exports[0]["artifact"], "product export"
     )
     return path, {
         "snapshot_id": control["snapshot_id"],

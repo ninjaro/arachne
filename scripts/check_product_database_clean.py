@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -12,7 +13,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_SCHEMA = ROOT / "schema" / "product.sql"
-DEFAULT_DATABASE = ROOT / "database" / "art-islands.sqlite"
+DEFAULT_STATE_ROOT = Path(
+    os.environ.get("ARACHNE_STATE_REPOSITORY", ROOT.parent / "arachne-data")
+)
+DEFAULT_DATABASE = DEFAULT_STATE_ROOT / "database" / "art-islands.sqlite"
 DISPOSABLE_TABLES = {
     "merge_hints",
     "merge_hint_blocks",

@@ -1,9 +1,9 @@
 # Architecture
 
-Arachne is a repository-driven system for accumulating human-mined research,
-materializing isolated graph domains, and publishing a static viewer without a
-continuously running backend. The post-specification decisions supplied with the
-project override the original technical specification where they conflict.
+Arachne is the code and canonical-write repository for accumulating human-mined
+research and materializing isolated graph domains. Authoritative persistent
+state lives in the private sibling `arachne-data`; presentation and publication
+live in the public sibling `arachne-demo`.
 
 ## Trust and current scope
 
@@ -24,9 +24,9 @@ mechanism for opening older states. See
 
 | Actor | Owns | Must not own |
 |---|---|---|
-| Arachne | External API, opaque-byte intake, temporary queue, scheduling, delegation, run status, publication orchestration | Ranking, grouping, graph internals, layout, semantic verification |
+| Arachne | External API, opaque-byte intake, scheduling, delegation, run status, and serialized canonical state publication | Ranking, grouping, presentation, or semantic verification |
 | Pheidippides | Byte transport, redirects, retries, checksums, transport metadata and failures | Domain interpretation, trust decisions, normalization, either graph store |
-| Ariadne | Coverage, ranking, grouping, query plans, candidate plans, derived projections, layouts and viewer | Transport execution, raw custody, database transactions, semantic correction |
+| Ariadne | Coverage, ranking, grouping, query plans, candidate plans, catalog, research, and taste semantics | Transport execution, presentation, raw custody, database transactions, semantic correction |
 | Penelope | Current schemas, transactions, constraints, graph materialization, staging, activation, snapshots and base exports | Ranking policy, API query design, layout or semantic correctness |
 
 All external operations enter through Arachne. Pheidippides is the sole transport
@@ -80,8 +80,8 @@ falls back to stale bytes.
 | Remainders | Arachne | Reserved for future untransferred portions; currently unused because no schema exists |
 | Operational state | Arachne | Queue/run coordination; permanent per-batch audit metadata is not required |
 | Product inbox | Penelope | Strict JSON files at repository `inbox/`; successful files are removed only after commit and rejected files move to `inbox/rejected/` |
-| Product SQLite | Penelope | `database/art-islands.sqlite`; the single schema at `schema/product.sql` keeps readable canonical entity IDs, compact integer internal keys, structural work/agent edges, work-or-manifestation credits and events, batch idempotency, ingest issues, and pair-local centrality-scale semantics, with no disposable merge-hint state |
-| Hint analysis | Ariadne | `.arachne/tmp/merge-hints.sqlite` is the primary local, queryable store for disposable identity candidates and structural observations; `.arachne/merge-hints-review.json` is an ignored, bounded identity-only review projection; `database/merge-hint-decisions.json` durably preserves only human decisions |
+| Product SQLite | Penelope | `arachne-data/database/art-islands.sqlite`; `arachne/schema/product.sql` is the sole schema and the closed state manifest binds its hash to the database hash and producer commit |
+| Hint analysis | Ariadne | Code-local `.arachne/tmp/merge-hints.sqlite` and `.arachne/merge-hints-review.json` are disposable; `arachne-data/database/merge-hint-decisions.json` preserves reviewed decisions |
 | Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
 | Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
@@ -113,9 +113,10 @@ notification is sent.
 
 For product batches, pull-request review is the approval boundary. Intake never
 runs `apply-inbox`; the separately serialized product workflow applies merged
-inbox files and proposes the resulting SQLite change in another reviewable pull
-request. Generic opaque cocoon intake retains its explicit maintainer decision
-and operational-ledger transitions.
+inbox files to the protected authoritative `arachne-data/main` through the
+dedicated serialized writer. It then proposes only removal of successfully
+applied source inbox files. Generic opaque cocoon intake retains its explicit
+maintainer decision and operational-ledger transitions.
 
 ## Product inbox processing
 
@@ -222,7 +223,7 @@ first-class structural edges and compact events, but does not justify holdings,
 agent-category, copy-count, or expanded manifestation-type tables. Those are
 deliberate no-ops until query demand becomes material.
 
-## Candidate graph and viewer
+## Candidate graph and transient semantic projections
 
 External bytes remain untrusted and never enter the product graph directly.
 Ariadne owns coverage, top-N selection, grouping, gray-node policy, quality
@@ -247,25 +248,14 @@ neither image hints nor image data enter the canonical database. Point requests
 are reserved for bounded enrichment or repair. A failed fresh acquisition cannot
 be relabelled as a fresh rebuild using old cache data.
 
-The browser consumes versioned exports, never writable SQLite or operational
-state. Ariadne's static projection keeps human-authored relations, derived
-chronological/similarity paths, and research suggestions machine-readably and
-visually distinct. Publication identifies source snapshot IDs and projection
-version; a failed build leaves the prior Pages deployment valid. The optional
-image-hint projection has a deliberate one-way handoff: publication accepts it
-only from inside reviewed state, verifies its product snapshot identity, and
-then includes it as a disposable, content-addressed viewer asset. It remains
-separate from the catalog and is never required to publish a product snapshot.
-
-Ariadne also owns the shared product research and taste projection semantics.
+Ariadne owns product catalog, research, and taste projection semantics.
 The native CLI can write a physical report, inspect a work or agent, or produce
 the sparse taste index over the exact export selected by a verified product
-snapshot control. Viewer publication invokes those same builders, excludes any
-stale catalog/research/taste files from compiled assets, and injects fresh
-snapshot-bound artifacts before the immutable bundle is content-addressed.
-Quality-gap scoring and global feature weighting therefore have no separate
-Python or React implementation. Static publication derives research data from
-the canonical product snapshot alone. A local research build may explicitly
+snapshot control. These artifacts are transient consumers of canonical SQLite,
+not durable state and not committed giant mirrors. `arachne-demo` invokes the
+native builders from its exact pinned state when publication needs them.
+Quality-gap scoring and global feature weighting have no second Python or React
+implementation. A local research build may explicitly
 add a snapshot-bound identity review together with its matching durable
 decisions; neither surface consumes structural observations implicitly.
 Every product research report also carries deterministic corpus totals and one
@@ -275,16 +265,15 @@ for `none` without inferring a semantic mode or writing canonical data.
 
 ## Remote state and concurrency
 
-Official GitHub operations may use a protected `.arachne-state` checkout or
-worktree of `ninjaro/arachne` for transport configuration, artifact custody, and
-generic operational state; this is an isolated checkout of the same public
-repository, not a separate unknown or private repository.
-Product issue intake proposes only a validated repository inbox file; product
-and candidate graph changes remain reviewable pull requests. Canonical SQLite
-paths are Git LFS objects, not ordinary Git blobs. Caches and Actions artifacts
-are disposable.
+Official operations check out protected `ninjaro/arachne-data/main` separately,
+validate `state-manifest.json`, and use local absolute paths. Product issue
+intake receives only the read-only state credential. Canonical writers mint a
+short-lived token from a dedicated GitHub App scoped to `arachne-data`; demo,
+Renovate, and deployment never receive it. Canonical SQLite is a Git LFS object.
 
-Workflow concurrency serializes product and candidate writes independently.
+One repository-global concurrency group serializes every state writer. A writer
+captures the exact starting SHA, fetches and compares the remote head before an
+atomic non-force push, and rejects stale state without rebase or retry.
 Stable logical dates prevent duplicate daily schedule runs across daylight-saving
 transitions. GitHub operations are the priority path; the system is not required to
 coordinate them with arbitrary local writes, and local conflicts belong to the

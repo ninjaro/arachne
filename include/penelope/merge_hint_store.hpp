@@ -20,14 +20,14 @@ public:
  * read-only, and return the versioned in-memory input consumed by Ariadne.
  */
 [[nodiscard]] nlohmann::json prepare_merge_hint_rebuild(
-    const std::filesystem::path& repository_root,
-    std::string_view generator_version
+    const std::filesystem::path& source_root,
+    const std::filesystem::path& state_root, std::string_view generator_version
 );
 
 /** Persist Ariadne's derived projection in the disposable hint database. */
 void store_merge_hint_projection(
-    const std::filesystem::path& repository_root,
-    const nlohmann::json& projection
+    const std::filesystem::path& source_root,
+    const std::filesystem::path& state_root, const nlohmann::json& projection
 );
 
 /**
@@ -36,26 +36,22 @@ void store_merge_hint_projection(
  * observations remain queryable in the disposable SQLite store.
  */
 [[nodiscard]] nlohmann::json load_merge_hint_export(
-    const std::filesystem::path& repository_root,
+    const std::filesystem::path& source_root,
+    const std::filesystem::path& state_root,
     std::string_view expected_generator_version
 );
 
 /** Explicitly remove the disposable database and its SQLite sidecars. */
-void discard_merge_hint_store(
-    const std::filesystem::path& repository_root
-);
+void discard_merge_hint_store(const std::filesystem::path& repository_root);
 
-[[nodiscard]] std::filesystem::path merge_hint_store_path(
-    const std::filesystem::path& repository_root
-);
+[[nodiscard]] std::filesystem::path
+merge_hint_store_path(const std::filesystem::path& repository_root);
 
-[[nodiscard]] std::filesystem::path merge_hint_review_path(
-    const std::filesystem::path& repository_root
-);
+[[nodiscard]] std::filesystem::path
+merge_hint_review_path(const std::filesystem::path& repository_root);
 
-[[nodiscard]] std::filesystem::path merge_hint_decisions_path(
-    const std::filesystem::path& repository_root
-);
+[[nodiscard]] std::filesystem::path
+merge_hint_decisions_path(const std::filesystem::path& state_root);
 
 } // namespace arachne::penelope
 

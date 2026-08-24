@@ -17,7 +17,7 @@ using arachnespace::contracts::contract_name;
 using arachnespace::contracts::validation_result;
 using json = nlohmann::json;
 
-constexpr std::array<std::pair<std::string_view, contract_name>, 10> contracts {
+constexpr std::array<std::pair<std::string_view, contract_name>, 8> contracts {
     {
         { "arachne_batch", contract_name::arachne_batch },
         { "batch_envelope_v1", contract_name::batch_envelope },
@@ -29,8 +29,6 @@ constexpr std::array<std::pair<std::string_view, contract_name>, 10> contracts {
         { "product_graph_snapshot_v1", contract_name::product_graph_snapshot },
         { "research_candidate_graph_snapshot_v1",
           contract_name::research_candidate_graph_snapshot },
-        { "viewer_projection_v1", contract_name::viewer_projection },
-        { "site_bundle_v1", contract_name::site_bundle },
     }
 };
 
@@ -164,8 +162,7 @@ TEST(Contracts, ReferencedArtifactSchemasAndExamplesAreResolvableDataFormats) {
         = repository_root() / "contracts" / "artifacts";
     for (const std::string_view name :
          { "external_candidate_source_graph_v1", "wikidata_image_hints_v1",
-           "research_candidate_graph_materialization_v1",
-           "viewer_projection_data_v1" }) {
+           "research_candidate_graph_materialization_v1" }) {
         SCOPED_TRACE(name);
         const json schema
             = read_json(artifacts / (std::string(name) + ".schema.json"));
@@ -201,22 +198,6 @@ TEST(Contracts, ReferencedArtifactsHaveCanonicalIdentityAndClosedCoreRecords) {
     for (const std::string_view record :
          { "group", "candidate", "work", "relation" }) {
         const json& definition = candidate_schema.at("$defs").at(record);
-        EXPECT_EQ(definition.at("additionalProperties"), false);
-        EXPECT_TRUE(definition.at("properties").contains("attributes"));
-    }
-
-    const json projection_schema
-        = read_json(artifacts / "viewer_projection_data_v1.schema.json");
-    const json projection_example
-        = read_json(artifacts / "viewer_projection_data_v1.example.json");
-    EXPECT_TRUE(
-        array_contains(projection_schema.at("required"), "projection_version")
-    );
-    EXPECT_EQ(
-        projection_example.at("projection_version"), "ariadne-view-1.0.0"
-    );
-    for (const std::string_view record : { "node", "edge" }) {
-        const json& definition = projection_schema.at("$defs").at(record);
         EXPECT_EQ(definition.at("additionalProperties"), false);
         EXPECT_TRUE(definition.at("properties").contains("attributes"));
     }
@@ -289,9 +270,9 @@ TEST(Contracts, ExtensionMustBeNamespaced) {
 }
 
 TEST(Contracts, ArtifactHashAndByteLengthAreChecked) {
-    json document = example("site_bundle_v1");
-    document["bundle"]["sha256"] = "ABC";
-    document["bundle"]["byte_length"] = -1;
+    json document = example("product_graph_snapshot_v1");
+    document["database"]["sha256"] = "ABC";
+    document["database"]["byte_length"] = -1;
     const validation_result result
         = arachnespace::contracts::validate(document);
     EXPECT_FALSE(result.valid());
@@ -588,7 +569,9 @@ TEST(Contracts, ArtifactBearingClassificationIsExplicit) {
         )
     );
     EXPECT_TRUE(
-        arachnespace::contracts::is_artifact_bearing(contract_name::site_bundle)
+        arachnespace::contracts::is_artifact_bearing(
+            contract_name::product_graph_snapshot
+        )
     );
 }
 

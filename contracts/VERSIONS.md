@@ -55,7 +55,7 @@ untrusted reference into a shell command or unrestricted filesystem path.
 The C++ contract API emits UTF-8 JSON with lexicographically ordered object
 keys, declared array order, no insignificant whitespace, and no non-finite
 numbers. Hashes of structured contract documents use those canonical bytes.
-Hashes of submitted, downloaded, database, export, report, projection, and site
+Hashes of submitted, downloaded, database, export, report, and derived artifact
 artifacts always use the original referenced bytes instead.
 
 ## Supported contracts
@@ -70,8 +70,6 @@ artifacts always use the original referenced bytes instead.
 | `research_candidate_graph_plan_v1` | Ariadne | Penelope | References a complete plan artifact plus declared source, product snapshot, configuration, and summary. |
 | `product_graph_snapshot_v1` | Penelope | Arachne, Ariadne | Identifies the database, deterministic exports, and structural report; a cocoon listing is optional under the post-specification retention decision. |
 | `research_candidate_graph_snapshot_v1` | Penelope | Arachne, Ariadne | Identifies the fully rebuilt candidate database, plan, source snapshot, exports, and structural report. |
-| `viewer_projection_v1` | Ariadne | Viewer build | References projection data and declares machine-readable human/derived edge semantics. |
-| `site_bundle_v1` | Ariadne | Arachne | References a deployable static bundle and all graph/projection identities needed for publication provenance. |
 
 ## Referenced artifact formats
 
@@ -81,7 +79,7 @@ members of the C++ `contract_name` enumeration:
 - `arachne_merge_hint_decisions_v1` is the durable, closed list of canonical
   ignored entity pairs. Its exact file bytes and ignored-pair count identify the
   human decisions used by a merge-hint rebuild.
-- `arachne_merge_hint_review_v1` is the disposable, bounded viewer projection of
+- `arachne_merge_hint_review_v1` is the disposable, bounded review projection of
   selected merge hints. Its source identity binds the projection to the exact
   product-database SHA-256 and to the decision artifact's SHA-256 and pair
   count; it is never product-database state.
@@ -98,13 +96,6 @@ members of the C++ `contract_name` enumeration:
   identity, groups, candidates, works, relations, and algorithmic provenance.
   Its closed records admit optional algorithm-owned `attributes` for rank,
   grey-node, profile, and explanation details.
-- `viewer_projection_data_v1` is the resolved data referenced by
-  `viewer_projection_v1.projection`. It declares `projection_version`; every
-  node and edge declares its graph snapshot and whether its origin is
-  human-authored, externally derived, or a build-time projection. Every edge
-  includes a human-readable explanation, and optional `attributes` carry
-  medium/year/evidence, soft-guidance, or UI-style data.
-
 Legacy normalized imports and unresolved JSONL formats are not active contracts.
 Routine inbox processing mutates the current product schema directly and records only
 canonical product state, batch idempotency, and durable ingest issues. Its

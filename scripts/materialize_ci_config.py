@@ -26,7 +26,6 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--template", type=Path, required=True)
     result.add_argument("--state-root", type=Path, required=True)
-    result.add_argument("--source-root", type=Path, required=True)
     result.add_argument("--runner-temp", type=Path, required=True)
     result.add_argument("--output", type=Path, required=True)
     return result
@@ -43,7 +42,6 @@ def main() -> int:
             raise ConfigurationError("template must be operations config version 1")
 
         state = absolute_directory(arguments.state_root, "state root", True)
-        source = absolute_directory(arguments.source_root, "source root", True)
         temporary = absolute_directory(arguments.runner_temp, "runner temp", True)
         paths = config["paths"]
         paths.update(
@@ -54,8 +52,6 @@ def main() -> int:
                 "graph_store": str(state / "graphs"),
                 "artifact_store": str(state / "artifacts"),
                 "lock_root": str(temporary / "arachne-locks"),
-                "viewer_templates": str(source / "viewer"),
-                "site_output": str(temporary / "arachne-site"),
                 "legacy_inbox_baseline": str(
                     state / "operations" / "legacy-inbox-baseline.json"
                 ),

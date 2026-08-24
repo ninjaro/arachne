@@ -1,6 +1,6 @@
 #include "ariadne/product.hpp"
 
-#include "ariadne/viewer.hpp"
+#include "ariadne/catalog.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -651,7 +651,7 @@ namespace {
             items.push_back(std::move(hint));
         }
         const json catalog
-            = viewer_builder::catalog(product_export, product_snapshot_id);
+            = catalog_builder::catalog(product_export, product_snapshot_id);
         for (const auto& work : catalog.at("works")) {
             if (auto item = quality_item(work)) {
                 items.push_back(std::move(*item));
@@ -772,8 +772,7 @@ ordered_json product_projection_builder::entity(
             continue;
         }
         const std::string target_id = credit.value("entity_id", "");
-        if (((work_family || manifestation_family)
-                && target_id != entity_id)
+        if (((work_family || manifestation_family) && target_id != entity_id)
             || (agent_family && credit.value("agent_id", "") != entity_id)) {
             continue;
         }
@@ -894,8 +893,7 @@ ordered_json product_projection_builder::entity(
              array_or_empty(product_export, "work_memberships")) {
             if (membership.is_object()
                 && (membership.value("child_work_id", "") == entity_id
-                    || membership.value("parent_work_id", "")
-                        == entity_id)) {
+                    || membership.value("parent_work_id", "") == entity_id)) {
                 work_memberships.push_back(ordered_json(membership));
             }
         }
@@ -913,8 +911,7 @@ ordered_json product_projection_builder::entity(
         }
     }
 
-    const ordered_json events
-        = (work_family || manifestation_family)
+    const ordered_json events = (work_family || manifestation_family)
         ? filtered_rows(product_export, "events", "entity_id", entity_id)
         : ordered_json::array();
 
@@ -925,16 +922,12 @@ ordered_json product_projection_builder::entity(
              array_or_empty(product_export, "manifestations")) {
             if (manifestation.is_object()
                 && manifestation.value("work_id", "") == entity_id) {
-                manifestation_ids.emplace(
-                    manifestation.value("entity_id", "")
-                );
+                manifestation_ids.emplace(manifestation.value("entity_id", ""));
             }
         }
         for (const auto& credit : array_or_empty(product_export, "credits")) {
             if (credit.is_object()
-                && manifestation_ids.contains(
-                    credit.value("entity_id", "")
-                )) {
+                && manifestation_ids.contains(credit.value("entity_id", ""))) {
                 ordered_json item = credit;
                 const std::string agent_id = credit.value("agent_id", "");
                 item["agent_label"] = labels.contains(agent_id)
@@ -947,8 +940,9 @@ ordered_json product_projection_builder::entity(
 
     const json* subtype = find_row(
         product_export,
-        work_family ? "works"
-                    : manifestation_family ? "manifestations" : "agents",
+        work_family                ? "works"
+            : manifestation_family ? "manifestations"
+                                   : "agents",
         "entity_id", entity_id
     );
     if (subtype == nullptr) {
@@ -962,12 +956,14 @@ ordered_json product_projection_builder::entity(
         { "product_snapshot",
           snapshot_identity(product_snapshot_id, product_sha256) },
         { "entity_id", entity_id },
-        { "family", work_family ? "work"
-                                 : manifestation_family ? "manifestation"
-                                                        : "agent" },
+        { "family",
+          work_family                ? "work"
+              : manifestation_family ? "manifestation"
+                                     : "agent" },
         { "entity", *canonical },
-        { work_family ? "work"
-                      : manifestation_family ? "manifestation" : "agent",
+        { work_family                ? "work"
+              : manifestation_family ? "manifestation"
+                                     : "agent",
           *subtype },
         { "names",
           filtered_rows(product_export, "names", "entity_id", entity_id) },
@@ -1011,7 +1007,7 @@ ordered_json product_projection_builder::taste_index(
 ) {
     require_snapshot_identity(product_snapshot_id, product_sha256);
     const json catalog
-        = viewer_builder::catalog(product_export, product_snapshot_id);
+        = catalog_builder::catalog(product_export, product_snapshot_id);
 
     struct scale_coverage final {
         std::size_t concept_assignment_count {};

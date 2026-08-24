@@ -61,25 +61,22 @@ jobs:
     runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          lfs: true
       - name: Require protected transport settings
         env:
           STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
-          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
-          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          STATE_TOKEN: ${{ secrets.ARACHNE_DATA_READ_TOKEN }}
         run: |
           test -n "${STATE_REPOSITORY}"
-          test -n "${STATE_BASE_BRANCH}"
           test -n "${STATE_TOKEN}"
       - name: Checkout protected transport state
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
-          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
-          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
+          ref: main
+          token: ${{ secrets.ARACHNE_DATA_READ_TOKEN }}
           path: .arachne/ci-state
           lfs: true
+          persist-credentials: false
       - name: Install application dependencies
         run: |
           sudo apt-get update
@@ -95,10 +92,11 @@ jobs:
         run: scripts/build.sh
       - name: Materialize runner-local transport configuration
         run: |
+          python3 scripts/state_manifest.py check \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"
           python3 scripts/materialize_ci_config.py \
             --template "${GITHUB_WORKSPACE}/.arachne/ci-state/config/arachne.json" \
             --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
-            --source-root "${GITHUB_WORKSPACE}" \
             --runner-temp "${RUNNER_TEMP}" \
             --output "${RUNNER_TEMP}/arachne-config.json"
           python3 scripts/issue_intake_request.py \
@@ -123,6 +121,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Validate the strict product batches
+        env:
+          ARACHNE_STATE_REPOSITORY: ${{ github.workspace }}/.arachne/ci-state
         run: build/arachne product check-inbox
       - name: Propose the validated inbox files for review
         env:

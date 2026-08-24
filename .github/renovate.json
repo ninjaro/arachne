@@ -1,7 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:best-practices"
+    "config:best-practices",
+    "group:all"
   ],
   "timezone": "Europe/Berlin",
   "baseBranchPatterns": [
@@ -15,26 +16,17 @@
     "every weekend"
   ],
   "dependencyDashboard": true,
-  "commitMessagePrefix": "renovate versions in ymls: ",
+  "automerge": true,
+  "automergeType": "branch",
+  "ignoreTests": false,
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "commitMessagePrefix": "renovate: ",
   "packageRules": [
     {
-      "matchManagers": [
-        "github-actions"
-      ],
-      "matchUpdateTypes": [
-        "patch",
-        "digest"
-      ],
-      "automerge": true,
-      "automergeType": "branch",
-      "groupName": "GitHub Actions",
-      "minimumReleaseAge": "7 days"
-    },
-    {
-      "matchManagers": [
-        "custom.regex"
-      ],
-      "groupName": "Toolchains (Doxygen & LLVM)",
+      "matchPackageNames": ["*"],
+      "groupName": "all dependency updates",
       "minimumReleaseAge": "7 days"
     }
   ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import re
 import sqlite3
 import tempfile
@@ -9,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "schema" / "product.sql"
-CANONICAL_DATABASE = ROOT / "database" / "art-islands.sqlite"
+STATE_ROOT = os.environ.get("ARACHNE_TEST_STATE_ROOT")
 
 
 MONTH_ONLY_TEXT = re.compile(
@@ -317,8 +318,11 @@ class CurrentProductSchemaTests(unittest.TestCase):
             )
 
     def test_canonical_obvious_month_values_use_month_precision(self) -> None:
+        if STATE_ROOT is None:
+            self.skipTest("ARACHNE_TEST_STATE_ROOT is required for product-data checks")
+        canonical_database = Path(STATE_ROOT) / "database" / "art-islands.sqlite"
         canonical = sqlite3.connect(
-            f"file:{CANONICAL_DATABASE}?mode=ro",
+            f"file:{canonical_database}?mode=ro",
             uri=True,
         )
         try:

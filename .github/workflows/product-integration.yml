@@ -11,7 +11,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: product-database-write
+  group: arachne-data-write
   cancel-in-progress: false
 
 jobs:
@@ -21,7 +21,41 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
+
+      - name: Mint the dedicated arachne-data writer token
+        id: data-writer
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.ARACHNE_DATA_WRITER_APP_ID }}
+          private-key: ${{ secrets.ARACHNE_DATA_WRITER_APP_PRIVATE_KEY }}
+          owner: ninjaro
+          repositories: arachne-data
+          permission-contents: write
+
+      - name: Require the protected arachne-data target
+        env:
+          STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+        run: |
+          test "${STATE_REPOSITORY}" = "ninjaro/arachne-data"
+
+      - name: Checkout current authoritative state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
+          ref: main
+          token: ${{ steps.data-writer.outputs.token }}
+          path: .arachne/ci-state
+          fetch-depth: 0
           lfs: true
+
+      - name: Capture and validate the exact writer base
+        run: |
+          state_base="$(git -C .arachne/ci-state rev-parse HEAD)"
+          test "${state_base}" = "$(git -C .arachne/ci-state rev-parse origin/main)"
+          echo "ARACHNE_STATE_BASE=${state_base}" >> "${GITHUB_ENV}"
+          python3 scripts/state_manifest.py check \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"
 
       - name: Install application dependencies
         run: |
@@ -38,10 +72,35 @@ jobs:
           ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
 
-      - name: Validate and apply strict inbox batches
+      - name: Validate and apply strict arachne_batch inbox batches
+        env:
+          ARACHNE_STATE_REPOSITORY: ${{ github.workspace }}/.arachne/ci-state
         run: build/arachne product check-inbox apply-inbox
 
-      - name: Propose the database change for review
+      - name: Validate and bind the resulting canonical product state
+        run: |
+          python3 scripts/check_product_database_clean.py \
+            "${GITHUB_WORKSPACE}/.arachne/ci-state/database/art-islands.sqlite"
+          if ! git -C .arachne/ci-state diff --quiet -- \
+            database/art-islands.sqlite; then
+            python3 scripts/state_manifest.py refresh \
+              --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
+              --producer-commit "${GITHUB_SHA}"
+          fi
+          python3 scripts/state_manifest.py check \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"
+
+      - name: Publish only from the captured current main
+        run: |
+          python3 scripts/publish_state_repository.py \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
+            --expected-base "${ARACHNE_STATE_BASE}" \
+            --base main \
+            --title "Apply Arachne product inbox" \
+            --allow database \
+            --allow state-manifest.json
+
+      - name: Propose successful inbox cleanup in Arachne
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -49,6 +108,6 @@ jobs:
             --state-root "${GITHUB_WORKSPACE}" \
             --repository "${GITHUB_REPOSITORY}" \
             --base "${{ github.event.repository.default_branch }}" \
-            --branch "arachne/inbox-${GITHUB_RUN_ID}" \
-            --title "Apply Arachne inbox batches" \
-            --body "Applied validated arachne_batch files from inbox/ in ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+            --branch "arachne/inbox-cleanup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --title "Remove applied Arachne inbox batches" \
+            --body "The corresponding canonical mutation was published to arachne-data/main by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."

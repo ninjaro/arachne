@@ -50,8 +50,6 @@ class OperationsCliTests(unittest.TestCase):
                 "graph_store": str(self.root / "graphs"),
                 "artifact_store": str(self.root / "artifacts"),
                 "lock_root": str(self.root / "locks"),
-                "viewer_templates": str(ROOT / "viewer"),
-                "site_output": str(self.root / "site"),
                 "legacy_inbox_baseline": str(
                     self.root / "state" / "legacy-baseline.json"
                 ),
@@ -145,10 +143,6 @@ class OperationsCliTests(unittest.TestCase):
                 ],
             },
             "security": {"submission_max_bytes": 1024 * 1024},
-            "publication": {
-                "require_reviewed_change": True,
-                "pages_artifact_name": "test-site",
-            },
         }
         self.config_path.write_text(
             json.dumps(document, indent=2) + "\n", encoding="utf-8"
@@ -262,7 +256,6 @@ class OperationsCliTests(unittest.TestCase):
                 "product-taste-index",
                 "candidate-plan",
                 "candidate-rebuild",
-                "viewer-build",
             },
         )
 

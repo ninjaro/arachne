@@ -4,7 +4,6 @@
 #include "ariadne/candidates.hpp"
 #include "ariadne/merge_hints.hpp"
 #include "ariadne/product.hpp"
-#include "ariadne/viewer.hpp"
 #include "penelope/inbox.hpp"
 #include "penelope/merge_hint_store.hpp"
 #include "penelope/store.hpp"
@@ -89,6 +88,30 @@ resolved_path(const fs::path& path, const fs::path& relative_root) {
         throw cli_error("cannot resolve path: " + candidate.string());
     }
     return result.lexically_normal();
+}
+
+[[nodiscard]] fs::path state_repository_root() {
+    const char* configured = std::getenv("ARACHNE_STATE_REPOSITORY");
+    const fs::path requested = configured != nullptr && *configured != '\0'
+        ? fs::path(configured)
+        : repository_root().parent_path() / "arachne-data";
+    const fs::path candidate
+        = requested.is_absolute() ? requested : repository_root() / requested;
+    std::error_code error;
+    if (fs::is_symlink(fs::symlink_status(candidate, error))) {
+        throw cli_error(
+            "Arachne state repository must not be a symbolic link: "
+            + candidate.string()
+        );
+    }
+    const fs::path result = resolved_path(requested, repository_root());
+    if (!fs::is_directory(result)) {
+        throw cli_error(
+            "Arachne state repository is not a directory: " + result.string()
+            + "; set ARACHNE_STATE_REPOSITORY to an arachne-data checkout"
+        );
+    }
+    return result;
 }
 
 [[nodiscard]] std::optional<fs::path> conventional_legacy_inbox() {
@@ -305,8 +328,6 @@ struct configuration final {
     fs::path graph_store;
     fs::path artifact_store;
     fs::path lock_root;
-    fs::path viewer_templates;
-    fs::path site_output;
     std::uintmax_t submission_max_bytes = 64U * 1024U * 1024U;
     std::chrono::seconds product_lock_stale { 21'600 };
     std::chrono::seconds candidate_lock_stale { 21'600 };
@@ -342,7 +363,7 @@ required_object(const json& parent, const std::string_view key) {
     }
 
     const json& paths = required_object(result.document, "paths");
-    const fs::path root = repository_root();
+    const fs::path root = result.file.parent_path();
     auto configured_path = [&](const std::string_view key) {
         const auto value = paths.find(key);
         if (value == paths.end() || !value->is_string()
@@ -376,8 +397,6 @@ required_object(const json& parent, const std::string_view key) {
     result.graph_store = configured_path("graph_store");
     result.artifact_store = configured_path("artifact_store");
     result.lock_root = configured_path("lock_root");
-    result.viewer_templates = configured_path("viewer_templates");
-    result.site_output = configured_path("site_output");
     if (!fs::is_directory(result.queue)) {
         throw cli_error(
             "configured queue is not a directory: " + result.queue.string()
@@ -402,13 +421,11 @@ required_object(const json& parent, const std::string_view key) {
     }
 
     for (const auto& [name, path] :
-         std::array<std::pair<std::string_view, const fs::path*>, 6> {
+         std::array<std::pair<std::string_view, const fs::path*>, 4> {
              { { "ledger", &result.ledger },
                { "graph_store", &result.graph_store },
                { "artifact_store", &result.artifact_store },
-               { "lock_root", &result.lock_root },
-               { "viewer_templates", &result.viewer_templates },
-               { "site_output", &result.site_output } } }) {
+               { "lock_root", &result.lock_root } } }) {
         if (arachne::coordination::path_is_within(*path, result.queue)
             || arachne::coordination::path_is_within(result.queue, *path)) {
             throw cli_error(
@@ -451,7 +468,6 @@ required_object(const json& parent, const std::string_view key) {
     result.candidate_lock_stale = std::chrono::seconds(
         static_cast<std::chrono::seconds::rep>(candidate_stale)
     );
-    static_cast<void>(required_object(result.document, "publication"));
     return result;
 }
 
@@ -659,12 +675,10 @@ struct written_run_manifest final {
               { "arachne_batch", "batch_envelope_v1", "fetch_plan_v1",
                 "fetch_request_v1", "acquired_artifact_v1",
                 "research_candidate_graph_plan_v1", "product_graph_snapshot_v1",
-                "research_candidate_graph_snapshot_v1", "viewer_projection_v1",
-                "site_bundle_v1" } },
+                "research_candidate_graph_snapshot_v1" } },
             { "artifacts",
               { "external_candidate_source_graph_v1",
-                "research_candidate_graph_materialization_v1",
-                "viewer_projection_data_v1" } } } },
+                "research_candidate_graph_materialization_v1" } } } },
         { "configuration_hashes", std::move(configuration_hashes) },
         { "inputs", std::move(inputs) },
         { "outputs", std::move(outputs) },
@@ -896,112 +910,12 @@ void verify_product_coverage(
     }
 }
 
-[[nodiscard]] json parse_embedded_json(
-    const json& row, const std::string_view key, json fallback
-) {
-    const auto value = row.find(key);
-    if (value == row.end() || value->is_null()) {
-        return fallback;
-    }
-    if (!value->is_string()) {
-        return *value;
-    }
-    try {
-        return json::parse(value->get_ref<const std::string&>());
-    } catch (const json::exception& error) {
-        throw cli_error(
-            "invalid embedded JSON in export field " + std::string(key) + ": "
-            + error.what()
-        );
-    }
-}
-
-[[nodiscard]] json candidate_tables_for_viewer(const json& tables) {
-    json result {
-        { "artifact_type", "research_candidate_graph_materialization_v1" },
-        { "format_version", 1 },
-        { "algorithm", { { "version", "candidate-materialization-v1" } } },
-        { "groups", json::array() },
-        { "candidates", json::array() },
-        { "works", json::array() },
-        { "relations", json::array() },
-    };
-    if (tables.contains("candidate_graph_info")
-        && tables.at("candidate_graph_info").is_array()
-        && !tables.at("candidate_graph_info").empty()) {
-        const auto& info = tables.at("candidate_graph_info").front();
-        result["algorithm"]["version"]
-            = info.value("algorithm_version", "candidate-materialization-v1");
-    }
-    for (const auto& group : tables.value("candidate_groups", json::array())) {
-        json materialized
-            = parse_embedded_json(group, "metadata_json", json::object());
-        materialized["group_id"] = group.value("id", "");
-        materialized["label"] = group.value("label", "");
-        materialized["order"] = group.value("ordinal", 0);
-        result["groups"].push_back(std::move(materialized));
-    }
-    for (const auto& node : tables.value("candidate_nodes", json::array())) {
-        const json source
-            = parse_embedded_json(node, "source_metadata_json", json::object());
-        const json reasons
-            = parse_embedded_json(node, "selection_reason_json", json::array());
-        const std::string kind = node.value("entity_type", "candidate");
-        if (kind == "candidate_work") {
-            json attributes { { "noncanonical", true },
-                              { "soft_guidance", true } };
-            if (source.contains("year")) {
-                attributes["year"] = source.at("year");
-            }
-            result["works"].push_back(
-                { { "work_id", node.value("id", "") },
-                  { "candidate_id", source.value("candidate_id", "") },
-                  { "external_id", node.value("entity_ref", "") },
-                  { "label", node.value("label", "") },
-                  { "attributes", std::move(attributes) } }
-            );
-            continue;
-        }
-        result["candidates"].push_back(
-            { { "candidate_id", node.value("id", "") },
-              { "external_id", node.value("entity_ref", "") },
-              { "label", node.value("label", "") },
-              { "kind", kind },
-              { "rank", node.value("rank", 0) },
-              { "coverage", node.value("coverage", 0.0) },
-              { "group_id", node.value("group_id", "unassigned") },
-              { "selection_reasons", reasons },
-              { "attributes",
-                { { "noncanonical", true },
-                  { "is_grey", node.value("is_grey", 0) != 0 },
-                  { "source", source } } } }
-        );
-    }
-    for (const auto& edge : tables.value("candidate_edges", json::array())) {
-        result["relations"].push_back(
-            { { "relation_id", edge.value("id", "") },
-              { "source_id", edge.value("subject_id", "") },
-              { "target_id", edge.value("object_id", "") },
-              { "relation_type", edge.value("relation_type", "") },
-              { "weight", edge.value("weight", 0.0) },
-              { "provenance",
-                parse_embedded_json(edge, "metadata_json", json::object()) },
-              { "attributes", { { "soft_guidance", true } } } }
-        );
-    }
-    return result;
-}
-
-[[nodiscard]] json
-materialize_jsonl_export(const fs::path& path, const bool candidate) {
+[[nodiscard]] json materialize_jsonl_export(const fs::path& path) {
     const std::string bytes
         = read_bytes(path, maximum_export_bytes, "graph export");
     const json whole = json::parse(bytes, nullptr, false);
     if (!whole.is_discarded()) {
         if (whole.is_object() && !whole.contains("table")) {
-            if (candidate && whole.contains("candidate_nodes")) {
-                return candidate_tables_for_viewer(whole);
-            }
             return whole;
         }
         if (!whole.is_array() && !whole.is_object()) {
@@ -1053,7 +967,7 @@ materialize_jsonl_export(const fs::path& path, const bool candidate) {
             }
         }
     }
-    return candidate ? candidate_tables_for_viewer(tables) : tables;
+    return tables;
 }
 
 [[nodiscard]] bool valid_logical_date(const std::string_view value) {
@@ -1304,9 +1218,11 @@ struct product_task_result final {
 };
 
 [[nodiscard]] product_task_result command_product_inbox(const bool apply) {
+    const fs::path source_root = repository_root();
+    const fs::path state_root = state_repository_root();
     const auto result = apply
-        ? arachne::penelope::apply_product_inbox(repository_root())
-        : arachne::penelope::check_product_inbox(repository_root());
+        ? arachne::penelope::apply_product_inbox(source_root, state_root)
+        : arachne::penelope::check_product_inbox(source_root, state_root);
     ordered_json batches = ordered_json::array();
     for (const auto& batch : result.batches) {
         ordered_json issues = ordered_json::array();
@@ -1324,8 +1240,7 @@ struct product_task_result final {
         batches.push_back(
             ordered_json {
                 { "path",
-                  batch.path.lexically_relative(repository_root())
-                      .generic_string() },
+                  batch.path.lexically_relative(source_root).generic_string() },
                 { "batch_id", batch.batch_id },
                 { "status", arachne::penelope::to_string(batch.status) },
                 { "issues", std::move(issues) },
@@ -1347,12 +1262,14 @@ struct product_task_result final {
 }
 
 [[nodiscard]] product_task_result command_product_rebuild_merge_hints() {
+    const fs::path source_root = repository_root();
+    const fs::path state_root = state_repository_root();
     const json input = arachne::penelope::prepare_merge_hint_rebuild(
-        repository_root(), arachne::ariadne::merge_hint_generator_version
+        source_root, state_root, arachne::ariadne::merge_hint_generator_version
     );
     const json projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        repository_root(), projection
+        source_root, state_root, projection
     );
     const auto selected = static_cast<std::size_t>(std::ranges::count_if(
         projection.at("candidates"),
@@ -1378,13 +1295,15 @@ struct product_task_result final {
 }
 
 [[nodiscard]] product_task_result command_product_export_merge_hints() {
+    const fs::path source_root = repository_root();
+    const fs::path state_root = state_repository_root();
     const json projection = arachne::penelope::load_merge_hint_export(
-        repository_root(), arachne::ariadne::merge_hint_generator_version
+        source_root, state_root, arachne::ariadne::merge_hint_generator_version
     );
     const json review
         = arachne::ariadne::merge_hint_planner::export_review(projection);
     const fs::path destination
-        = arachne::penelope::merge_hint_review_path(repository_root());
+        = arachne::penelope::merge_hint_review_path(source_root);
     atomic_write(
         destination, arachnespace::contracts::canonical_json(review) + "\n",
         true
@@ -1395,11 +1314,11 @@ struct product_task_result final {
             { "status", "ok" },
             { "review_count", review.at("items").size() },
             { "artifact_path",
-              destination.lexically_relative(repository_root())
+              destination.lexically_relative(source_root)
                   .generic_string() },
             { "structural_store_path",
-              arachne::penelope::merge_hint_store_path(repository_root())
-                  .lexically_relative(repository_root())
+              arachne::penelope::merge_hint_store_path(source_root)
+                  .lexically_relative(source_root)
                   .generic_string() },
             { "structural_store_retained", true },
             { "product_sha256",
@@ -1515,7 +1434,7 @@ load_product_projection_input(const options& arguments) {
         const fs::path export_path = command_path(*export_option);
         const std::string product_sha256
             = arachne::crypto::sha256_file(database_path);
-        json tables = materialize_jsonl_export(export_path, false);
+        json tables = materialize_jsonl_export(export_path);
         const auto identity = tables.find("__local_product_identity");
         if (identity == tables.end() || !identity->is_array()
             || identity->size() != 1U || !identity->at(0).is_object()
@@ -1546,7 +1465,7 @@ load_product_projection_input(const options& arguments) {
         "product-jsonl"
     );
     return {
-        .tables = materialize_jsonl_export(snapshot.export_path, false),
+        .tables = materialize_jsonl_export(snapshot.export_path),
         .snapshot_id = snapshot.control.at("snapshot_id").get<std::string>(),
         .product_sha256
         = snapshot.control.at("content_sha256").get<std::string>(),
@@ -1630,7 +1549,7 @@ int command_product_taste_index(const options& arguments) {
             input.tables, std::move(input.snapshot_id),
             std::move(input.product_sha256)
         );
-    write_product_projection(projection, arguments, "viewer taste index");
+    write_product_projection(projection, arguments, "product taste index");
     return 0;
 }
 
@@ -1660,8 +1579,8 @@ int command_candidate_rebuild(const options& arguments) {
     );
     const std::string product_snapshot_id
         = control.at("product_snapshot").at("snapshot_id").get<std::string>();
-    const fs::path product_control_path = config.graph_store / "product"
-        / "snapshots" / product_snapshot_id / "metadata.json";
+    const fs::path product_control_path
+        = command_path(arguments.require("--product-snapshot"));
     const resolved_snapshot_export product_snapshot = resolve_snapshot_export(
         config, product_control_path,
         arachnespace::contracts::contract_name::product_graph_snapshot,
@@ -2272,7 +2191,7 @@ int command_candidate_plan(const options& arguments) {
         "product-jsonl"
     );
     const json product_tables
-        = materialize_jsonl_export(product_snapshot.export_path, false);
+        = materialize_jsonl_export(product_snapshot.export_path);
     verify_external_source_snapshot(config, external_graph);
     verify_product_coverage(external_graph, product_tables);
     const auto candidate_config = candidate_configuration_from(config);
@@ -2305,94 +2224,6 @@ int command_candidate_plan(const options& arguments) {
     return 0;
 }
 
-int command_viewer_build(const options& arguments) {
-    const configuration config
-        = load_configuration(arguments.require("--config"));
-    const auto candidate_control = arguments.optional("--candidate-snapshot");
-    if (!fs::is_directory(config.viewer_templates)) {
-        throw cli_error("configured viewer template directory does not exist");
-    }
-    const resolved_snapshot_export product_snapshot = resolve_snapshot_export(
-        config, command_path(arguments.require("--product-snapshot")),
-        arachnespace::contracts::contract_name::product_graph_snapshot,
-        "product-jsonl"
-    );
-    const json product
-        = materialize_jsonl_export(product_snapshot.export_path, false);
-    json candidate = json::object();
-    std::string candidate_id = "none";
-    if (candidate_control) {
-        const resolved_snapshot_export candidate_snapshot
-            = resolve_snapshot_export(
-                config, command_path(*candidate_control),
-                arachnespace::contracts::contract_name::
-                    research_candidate_graph_snapshot,
-                "candidate-jsonl"
-            );
-        candidate
-            = materialize_jsonl_export(candidate_snapshot.export_path, true);
-        candidate_id
-            = candidate_snapshot.control.at("snapshot_id").get<std::string>();
-    }
-    const ordered_json projection = arachne::ariadne::viewer_builder::project(
-        product, candidate,
-        product_snapshot.control.at("snapshot_id").get<std::string>(),
-        candidate_id
-    );
-    const ordered_json catalog = arachne::ariadne::viewer_builder::catalog(
-        product, product_snapshot.control.at("snapshot_id").get<std::string>()
-    );
-    const std::string product_snapshot_id
-        = product_snapshot.control.at("snapshot_id").get<std::string>();
-    const std::string product_sha256
-        = product_snapshot.control.at("content_sha256").get<std::string>();
-    const ordered_json research_report = build_product_research_report(
-        product, product_snapshot_id, product_sha256, arguments
-    );
-    const ordered_json taste_index
-        = arachne::ariadne::product_projection_builder::taste_index(
-            product, product_snapshot_id, product_sha256
-        );
-    const std::string projection_id
-        = projection.at("projection_id").get<std::string>();
-    const fs::path projection_directory = config.site_output / "projections";
-    const fs::path projection_path
-        = projection_directory / (projection_id + ".json");
-    const fs::path control_path
-        = projection_directory / (projection_id + ".control.json");
-    const std::string generated_at = utc_now();
-    const std::string settings_hash = arachne::crypto::sha256(
-        arachnespace::contracts::canonical_json(
-            required_object(config.document, "publication")
-        )
-    );
-    const fs::path storage_ref
-        = projection_path.lexically_relative(config.site_output);
-    const ordered_json projection_control
-        = arachne::ariadne::viewer_builder::write_projection(
-            projection, projection_path, storage_ref.generic_string(),
-            settings_hash, generated_at
-        );
-    atomic_write(
-        control_path,
-        arachnespace::contracts::canonical_json(projection_control) + "\n", true
-    );
-    const ordered_json site_bundle
-        = arachne::ariadne::viewer_builder::build_site(
-            projection, catalog, config.viewer_templates, config.site_output,
-            generated_at, research_report, taste_index, product_sha256
-        );
-    emit(
-        ordered_json {
-            { "command", "viewer-build" },
-            { "projection_control", projection_control },
-            { "projection_control_path", control_path.generic_string() },
-            { "site_bundle", site_bundle },
-        }
-    );
-    return 0;
-}
-
 [[nodiscard]] ordered_json capabilities() {
     return {
         { "format_version", 1 },
@@ -2402,7 +2233,7 @@ int command_viewer_build(const options& arguments) {
             "inbox-baseline", "inbox-verify", "intake", "product-check-inbox",
             "product-apply-inbox", "product-rebuild-merge-hints",
             "product-export-merge-hints", "product-research", "product-entity",
-            "product-taste-index", "viewer-build" } },
+            "product-taste-index" } },
     };
 }
 
@@ -2416,7 +2247,6 @@ Usage:
 Commands:
   product      Inspect and operate on the canonical product
   candidate    Build and activate research candidates
-  viewer       Build the static viewer
   fetch        Acquire reviewed external data
   inbox        Inspect the mutation inbox
   cocoon       Manage intake lifecycle
@@ -2441,7 +2271,7 @@ Usage:
 Inspection and derived artifacts:
   research             Write the snapshot-bound product research report
   entity               Inspect one canonical work or agent as JSON
-  taste-index          Build the disposable viewer taste feature index
+  taste-index          Build the disposable product taste feature index
 
 Fixed repository tasks:
   check-inbox          Validate all pending product batches
@@ -2480,7 +2310,7 @@ Optional options:
   --merge-hint-decisions FILE   Matching decisions; required with --merge-hints
 
 Example:
-  build/arachne product research --config config/arachne.json --product-snapshot graphs/product/active.json --output research.json
+  build/arachne product research --config ../arachne-data/config/arachne.json --product-snapshot /tmp/product-graph/active.json --output /tmp/research.json
 )";
         return 0;
     }
@@ -2510,7 +2340,7 @@ Optional options:
   --compact                  Emit compact JSON instead of readable JSON
 
 Example:
-  build/arachne product entity --config config/arachne.json --product-snapshot graphs/product/active.json --id work-001234
+  build/arachne product entity --config ../arachne-data/config/arachne.json --product-snapshot /tmp/product-graph/active.json --id work-001234
 )";
         return 0;
     }
@@ -2537,7 +2367,7 @@ Optional options:
   --compact                  Emit compact JSON instead of readable JSON
 
 Example:
-  build/arachne product taste-index --config config/arachne.json --product-snapshot graphs/product/active.json --output taste-index.json
+  build/arachne product taste-index --config ../arachne-data/config/arachne.json --product-snapshot /tmp/product-graph/active.json --output /tmp/taste-index.json
 )";
         return 0;
     }
@@ -2589,7 +2419,7 @@ Subcommands:
   rebuild   Activate a verified candidate plan as a new candidate snapshot
 
 Examples:
-  build/arachne candidate plan --config run/arachne.json --external-graph run/results/wikidata-external-graph.json --product-snapshot graphs/product/active.json --output-artifact artifacts/candidate-plans/wikidata.json --output-control run/results/wikidata-candidate-plan.control.json
+  build/arachne candidate plan --config run/arachne.json --external-graph run/results/wikidata-external-graph.json --product-snapshot /tmp/product-graph/active.json --output-artifact artifacts/candidate-plans/wikidata.json --output-control run/results/wikidata-candidate-plan.control.json
   build/arachne candidate rebuild --config run/arachne.json --plan-control run/results/wikidata-candidate-plan.control.json --run-id candidate-wikidata-20260809
 
 Run:
@@ -2612,7 +2442,7 @@ Required options:
   --output-control FILE      research_candidate_graph_plan_v1 control
 
 Example:
-  build/arachne candidate plan --config run/arachne.json --external-graph run/results/wikidata-external-graph.json --product-snapshot graphs/product/active.json --output-artifact artifacts/candidate-plans/wikidata.json --output-control run/results/wikidata-candidate-plan.control.json
+  build/arachne candidate plan --config run/arachne.json --external-graph run/results/wikidata-external-graph.json --product-snapshot /tmp/product-graph/active.json --output-artifact artifacts/candidate-plans/wikidata.json --output-control run/results/wikidata-candidate-plan.control.json
 )";
         return 0;
     }
@@ -2621,15 +2451,16 @@ Example:
         std::cout << R"(Arachne candidate rebuild
 
 Usage:
-  arachne candidate rebuild --config CONFIG --plan-control CONTROL --run-id RUN_ID
+  arachne candidate rebuild --config CONFIG --plan-control CONTROL --product-snapshot PRODUCT --run-id RUN_ID
 
 Required options:
   --config FILE          Materialized operations configuration
   --plan-control FILE    Verified research_candidate_graph_plan_v1 control
-  --run-id ID            Stable logical candidate rebuild identifier
+  --product-snapshot FILE  Exact verified product control used by the plan
+  --run-id ID              Stable logical candidate rebuild identifier
 
 Example:
-  build/arachne candidate rebuild --config run/arachne.json --plan-control run/results/wikidata-candidate-plan.control.json --run-id candidate-wikidata-20260809
+  build/arachne candidate rebuild --config run/arachne.json --plan-control run/results/wikidata-candidate-plan.control.json --product-snapshot run/product/active.json --run-id candidate-wikidata-20260809
 )";
         return 0;
     }
@@ -2756,9 +2587,10 @@ int dispatch(const std::vector<std::string>& arguments) {
     }
     if (arguments[1] == "candidate" && arguments.size() >= 3U
         && arguments[2] == "rebuild") {
-        return command_candidate_rebuild(
-            options(arguments, 3U, { "--config", "--plan-control", "--run-id" })
-        );
+        return command_candidate_rebuild(options(
+            arguments, 3U,
+            { "--config", "--plan-control", "--product-snapshot", "--run-id" }
+        ));
     }
     if (arguments[1] == "candidate" && arguments.size() >= 3U
         && arguments[2] == "plan") {
@@ -2777,14 +2609,6 @@ int dispatch(const std::vector<std::string>& arguments) {
     if (arguments[1] == "fetch") {
         return command_fetch(options(
             arguments, 2U, { "--config", "--request", "--output-control" }
-        ));
-    }
-    if (arguments[1] == "viewer" && arguments.size() >= 3U
-        && arguments[2] == "build") {
-        return command_viewer_build(options(
-            arguments, 3U,
-            { "--config", "--product-snapshot", "--candidate-snapshot",
-              "--merge-hints", "--merge-hint-decisions" }
         ));
     }
     throw cli_error("unknown operations command; run 'arachne help'");

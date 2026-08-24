@@ -32,7 +32,6 @@ REQUIRED_CAPABILITIES = frozenset(
         "product-taste-index",
         "candidate-plan",
         "candidate-rebuild",
-        "viewer-build",
     }
 )
 
@@ -88,14 +87,14 @@ def resolve_binary(value: Path) -> Path:
     return result
 
 
-def configured_path(config: dict[str, Any], key: str) -> Path:
+def configured_path(config: dict[str, Any], key: str, config_root: Path) -> Path:
     value = config["paths"].get(key)
     if not isinstance(value, str) or not value:
         raise OperationsError(f"configuration paths.{key} is missing")
     if value.startswith("/absolute/path/to/"):
         raise OperationsError(f"replace the placeholder paths.{key} before use")
     path = Path(value)
-    return (path if path.is_absolute() else ROOT / path).resolve(strict=False)
+    return (path if path.is_absolute() else config_root / path).resolve(strict=False)
 
 
 def path_within(path: Path, root: Path) -> bool:
@@ -107,14 +106,19 @@ def path_within(path: Path, root: Path) -> bool:
 
 
 def require_new_output_outside_inbox(
-    path: Path, config: dict[str, Any], label: str
+    path: Path, config: dict[str, Any], config_root: Path, label: str
 ) -> None:
     output = path.resolve(strict=False)
-    protected_paths = [("internal queue", configured_path(config, "queue"))]
+    protected_paths = [
+        ("internal queue", configured_path(config, "queue", config_root))
+    ]
     legacy_value = config["paths"].get("legacy_inbox")
     if isinstance(legacy_value, str) and legacy_value:
         protected_paths.append(
-            ("read-only legacy inbox", configured_path(config, "legacy_inbox"))
+            (
+                "read-only legacy inbox",
+                configured_path(config, "legacy_inbox", config_root),
+            )
         )
     for protected_name, protected in protected_paths:
         if path_within(output, protected):
@@ -234,6 +238,8 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
             *common,
             "--plan-control",
             str(arguments.plan_control.resolve(strict=True)),
+            "--product-snapshot",
+            str(arguments.product_snapshot.resolve(strict=True)),
             "--run-id",
             arguments.run_id,
         ]
@@ -288,36 +294,6 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
                     )
                 )
         return command, result
-    if command == "viewer-build":
-        result = [
-            "viewer",
-            "build",
-            *common,
-            "--product-snapshot",
-            str(arguments.product_snapshot.resolve(strict=True)),
-        ]
-        if arguments.candidate_snapshot:
-            result.extend(
-                (
-                    "--candidate-snapshot",
-                    str(arguments.candidate_snapshot.resolve(strict=True)),
-                )
-            )
-        if bool(arguments.merge_hints) != bool(arguments.merge_hint_decisions):
-            raise OperationsError(
-                "--merge-hints and --merge-hint-decisions must be supplied together"
-            )
-        if arguments.merge_hints:
-            result.extend(
-                ("--merge-hints", str(arguments.merge_hints.resolve(strict=True)))
-            )
-            result.extend(
-                (
-                    "--merge-hint-decisions",
-                    str(arguments.merge_hint_decisions.resolve(strict=True)),
-                )
-            )
-        return command, result
     raise OperationsError(f"not a core operation: {command}")
 
 
@@ -351,6 +327,7 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
 
     candidate = subparsers.add_parser("candidate-rebuild")
     candidate.add_argument("--plan-control", type=Path, required=True)
+    candidate.add_argument("--product-snapshot", type=Path, required=True)
     candidate.add_argument("--run-id", required=True)
 
     candidate_plan = subparsers.add_parser("candidate-plan")
@@ -374,11 +351,6 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     entity.add_argument("--output", type=Path)
     entity.add_argument("--compact", action="store_true")
 
-    viewer = subparsers.add_parser("viewer-build")
-    viewer.add_argument("--product-snapshot", type=Path, required=True)
-    viewer.add_argument("--candidate-snapshot", type=Path)
-    viewer.add_argument("--merge-hints", type=Path)
-    viewer.add_argument("--merge-hint-decisions", type=Path)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -408,14 +380,15 @@ def main() -> int:
     try:
         config_path = resolve_config_path(arguments.config)
         config = load_config(config_path)
+        config_root = config_path.parent
         if arguments.command == "preflight":
-            queue = configured_path(config, "queue")
+            queue = configured_path(config, "queue", config_root)
             if not queue.is_dir():
                 raise OperationsError(f"configured queue does not exist: {queue}")
             legacy: Path | None = None
             legacy_value = config["paths"].get("legacy_inbox")
             if isinstance(legacy_value, str) and legacy_value:
-                legacy = configured_path(config, "legacy_inbox")
+                legacy = configured_path(config, "legacy_inbox", config_root)
                 if not legacy.is_dir():
                     raise OperationsError(
                         f"configured legacy inbox does not exist: {legacy}"
@@ -430,11 +403,9 @@ def main() -> int:
                 "graph_store",
                 "artifact_store",
                 "lock_root",
-                "viewer_templates",
-                "site_output",
                 "legacy_inbox_baseline",
             ):
-                candidate = configured_path(config, key)
+                candidate = configured_path(config, key, config_root)
                 if path_within(candidate, queue) or path_within(queue, candidate):
                     raise OperationsError(f"paths.{key} must be disjoint from the queue")
                 if legacy is not None and (
@@ -449,14 +420,23 @@ def main() -> int:
 
         if arguments.command == "fetch":
             require_new_output_outside_inbox(
-                arguments.output_control, config, "fetch output control"
+                arguments.output_control,
+                config,
+                config_root,
+                "fetch output control",
             )
         if arguments.command == "candidate-plan":
             require_new_output_outside_inbox(
-                arguments.output_artifact, config, "candidate-plan artifact"
+                arguments.output_artifact,
+                config,
+                config_root,
+                "candidate-plan artifact",
             )
             require_new_output_outside_inbox(
-                arguments.output_control, config, "candidate-plan output control"
+                arguments.output_control,
+                config,
+                config_root,
+                "candidate-plan output control",
             )
 
         unresolved_binary = (

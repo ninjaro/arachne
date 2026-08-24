@@ -21,7 +21,6 @@ from typing import Any, Iterator, Sequence
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-PUBLIC_REPOSITORY = "https://github.com/ninjaro/arachne.git"
 METADATA_NAME = "run.json"
 METADATA_TYPE = "arachne_wikidata_hpc_run_v1"
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
@@ -264,18 +263,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def normalized_repository(value: str) -> str:
-    repository = value.strip().rstrip("/")
-    if repository.endswith(".git"):
-        repository = repository[:-4]
-    aliases = {
-        "git@github.com:ninjaro/arachne": "github.com/ninjaro/arachne",
-        "ssh://git@github.com/ninjaro/arachne": "github.com/ninjaro/arachne",
-        "https://github.com/ninjaro/arachne": "github.com/ninjaro/arachne",
-    }
-    return aliases.get(repository, repository)
-
-
 def is_copy_node() -> bool:
     names = {socket.gethostname(), socket.getfqdn()}
     return any(
@@ -393,47 +380,17 @@ def scheduler_state(
 
 
 def prepare_state(base: Path, explicit: Path | None) -> Path:
-    if explicit is not None:
-        state = explicit.expanduser().resolve(strict=True)
-        if not state.is_dir():
-            raise RunError(f"state root is not a directory: {state}")
-        return state
-
-    state = base / ".arachne-state"
-    created = False
-    if not state.exists():
-        run_command(
-            ["git", "clone", PUBLIC_REPOSITORY, state],
-            "public state checkout",
-            quiet=True,
-        )
-        created = True
-    elif not (state / ".git").exists():
-        raise RunError(
-            f"default state root exists but is not a Git checkout: {state}"
-        )
-    remote = run_command(
-        ["git", "-C", state, "remote", "get-url", "origin"],
-        "state checkout origin discovery",
-        quiet=True,
-    ).stdout.strip()
-    if normalized_repository(remote) != "github.com/ninjaro/arachne":
-        raise RunError(
-            "default state checkout origin is not ninjaro/arachne; "
-            "remove it or select a deliberate checkout with --state-root"
-        )
-    if not created:
-        run_command(
-            ["git", "-C", state, "pull", "--ff-only"],
-            "state checkout update",
-            quiet=True,
-        )
-    run_command(
-        ["git", "-C", state, "lfs", "pull"],
-        "state checkout Git LFS update",
-        quiet=True,
+    configured = os.environ.get("ARACHNE_STATE_REPOSITORY")
+    selected = explicit or (
+        Path(configured) if configured else REPOSITORY.parent / "arachne-data"
     )
-    return state.resolve(strict=True)
+    expanded = selected.expanduser()
+    if expanded.is_symlink():
+        raise RunError(f"state root must not be a symbolic link: {expanded}")
+    state = expanded.resolve(strict=True)
+    if not state.is_dir():
+        raise RunError(f"state root is not a directory: {state}")
+    return state
 
 
 def resolve_existing(value: Path, state: Path, description: str) -> Path:
@@ -465,8 +422,7 @@ def select_template(explicit: Path | None, state: Path) -> Path:
 def select_product_control(explicit: Path | None, state: Path) -> Path | None:
     if explicit is not None:
         return resolve_existing(explicit, state, "product snapshot control")
-    default = state / "graphs" / "product" / "active.json"
-    return default.resolve(strict=True) if default.is_file() else None
+    return None
 
 
 def activate_current(base: Path, run_directory: Path) -> Path:
@@ -523,8 +479,6 @@ def command_prepare(arguments: argparse.Namespace) -> int:
             template,
             "--state-root",
             state,
-            "--source-root",
-            REPOSITORY,
             "--runner-temp",
             work_directory,
             "--output",
@@ -551,7 +505,8 @@ def command_prepare(arguments: argparse.Namespace) -> int:
         )
     product_control = select_product_control(arguments.product_control, state)
     if product_control is None:
-        product_control = run_directory / "local-product-snapshot.control.json"
+        product_graph_store = run_directory / "product-graph"
+        product_control = product_graph_store / "active.json"
         run_command(
             [
                 sys.executable,
@@ -560,7 +515,7 @@ def command_prepare(arguments: argparse.Namespace) -> int:
                 arguments.database
                 or state / "database" / "art-islands.sqlite",
                 "--graph-store",
-                graph_store,
+                product_graph_store,
                 "--output-control",
                 product_control,
             ],
@@ -1088,6 +1043,8 @@ def command_rebuild_candidates(arguments: argparse.Namespace) -> int:
                 path_value(metadata, "operations_config"),
                 "--plan-control",
                 path_value(metadata, "candidate_plan_control"),
+                "--product-snapshot",
+                path_value(metadata, "product_snapshot_control"),
                 "--run-id",
                 f"candidate-{metadata['run_id']}",
             ],
