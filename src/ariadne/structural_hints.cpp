@@ -78,6 +78,7 @@ namespace {
         std::string work_id;
         std::string relation_type;
         std::optional<double> centrality;
+        std::string centrality_scale;
         std::optional<double> confidence;
         std::string historical_role;
         std::set<std::string, std::less<>> evidence_ids;
@@ -154,6 +155,16 @@ namespace {
         std::map<std::string, work_record, std::less<>> works;
         std::map<std::string, concept_record, std::less<>> concepts;
         std::map<std::string, agent_record, std::less<>> agents;
+    };
+
+    struct assignment_scale_summary final {
+        std::size_t assignment_count {};
+        std::size_t missing_centrality_scale_count {};
+        std::size_t absent_centrality_scale_count {};
+        std::size_t reviewed_centrality_scale_count {};
+        std::size_t reviewed_numeric_centrality_count {};
+        std::size_t none_numeric_fallback_count {};
+        std::map<std::string, std::size_t, std::less<>> scale_counts;
     };
 
     struct scope_data final {
@@ -294,6 +305,79 @@ namespace {
             return std::string(fallback);
         }
         return found->get<std::string>();
+    }
+
+    [[nodiscard]] bool reviewed_centrality_scale(
+        const std::string_view value
+    ) {
+        return value == "binary" || value == "ordinal" || value == "graded";
+    }
+
+    [[nodiscard]] std::string centrality_scale_from(const json& assertion) {
+        const auto value = assertion.find("centrality_scale");
+        if (value == assertion.end() || value->is_null()) {
+            throw std::invalid_argument(
+                "current normalized assertion must retain centrality_scale"
+            );
+        }
+        if (!value->is_string()) {
+            throw std::invalid_argument(
+                "normalized assertion centrality_scale must be a string"
+            );
+        }
+        const std::string result = value->get<std::string>();
+        if (result != "none" && !reviewed_centrality_scale(result)) {
+            throw std::invalid_argument(
+                "normalized assertion centrality_scale is invalid"
+            );
+        }
+        return result;
+    }
+
+    [[nodiscard]] assignment_scale_summary assignment_scale_coverage(
+        const work_record& work
+    ) {
+        assignment_scale_summary result;
+        for (const auto& assertion : work.assertions) {
+            ++result.assignment_count;
+            if (assertion.centrality_scale.empty()) {
+                ++result.absent_centrality_scale_count;
+                ++result.scale_counts["absent_from_input"];
+            } else {
+                ++result.scale_counts[assertion.centrality_scale];
+            }
+            if (assertion.centrality_scale == "none") {
+                ++result.missing_centrality_scale_count;
+                result.none_numeric_fallback_count += assertion.centrality
+                    ? 1U
+                    : 0U;
+            } else if (reviewed_centrality_scale(
+                           assertion.centrality_scale
+                       )) {
+                ++result.reviewed_centrality_scale_count;
+                result.reviewed_numeric_centrality_count += assertion.centrality
+                    ? 1U
+                    : 0U;
+            }
+        }
+        for (const auto* scale : { "none", "binary", "ordinal", "graded" }) {
+            result.scale_counts.try_emplace(scale, 0U);
+        }
+        return result;
+    }
+
+    [[nodiscard]] double bounded_scale_debt_priority(
+        const std::size_t missing_count
+    ) {
+        if (missing_count == 0U) {
+            return 0.0;
+        }
+        /* Count-sensitive but deliberately capped. Other evidence, dating,
+         * and structural-quality signals remain able to dominate. */
+        return std::min(
+            1.0,
+            0.25 + 0.12 * std::log2(static_cast<double>(missing_count) + 1.0)
+        );
     }
 
     [[nodiscard]] double analytical_credit_weight(
@@ -446,8 +530,9 @@ namespace {
                 work.medium = normalized_token(payload, "medium", "unknown");
                 work.year_start = optional_integer(payload, "year_start");
                 work.year_end = optional_integer(payload, "year_end");
-                work.date_precision
-                    = payload.value("date_precision", "unknown");
+                work.date_precision = optional_string(
+                    payload, "date_precision"
+                ).value_or("unknown");
                 work.date_start_text
                     = optional_string(payload, "date_start_text");
                 work.date_end_text = optional_string(payload, "date_end_text");
@@ -606,6 +691,9 @@ namespace {
                         assertion, "relation_type", "related"
                     ),
                     .centrality = optional_number(assertion, "centrality"),
+                    .centrality_scale = centrality_scale_from(
+                        assertion
+                    ),
                     .confidence = optional_number(assertion, "confidence"),
                     .historical_role = normalized_token(
                         assertion, "historical_role", ""
@@ -4984,9 +5072,50 @@ namespace {
         std::map<std::string, distribution_diagnostic, std::less<>> by_relation;
         std::map<std::string, distribution_diagnostic, std::less<>> by_medium;
         std::map<std::string, distribution_diagnostic, std::less<>> by_concept;
+        std::map<std::string, distribution_diagnostic, std::less<>> by_scale;
         std::map<std::string, std::vector<json>, std::less<>> by_work;
         std::map<std::string, std::size_t, std::less<>> confidence_presence;
         std::map<std::string, std::size_t, std::less<>> historical_roles;
+        assignment_scale_summary scale_coverage;
+        json work_scale_coverage = json::array();
+        for (const auto& [work_id, work] : corpus.works) {
+            const auto coverage = assignment_scale_coverage(work);
+            scale_coverage.assignment_count += coverage.assignment_count;
+            scale_coverage.missing_centrality_scale_count
+                += coverage.missing_centrality_scale_count;
+            scale_coverage.absent_centrality_scale_count
+                += coverage.absent_centrality_scale_count;
+            scale_coverage.reviewed_centrality_scale_count
+                += coverage.reviewed_centrality_scale_count;
+            scale_coverage.reviewed_numeric_centrality_count
+                += coverage.reviewed_numeric_centrality_count;
+            scale_coverage.none_numeric_fallback_count
+                += coverage.none_numeric_fallback_count;
+            for (const auto& [scale, count] : coverage.scale_counts) {
+                scale_coverage.scale_counts[scale] += count;
+            }
+            work_scale_coverage.push_back(
+                { { "work_id", work_id },
+                  { "concept_assignment_count", coverage.assignment_count },
+                  { "missing_centrality_scale_count",
+                    coverage.missing_centrality_scale_count },
+                  { "missing_centrality_scale_fraction",
+                    safe_ratio(
+                        coverage.missing_centrality_scale_count,
+                        coverage.assignment_count
+                    ) },
+                  { "reviewed_centrality_scale_count",
+                    coverage.reviewed_centrality_scale_count },
+                  { "reviewed_centrality_scale_fraction",
+                    safe_ratio(
+                        coverage.reviewed_centrality_scale_count,
+                        coverage.assignment_count
+                    ) },
+                  { "absent_centrality_scale_count",
+                    coverage.absent_centrality_scale_count },
+                  { "centrality_scale_counts", coverage.scale_counts } }
+            );
+        }
         for (const auto& [concept_id, concept_value] : corpus.concepts) {
             for (const auto& [work_id, assertions] :
                  concept_value.assertions_by_work) {
@@ -5014,10 +5143,26 @@ namespace {
                     );
                     add_distribution_value(by_medium[medium], centrality);
                     add_distribution_value(by_concept[concept_id], centrality);
+                    add_distribution_value(
+                        by_scale[assertion.centrality_scale.empty()
+                                     ? "absent_from_input"
+                                     : assertion.centrality_scale],
+                        centrality
+                    );
                     by_work[work_id].push_back(
                         { { "concept_id", concept_id },
                           { "relation_type", assertion.relation_type },
                           { "raw_canonical_centrality", centrality },
+                          { "centrality_scale",
+                            assertion.centrality_scale.empty()
+                                ? json(nullptr)
+                                : json(assertion.centrality_scale) },
+                          { "semantic_review_missing",
+                            assertion.centrality_scale == "none" },
+                          { "reviewed_scale",
+                            reviewed_centrality_scale(
+                                assertion.centrality_scale
+                            ) },
                           { "raw_canonical_confidence",
                             assertion.confidence
                                 ? json(*assertion.confidence)
@@ -5089,11 +5234,35 @@ namespace {
                 row["relation_relative_weight"] = safe_ratio(
                     raw, relation_maximum.at(relation)
                 );
+                row["compatibility_numeric_fallback_used"]
+                    = row.at("centrality_scale").is_null()
+                    || row.at("centrality_scale") == "none";
+                row["centrality_scale_inferred"] = false;
                 row["derived_only"] = true;
                 row["canonical_value_written"] = false;
                 normalization.push_back(std::move(row));
             }
         }
+        json reviewed_scale_distributions = json::object();
+        for (const auto* scale : { "binary", "ordinal", "graded" }) {
+            const auto found = by_scale.find(scale);
+            reviewed_scale_distributions[scale]
+                = found == by_scale.end()
+                ? distribution_diagnostic_json(distribution_diagnostic {})
+                : distribution_diagnostic_json(found->second);
+        }
+        const std::size_t scale_sensitive_excluded
+            = scale_coverage.assignment_count
+                >= scale_coverage.reviewed_numeric_centrality_count
+            ? scale_coverage.assignment_count
+                - scale_coverage.reviewed_numeric_centrality_count
+            : 0U;
+        const std::string scale_sensitive_status
+            = scale_coverage.assignment_count == 0U
+            ? "no_assignments"
+            : scale_coverage.reviewed_numeric_centrality_count == 0U
+            ? "no_reviewed_assignments"
+            : scale_sensitive_excluded == 0U ? "complete" : "partial";
         std::size_t sensitivity_count = 0U;
         std::size_t material_count = 0U;
         std::size_t negligible_count = 0U;
@@ -5136,6 +5305,55 @@ namespace {
             { "by_concept_type", grouped(by_type) },
             { "by_relation_type", grouped(by_relation) },
             { "by_medium", grouped(by_medium) },
+            { "by_centrality_scale", grouped(by_scale) },
+            { "work_assignment_scale_coverage",
+              std::move(work_scale_coverage) },
+            { "scale_coverage",
+              { { "concept_assignment_count",
+                  scale_coverage.assignment_count },
+                { "centrality_scale_counts", scale_coverage.scale_counts },
+                { "missing_centrality_scale_count",
+                  scale_coverage.missing_centrality_scale_count },
+                { "missing_centrality_scale_fraction",
+                  safe_ratio(
+                      scale_coverage.missing_centrality_scale_count,
+                      scale_coverage.assignment_count
+                  ) },
+                { "absent_centrality_scale_count",
+                  scale_coverage.absent_centrality_scale_count },
+                { "reviewed_centrality_scale_count",
+                  scale_coverage.reviewed_centrality_scale_count },
+                { "reviewed_centrality_scale_fraction",
+                  safe_ratio(
+                      scale_coverage.reviewed_centrality_scale_count,
+                      scale_coverage.assignment_count
+                  ) },
+                { "reviewed_numeric_centrality_count",
+                  scale_coverage.reviewed_numeric_centrality_count },
+                { "none_numeric_compatibility_fallback_count",
+                  scale_coverage.none_numeric_fallback_count } } },
+            { "scale_sensitive_analysis",
+              { { "status", scale_sensitive_status },
+                { "eligible_assignment_count",
+                  scale_coverage.reviewed_numeric_centrality_count },
+                { "eligible_assignment_fraction",
+                  safe_ratio(
+                      scale_coverage.reviewed_numeric_centrality_count,
+                      scale_coverage.assignment_count
+                  ) },
+                { "excluded_assignment_count", scale_sensitive_excluded },
+                { "restricted_to_reviewed_assignments", true },
+                { "cross_scale_numeric_comparisons_performed", false },
+                { "missing_scales_imputed", false },
+                { "reviewed_distributions_by_scale",
+                  std::move(reviewed_scale_distributions) } } },
+            { "compatibility_numeric_analysis",
+              { { "stored_centrality_retained", true },
+                { "none_uses_stored_numeric_fallback", true },
+                { "fallback_is_proof_of_calibration", false },
+                { "scale_modes_inferred", false },
+                { "semantic_cross_scale_conclusions_drawn", false },
+                { "canonical_values_written", false } } },
             { "confidence_presence", confidence_presence },
             { "historical_role_distribution", historical_roles },
             { "concept_saturation", std::move(saturation) },
@@ -5154,6 +5372,8 @@ namespace {
                 { "material_examples", std::move(material_examples) },
                 { "negligible_examples", std::move(negligible_examples) } } },
             { "canonical_centrality_changed", false },
+            { "canonical_centrality_scale_changed", false },
+            { "centrality_scale_inferred", false },
             { "canonical_confidence_changed", false },
             { "canonical_historical_role_changed", false },
         };
@@ -6646,6 +6866,45 @@ namespace {
         const std::array<scope_data, 3>& quality_scopes
     ) {
         json priorities = json::array();
+        for (const auto& [work_id, work] : corpus.works) {
+            const auto coverage = assignment_scale_coverage(work);
+            if (coverage.missing_centrality_scale_count == 0U) {
+                continue;
+            }
+            priorities.push_back(
+                { { "kind", "weakly_mined_work" },
+                  { "entity_family", "work" },
+                  { "entity_id", work_id },
+                  { "priority",
+                    bounded_scale_debt_priority(
+                        coverage.missing_centrality_scale_count
+                    ) },
+                  { "explanation",
+                    "This work has unresolved pair-level centrality-scale "
+                    "semantics. Its stored numeric centrality remains a "
+                    "compatibility value until a miner reviews each pair." },
+                  { "details",
+                    { { "quality_tier", work.quality_tier },
+                      { "quality_score", work.quality_score },
+                      { "concept_assignment_count",
+                        coverage.assignment_count },
+                      { "missing_centrality_scale_count",
+                        coverage.missing_centrality_scale_count },
+                      { "missing_centrality_scale_fraction",
+                        safe_ratio(
+                            coverage.missing_centrality_scale_count,
+                            coverage.assignment_count
+                        ) },
+                      { "centrality_scale_counts", coverage.scale_counts },
+                      { "bounded_scale_debt_priority",
+                        bounded_scale_debt_priority(
+                            coverage.missing_centrality_scale_count
+                        ) },
+                      { "raw_count_retained_for_ranking", true },
+                      { "canonical_assignments_changed", false },
+                      { "centrality_scale_inferred", false } } } }
+            );
+        }
         for (const auto& [id, concept_value] : corpus.concepts) {
             std::size_t dated = 0U;
             std::size_t supporting_evidence_works = 0U;
@@ -6849,46 +7108,95 @@ namespace {
             }
         }
         for (const auto& [agent_id, agent] : corpus.agents) {
-            if (agent.works.size() < 2U) {
-                continue;
-            }
             std::size_t dated = 0U;
             std::size_t evidence_backed = 0U;
+            std::size_t credited_work_count = 0U;
+            std::size_t concept_assignment_count = 0U;
+            std::size_t missing_centrality_scale_count = 0U;
             std::set<std::string, std::less<>> media;
+            std::map<std::string, std::size_t, std::less<>> scale_counts;
+            json credited_work_scale_debt = json::array();
             for (const auto& work_id : agent.works) {
                 const auto work = corpus.works.find(work_id);
                 if (work == corpus.works.end()) {
                     continue;
                 }
+                ++credited_work_count;
                 dated += work->second.year_start ? 1U : 0U;
                 evidence_backed += work_has_supporting_evidence(work->second)
                     ? 1U
                     : 0U;
                 media.emplace(work->second.medium);
+                const auto coverage = assignment_scale_coverage(work->second);
+                concept_assignment_count += coverage.assignment_count;
+                missing_centrality_scale_count
+                    += coverage.missing_centrality_scale_count;
+                for (const auto& [scale, count] : coverage.scale_counts) {
+                    scale_counts[scale] += count;
+                }
+                credited_work_scale_debt.push_back(
+                    { { "work_id", work_id },
+                      { "concept_assignment_count",
+                        coverage.assignment_count },
+                      { "missing_centrality_scale_count",
+                        coverage.missing_centrality_scale_count },
+                      { "missing_centrality_scale_fraction",
+                        safe_ratio(
+                            coverage.missing_centrality_scale_count,
+                            coverage.assignment_count
+                        ) } }
+                );
             }
-            const double dated_fraction = safe_ratio(dated, agent.works.size());
+            if (credited_work_count < 2U
+                && missing_centrality_scale_count == 0U) {
+                continue;
+            }
+            const double dated_fraction
+                = safe_ratio(dated, credited_work_count);
             const double evidence_fraction
-                = safe_ratio(evidence_backed, agent.works.size());
-            if (dated_fraction < 0.60 || evidence_fraction <= 0.40) {
+                = safe_ratio(evidence_backed, credited_work_count);
+            const double scale_debt_priority = bounded_scale_debt_priority(
+                missing_centrality_scale_count
+            );
+            if (dated_fraction < 0.60 || evidence_fraction <= 0.40
+                || missing_centrality_scale_count > 0U) {
                 priorities.push_back(
                     { { "kind", "weakly_mined_trajectory_agent" },
                       { "entity_family", "agent" },
                       { "entity_id", agent_id },
                       { "priority",
                         std::max(
-                            1.0 - dated_fraction,
-                            1.0 - evidence_fraction
+                            { 1.0 - dated_fraction,
+                              1.0 - evidence_fraction,
+                              scale_debt_priority }
                         ) },
                       { "explanation",
-                        "This multi-work agent trajectory has weak dated or "
-                        "evidence-backed coverage." },
+                        "This agent's deduplicated credited works have weak "
+                        "dated, evidence-backed, or pair-level scale "
+                        "coverage." },
                       { "details",
-                        { { "work_count", agent.works.size() },
+                        { { "work_count", credited_work_count },
                           { "dated_work_count", dated },
                           { "dated_fraction", dated_fraction },
                           { "evidence_backed_work_count", evidence_backed },
                           { "evidence_backed_fraction", evidence_fraction },
-                          { "medium_count", media.size() } } } }
+                          { "medium_count", media.size() },
+                          { "concept_assignment_count",
+                            concept_assignment_count },
+                          { "missing_centrality_scale_count",
+                            missing_centrality_scale_count },
+                          { "missing_centrality_scale_fraction",
+                            safe_ratio(
+                                missing_centrality_scale_count,
+                                concept_assignment_count
+                            ) },
+                          { "centrality_scale_counts", scale_counts },
+                          { "bounded_scale_debt_priority",
+                            scale_debt_priority },
+                          { "credited_works_deduplicated", true },
+                          { "credited_work_scale_debt",
+                            std::move(credited_work_scale_debt) },
+                          { "centrality_scale_inferred", false } } } }
                 );
             }
         }
@@ -7146,10 +7454,20 @@ namespace {
             }
         }
         const auto priority_less = [](const json& left, const json& right) {
+            const auto raw_scale_debt = [](const json& value) {
+                const auto details = value.find("details");
+                return details != value.end() && details->is_object()
+                    ? details->value(
+                          "missing_centrality_scale_count", std::size_t { 0 }
+                      )
+                    : std::size_t { 0 };
+            };
             return std::tuple { -left.value("priority", 0.0),
+                                -static_cast<double>(raw_scale_debt(left)),
                                 left.value("kind", ""),
                                 left.value("entity_id", "") }
             < std::tuple { -right.value("priority", 0.0),
+                           -static_cast<double>(raw_scale_debt(right)),
                            right.value("kind", ""),
                            right.value("entity_id", "") };
         };
@@ -7363,6 +7681,11 @@ namespace {
             { "canonical_assertion_weighting",
               { { "centrality_transform",
                   "clamp(canonical_centrality/100,0.01,1.0)" },
+                { "centrality_scale_source", "work_concept_assignment" },
+                { "none_scale_behavior",
+                  "stored_numeric_centrality_compatibility_fallback" },
+                { "none_scale_reclassified", false },
+                { "cross_scale_semantic_equivalence_assumed", false },
                 { "missing_centrality_relation_priors",
                   { { "exemplifies", 1.0 },
                     { "anticipates", 0.9 },
@@ -7374,6 +7697,8 @@ namespace {
                     { "parodies", 0.8 },
                     { "unlisted_relation", 0.7 } } },
                 { "weights_are_temporary", true },
+                { "compatibility_weighting_continues_during_reannotation",
+                  true },
                 { "canonical_values_written", false } } },
             { "credit_weighting",
               { { "importance_priors",
@@ -7467,6 +7792,12 @@ namespace {
                 { "popularity_signal_used", false } } },
             { "centrality_diagnostics",
               { { "bands", { 75, 90, 95, 100 } },
+                { "scale_vocabulary",
+                  { "none", "binary", "ordinal", "graded" } },
+                { "scale_is_pair_level", true },
+                { "none_is_missing_semantic_review", true },
+                { "scale_sensitive_calculations_restrict_none", true },
+                { "scale_sensitive_cross_scale_comparisons", false },
                 { "concept_saturation_minimum_assignments", 2 },
                 { "concept_exact_100_saturation_proportion", 0.75 },
                 { "concept_at_least_95_saturation_proportion", 0.90 },
@@ -7510,7 +7841,12 @@ namespace {
                 { "concept_top_two_minimum_work_count", 4 },
                 { "concept_quality_scope_role_change", 0.40 },
                 { "concept_quality_scope_minimum_base_support", 3 },
-                { "concept_quality_scope_minimum_comparison_support", 2 } } },
+                { "concept_quality_scope_minimum_comparison_support", 2 },
+                { "centrality_scale_debt_priority",
+                  { { "formula", "min(1,0.25+0.12*log2(count+1))" },
+                    { "raw_missing_count_tie_break", "descending" },
+                    { "agent_credited_works_deduplicated", true },
+                    { "canonical_scale_inference", false } } } } },
             { "parameter_status",
               { { "calibrated_probabilities", false },
                 { "permanent_cultural_semantics", false },
@@ -7529,7 +7865,7 @@ namespace {
             { "historical_acceptance_vs_scene_or_community_usage",
               { { "status", "unavailable_in_normalized_structural_input" },
                 { "canonical_schema_support",
-                  "not_represented_in_product_v6" },
+                  "not_represented_in_product" },
                 { "available_explicit_category_count", 0 },
                 { "inferred_from_source_type_or_text", false },
                 { "semantic_categories_collapsed", false },

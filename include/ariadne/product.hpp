@@ -8,7 +8,7 @@
 namespace arachne::ariadne {
 
 /**
- * Disposable, snapshot-bound projections for human and viewer inspection.
+ * Disposable, snapshot-bound semantic projections for downstream inspection.
  *
  * The product export remains canonical. These projections deliberately own no
  * graph storage and never mutate product data.
@@ -17,8 +17,8 @@ class product_projection_builder {
 public:
     /** Build canonical ingest/quality research without local merge hints. */
     [[nodiscard]] static nlohmann::ordered_json research_report(
-        const nlohmann::json& product_export,
-        std::string product_snapshot_id, std::string product_sha256
+        const nlohmann::json& product_export, std::string product_snapshot_id,
+        std::string product_sha256
     );
 
     /**

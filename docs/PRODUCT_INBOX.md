@@ -2,17 +2,17 @@
 
 The product inbox is the only routine path for applying research batches to the
 canonical product database. It accepts one current, closed format:
-`arachne_batch_v2`.
+`arachne_batch`. The current commit defines the complete supported shape.
 
 ## Fixed repository interface
 
-Bots and operators use fixed paths relative to the repository root:
+Bots and operators use a fixed code inbox plus the selected external state root:
 
 ```text
 inbox/
 inbox/rejected/
-database/art-islands.sqlite
-database/merge-hint-decisions.json
+../arachne-data/database/art-islands.sqlite
+../arachne-data/database/merge-hint-decisions.json
 .arachne/merge-hints-review.json
 .arachne/tmp/merge-hints.sqlite
 build/arachne
@@ -40,8 +40,9 @@ the bytes through Pheidippides, places them at the fixed `inbox/` path, runs
 `check-inbox`, and proposes the validated file in a pull request. It never
 applies the database in the intake job. After that pull request is merged, the
 separately serialized product-integration workflow runs `check-inbox` followed
-by `apply-inbox`. It proposes only the canonical product change for review;
-heavy hint analysis is an opt-in local operation.
+by `apply-inbox`, publishes the validated canonical state directly from the
+captured current `arachne-data/main`, and proposes only successful source inbox
+cleanup. Heavy hint analysis is an opt-in local operation.
 
 Only plain UTF-8 JSON files are accepted. Each file contains exactly one batch
 object. ZIP files, archive members, sidecars, CSV, Markdown, hashes, run
@@ -55,7 +56,7 @@ Every root field is required, and unknown fields are invalid:
 
 ```json
 {
-  "format": "arachne_batch_v2",
+  "format": "arachne_batch",
   "batch_id": "research-00421",
   "create": {},
   "update": {},
@@ -64,9 +65,9 @@ Every root field is required, and unknown fields are invalid:
 ```
 
 The complete machine-readable contract is
-[`arachne_batch_v2.schema.json`](../contracts/schemas/arachne_batch_v2.schema.json).
+[`arachne_batch.schema.json`](../contracts/schemas/arachne_batch.schema.json).
 A representative document is
-[`arachne_batch_v2.json`](../contracts/examples/arachne_batch_v2.json).
+[`arachne_batch.json`](../contracts/examples/arachne_batch.json).
 Every object in the contract is closed with `additionalProperties: false`.
 Unknown field names, aliases, enum spellings, and implicit defaults are
 rejected.
@@ -109,6 +110,9 @@ agents
 works
 concepts
 manifestations
+work_memberships
+agent_relations
+events
 names
 external_ids
 sources
@@ -129,10 +133,32 @@ Names require an explicit `is_preferred` boolean. Financial facts require an
 explicit `is_estimate` boolean. Evidence requires a source, a non-empty
 `exact_quote`, and an explicit canonical `stance`. Every work-concept,
 concept-relation, and parent-guide assertion requires a non-empty `evidence`
-array. No stance, preference, assertion weight, or boolean is inferred.
+array. A new work-concept assignment also requires a pair-local
+`centrality_scale` of `binary`, `ordinal`, or `graded`; `none` is canonical
+storage for mechanically migrated, not-yet-reviewed legacy rows and is not
+valid for a new assignment. No stance, preference, assertion weight, scale, or
+boolean is inferred.
+
+Work memberships describe structural containment such as `episode_of`,
+`track_of`, or `collected_in`; both endpoints are works and may use same-batch
+local IDs. Agent relations describe explicit membership or corporate structure,
+not a relationship inferred from shared credits. Events target a work or
+manifestation and preserve independent dates such as publication, release,
+premiere, broadcast, performance, exhibition, and recording. `date_precision`
+includes `month`; full dates use `exact`.
+
+Credits use `entity_id`, which must identify a work or manifestation. Put
+edition-, pressing-, translation-, release-, or platform-specific credits on
+the manifestation. Broad media include `nonfiction`, `comic`, and
+`performance`; narrower forms such as autobiography, manga, and documentary
+remain concepts. Irregular tail metadata may remain in `production_info_json`.
 
 General product facts that the database models directly, including work dates,
-measurements, and budgets, do not require assertion evidence.
+memberships, agent relations, events, credits, measurements, and budgets, do
+not require assertion evidence. General metadata is stored on a best-effort
+basis and is not an authoritative factual record. Values may be incomplete,
+stale, or incorrect. External identifiers and links let users consult the
+original databases and sources when authoritative detail is needed.
 
 ## Update and deletion operations
 
@@ -165,7 +191,18 @@ works
 concepts
 manifestations
 sources
+work_concepts
 ```
+
+Work-concept updates use the positive integer assertion row ID. They may change
+`centrality`, `centrality_scale`, `historical_role`, or `confidence`; only the
+optional historical role and confidence may be unset. A legacy row may remain
+`none` during unrelated work or assertion updates. Changing its numeric
+`centrality`, however, requires setting `centrality_scale` to `binary`,
+`ordinal`, or `graded` in the same update. Changing `none` to a reviewed mode is
+a human semantic decision and must arrive through this ordinary batch path.
+Neither intake nor analytical output chooses a scale from concept type,
+centrality, neighboring assignments, or corpus-wide distributions.
 
 Relationship and internal-row deletion is explicit under `update.delete`.
 Each array contains positive integer database row IDs:
@@ -174,6 +211,9 @@ Each array contains positive integer database row IDs:
 names
 external_ids
 credits
+work_memberships
+agent_relations
+events
 measurements
 financial_facts
 evidence
@@ -186,6 +226,18 @@ Deleting a row may not leave a required relationship dangling or a semantic
 assertion without evidence. New relationship rows are inserted through the
 corresponding `create` array; omission from a batch never means replacement or
 deletion.
+
+The four stored scale values have deliberately different meanings:
+
+- `none`: the existing numeric value has not been reviewed under pair-level
+  scale semantics; it is not zero, irrelevance, binary presence, or unknown
+  centrality;
+- `binary`: presence/absence is the meaningful distinction for this pair;
+- `ordinal`: only a small number of ordered salience levels are meaningful;
+- `graded`: a substantially continuous `1–100` distinction is meaningful.
+
+The scale belongs to the work × concept row, remains independent of confidence
+and historical role, and may differ for the same concept on different works.
 
 ## Explicit merges
 
@@ -214,10 +266,13 @@ belong to the declared family. Conflicting or overlapping merges in one batch
 are rejected.
 
 A valid merge rewrites every member foreign key to the target, deduplicates
-rows that become logically identical, applies the declared `set` and `unset`
-resolution, and deletes the member entities. A collision with incompatible
-required values rejects the whole batch. No redirect, alias, tombstone,
-retired-ID table, or compatibility mapping is created.
+rows that become logically identical, removes membership or agent-relation
+edges that would become self-relations, applies the declared `set` and `unset`
+resolution, and deletes the member entities. Work merges move only credits and
+events that directly target the merged work; manifestation-targeted records
+remain attached to their manifestation. A collision with incompatible required
+values rejects the whole batch. No redirect, alias, tombstone, retired-ID
+table, or compatibility mapping is created.
 
 Similarity, matching names, matching slugs, graph overlap, or shared external
 identifiers never authorize a merge. They can create a review hint only.
@@ -308,7 +363,7 @@ build/arachne product rebuild-merge-hints export-merge-hints
 ```
 
 Rebuild creates `.arachne/tmp/merge-hints.sqlite` as writable `main` and attaches
-`database/art-islands.sqlite` read-only as `product`. Canonical entities, names,
+the selected state's `database/art-islands.sqlite` read-only as `product`. Canonical entities, names,
 identifiers, credits, works, concepts, assertions, and measurements are queried
 through `product.*`; they are not copied into the temporary database. Identity
 blocks and candidate signals remain dedicated tables. Generic observations are
@@ -316,19 +371,18 @@ stored as queryable typed rows, while sequences, clusters, views, and other
 evolving analytical sections are retained losslessly by section. No
 cross-database foreign keys are required.
 
-The temporary metadata records the product schema version, exact product
+The temporary metadata records the current product schema identity, exact product
 SHA-256, merge-hint generator/schema version, and the exact durable-decision
 artifact SHA-256. `export-merge-hints` refuses missing or stale state and never
 performs a hidden rebuild. A successful export atomically writes
 `.arachne/merge-hints-review.json`, which contains only selected identity
 candidates and bounded review metadata. The structural `analysis` remains in
 the local SQLite store; export does not delete that store. The next explicit
-rebuild replaces stale disposable analysis cleanly. The old
-`database/merge-hints-review.json` compatibility path is ignored by Git and is
-not product data.
+rebuild replaces stale disposable analysis cleanly. There is no compatibility
+path in the product database.
 
 Ignored human decisions survive disposable rebuilds in the fixed, versioned
-`database/merge-hint-decisions.json` artifact. Its closed form is:
+`arachne-data/database/merge-hint-decisions.json` artifact. Its closed form is:
 
 ```json
 {"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[{"family":"work","left_id":"work-000001","right_id":"work-000002"}]}
@@ -354,7 +408,7 @@ family-specific score distributions rather than operator-supplied thresholds or
 fixed per-entity caps. The exported messages explain the positive reasons for
 selection and preserve machine-readable component signals. Hints are advisory:
 no score or signal performs a merge, and every identity change must arrive in a
-later explicit `arachne_batch_v2` batch.
+later explicit `arachne_batch` batch.
 
 Structural hints are not merge candidates. They preserve independent bounded
 measurements such as overlap, directional containment, temporal displacement,

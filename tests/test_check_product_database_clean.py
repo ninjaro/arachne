@@ -11,18 +11,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_product_database_clean.py"
+SCHEMA = ROOT / "schema" / "product.sql"
 
 
 class ProductDatabaseCleanTests(unittest.TestCase):
     def database(self, root: Path) -> Path:
         path = root / "product.sqlite"
         connection = sqlite3.connect(path)
-        connection.executescript(
-            """
-            PRAGMA user_version = 6;
-            CREATE TABLE entities(id TEXT PRIMARY KEY);
-            """
-        )
+        connection.executescript(SCHEMA.read_text(encoding="utf-8"))
         connection.close()
         return path
 
@@ -84,7 +80,7 @@ class ProductDatabaseCleanTests(unittest.TestCase):
                 ],
             )
 
-    def test_rejects_wrong_schema_version(self) -> None:
+    def test_user_version_is_not_an_application_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = self.database(Path(temporary))
             connection = sqlite3.connect(database)
@@ -93,10 +89,23 @@ class ProductDatabaseCleanTests(unittest.TestCase):
 
             result = self.run_guard(database)
 
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = json.loads(result.stdout)
+            self.assertNotIn("schemaVersion", document)
+            self.assertNotIn("expectedSchemaVersion", document)
+
+    def test_rejects_current_schema_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = self.database(Path(temporary))
+            connection = sqlite3.connect(database)
+            connection.execute("DROP INDEX events_type_idx")
+            connection.close()
+
+            result = self.run_guard(database)
+
             self.assertEqual(result.returncode, 3)
             document = json.loads(result.stdout)
-            self.assertEqual(document["schemaVersion"], 5)
-            self.assertEqual(document["expectedSchemaVersion"], 6)
+            self.assertEqual(document["missingSchemaObjects"], ["events_type_idx"])
 
     def test_rejects_foreign_key_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

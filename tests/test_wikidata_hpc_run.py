@@ -39,8 +39,6 @@ class WikidataHpcRunTests(unittest.TestCase):
                         "graph_store": "graphs",
                         "artifact_store": "artifacts",
                         "lock_root": "locks",
-                        "viewer_templates": "viewer",
-                        "site_output": "site",
                         "legacy_inbox_baseline": "operations/baseline.json",
                     },
                     "candidate_rebuild": {
@@ -150,6 +148,8 @@ print("12345678;claix")
             self.run_root,
             "--state-root",
             self.state,
+            "--product-control",
+            self.product_control,
             "--binary",
             self.binary,
             "--run-id",
@@ -264,39 +264,22 @@ print("12345678;claix")
         self.assertTrue(Path(metadata["result_directory"]).is_dir())
         self.assertEqual(self.commands()[0][:2], ["fetch", "plan"])
 
-    def test_prepare_rejects_an_unrelated_default_state_checkout(self) -> None:
-        state = self.run_root / ".arachne-state"
-        state.mkdir(parents=True)
-        subprocess.run(
-            ["git", "init", "--quiet", state], check=True, capture_output=True
-        )
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                state,
-                "remote",
-                "add",
-                "origin",
-                "https://example.invalid/unrelated/state.git",
-            ],
-            check=True,
-            capture_output=True,
-        )
-
+    def test_prepare_uses_explicit_state_environment_without_git_mutation(self) -> None:
+        self.environment["ARACHNE_STATE_REPOSITORY"] = str(self.state)
         result = self.invoke(
             "prepare",
             "--run-root",
             self.run_root,
+            "--product-control",
+            self.product_control,
             "--binary",
             self.binary,
             "--run-id",
-            "wrong-state",
+            "environment-state",
         )
 
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("origin is not ninjaro/arachne", result.stderr)
-        self.assertFalse((self.run_root / "runs").exists())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(self.metadata()["state_root"]), self.state)
 
     def test_prepare_materializes_canonical_database_without_active_control(
         self,
@@ -306,10 +289,14 @@ print("12345678;claix")
         database.parent.mkdir(parents=True)
         with sqlite3.connect(database) as connection:
             connection.executescript(
+                (ROOT / "schema" / "product.sql").read_text(encoding="utf-8")
+            )
+            connection.executescript(
                 """
-                PRAGMA user_version=6;
-                CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-                INSERT INTO records(value) VALUES('example');
+                INSERT INTO entities(id, entity_type)
+                VALUES('work-000001', 'work');
+                INSERT INTO works(entity_id, medium)
+                VALUES('work-000001', 'film');
                 """
             )
 
@@ -335,11 +322,7 @@ print("12345678;claix")
             control["content_sha256"],
             hashlib.sha256(database.read_bytes()).hexdigest(),
         )
-        graph_store = Path(
-            json.loads(
-                Path(metadata["operations_config"]).read_text(encoding="utf-8")
-            )["paths"]["graph_store"]
-        )
+        graph_store = control_path.parent
         export = graph_store / control["exports"][0]["artifact"]["storage_ref"]
         self.assertTrue(export.is_file())
         self.assertIn("__local_product_identity", export.read_text(encoding="utf-8"))
@@ -606,6 +589,7 @@ print("COMPLETED|0:0")
         commands = self.commands()
         self.assertEqual(commands[-2][:2], ["candidate", "plan"])
         self.assertEqual(commands[-1][:2], ["candidate", "rebuild"])
+        self.assertIn("--product-snapshot", commands[-1])
         metadata = self.metadata()
         self.assertEqual(metadata["steps"]["candidates"], "complete")
         self.assertTrue(Path(metadata["candidate_plan_control"]).is_file())

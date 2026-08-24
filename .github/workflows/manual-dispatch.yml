@@ -47,10 +47,6 @@ on:
         description: External graph JSON for generated planning
         required: false
         type: string
-      product_snapshot_control:
-        description: Product snapshot control for generated planning
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -60,31 +56,44 @@ jobs:
     if: inputs.operation == 'cocoon-decision'
     runs-on: ${{ vars.ARACHNE_RUNNER_LABEL || 'ubuntu-latest' }}
     concurrency:
-      group: intake-state-write
+      group: arachne-data-write
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Mint the dedicated arachne-data writer token
+        id: data-writer
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.ARACHNE_DATA_WRITER_APP_ID }}
+          private-key: ${{ secrets.ARACHNE_DATA_WRITER_APP_PRIVATE_KEY }}
+          owner: ninjaro
+          repositories: arachne-data
+          permission-contents: write
       - name: Require decision and persistent-state settings
         env:
           ENVELOPE_ID: ${{ inputs.envelope_id }}
           DECISION_REASON: ${{ inputs.decision_reason }}
           STATE_REPOSITORY: ${{ vars.ARACHNE_STATE_REPOSITORY }}
-          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
-          STATE_TOKEN: ${{ secrets.ARACHNE_STATE_TOKEN }}
         run: |
           test -n "${ENVELOPE_ID}"
           test -n "${DECISION_REASON}"
           test -n "${STATE_REPOSITORY}"
-          test -n "${STATE_BASE_BRANCH}"
-          test -n "${STATE_TOKEN}"
       - name: Checkout protected persistent state
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ vars.ARACHNE_STATE_REPOSITORY }}
-          ref: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
-          token: ${{ secrets.ARACHNE_STATE_TOKEN }}
-          path: .arachne-state
+          ref: main
+          token: ${{ steps.data-writer.outputs.token }}
+          path: .arachne/ci-state
+          fetch-depth: 0
           lfs: true
+      - name: Capture and validate the exact writer base
+        run: |
+          state_base="$(git -C .arachne/ci-state rev-parse HEAD)"
+          test "${state_base}" = "$(git -C .arachne/ci-state rev-parse origin/main)"
+          echo "ARACHNE_STATE_BASE=${state_base}" >> "${GITHUB_ENV}"
+          python3 scripts/state_manifest.py check \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"
       - name: Install application dependencies
         run: |
           sudo apt-get update
@@ -106,9 +115,8 @@ jobs:
           DECISION_ACTOR: github:${{ github.actor }}
         run: |
           python3 scripts/materialize_ci_config.py \
-            --template "${GITHUB_WORKSPACE}/.arachne-state/config/arachne.json" \
-            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
-            --source-root "${GITHUB_WORKSPACE}" \
+            --template "${GITHUB_WORKSPACE}/.arachne/ci-state/config/arachne.json" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
             --runner-temp "${RUNNER_TEMP}" \
             --output "${RUNNER_TEMP}/arachne-config.json"
           python3 scripts/arachne_ops.py \
@@ -121,16 +129,16 @@ jobs:
             --reason "${DECISION_REASON}"
       - name: Publish serialized approval state
         env:
-          STATE_BASE_BRANCH: ${{ vars.ARACHNE_STATE_BASE_BRANCH }}
           ENVELOPE_ID: ${{ inputs.envelope_id }}
           COCOON_DECISION: ${{ inputs.cocoon_decision }}
         run: |
-          python3 scripts/publish_intake_state.py \
-            --state-root "${GITHUB_WORKSPACE}/.arachne-state" \
-            --queue "${GITHUB_WORKSPACE}/.arachne-state/queue" \
-            --ledger "${GITHUB_WORKSPACE}/.arachne-state/operations/ledger.sqlite3" \
-            --base "${STATE_BASE_BRANCH}" \
-            --title "Arachne ${COCOON_DECISION} ${ENVELOPE_ID}"
+          python3 scripts/publish_state_repository.py \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
+            --expected-base "${ARACHNE_STATE_BASE}" \
+            --base main \
+            --title "Arachne ${COCOON_DECISION} ${ENVELOPE_ID}" \
+            --allow queue \
+            --allow operations/ledger.sqlite3
 
   product-integration:
     if: inputs.operation == 'product-integration'
@@ -144,6 +152,5 @@ jobs:
       plan_mode: ${{ inputs.plan_mode }}
       plan_control: ${{ inputs.plan_control }}
       external_graph: ${{ inputs.external_graph }}
-      product_snapshot_control: ${{ inputs.product_snapshot_control }}
       run_id: ${{ inputs.run_id }}
     secrets: inherit

@@ -57,7 +57,6 @@ class ActorBoundaryTests(unittest.TestCase):
             "src/pheidippides",
             "src/ariadne",
             "src/penelope",
-            "viewer",
         ):
             self.assertTrue((ROOT / relative).is_dir(), relative)
 

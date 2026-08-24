@@ -27,18 +27,19 @@ public:
         root_ = fs::temp_directory_path()
             / ("arachne-merge-hint-store-test-" + std::to_string(::getpid())
                + "-" + std::to_string(++store_fixture_sequence));
+        state_ = root_ / "state";
         fs::create_directories(root_ / "inbox");
-        fs::create_directories(root_ / "database");
+        fs::create_directories(state_ / "database");
         fs::create_directories(root_ / "schema");
         write_decisions(
             R"({"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[]})"
         );
         fs::copy_file(
-            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product_v6.sql",
-            root_ / "schema" / "product_v6.sql"
+            fs::path(ARACHNE_SOURCE_DIR) / "schema" / "product.sql",
+            root_ / "schema" / "product.sql"
         );
         const auto initialized
-            = arachne::penelope::apply_product_inbox(root_);
+            = arachne::penelope::apply_product_inbox(root_, state_);
         if (!initialized.ok) {
             throw std::runtime_error("could not initialize product fixture");
         }
@@ -55,18 +56,35 @@ public:
             "('agent-000002',' viaf ',' abc ');"
             "INSERT INTO entities(id,entity_type) VALUES"
             "('work-000001','work'),('work-000002','work'),"
-            "('concept-000001','concept'),('concept-000002','concept');"
+            "('concept-000001','concept'),('concept-000002','concept'),"
+            "('manifestation-000001','manifestation');"
             "INSERT INTO works(entity_id,medium,year_start,date_precision,"
             "date_start_text,date_qualifier) VALUES"
             "('work-000001','film',1980,'exact','1980-05-17','documented'),"
             "('work-000002','film',1990,'year',NULL,NULL);"
+            "INSERT INTO manifestations(entity_id,work_id,manifestation_type,"
+            "release_year,label) VALUES"
+            "('manifestation-000001','work-000001','release',1981,'Home "
+            "release');"
+            "INSERT INTO work_memberships(child_work_id,parent_work_id,"
+            "membership_type,position,position_text) VALUES"
+            "('work-000002','work-000001','part_of',2,'Part II');"
+            "INSERT INTO agent_relations(subject_agent_id,relation_type,"
+            "object_agent_id,from_year,to_year,role_text) VALUES"
+            "('agent-000001','member_of','agent-000002',1979,1984,'director');"
+            "INSERT INTO events(entity_id,event_type,year_start,date_text,"
+            "date_precision,place_text) VALUES"
+            "('work-000001','premiered',1980,'May 1980','month','Tokyo'),"
+            "('manifestation-000001','released',1981,NULL,'year',NULL);"
             "INSERT INTO concepts(entity_id,concept_type,slug) VALUES"
             "('concept-000001','theme','store-structure-alpha'),"
             "('concept-000002','theme','store-structure-beta');"
-            "INSERT INTO credits(work_id,agent_id,role,importance,credit_order) VALUES"
+            "INSERT INTO "
+            "credits(entity_id,agent_id,role,importance,credit_order) VALUES"
             "('work-000001','agent-000001','director','primary',0),"
             "('work-000001','agent-000001','screenwriter','key',1),"
-            "('work-000002','agent-000001','director','primary',0);"
+            "('work-000002','agent-000001','director','primary',0),"
+            "('manifestation-000001','agent-000002','distributor','key',0);"
             "INSERT INTO sources(id,source_type,url) VALUES"
             "(1,'web_page','https://example.test/source-1'),"
             "(2,'web_page','https://example.test/source-2');"
@@ -75,11 +93,15 @@ public:
             "(2,2,'Alpha and beta occur in the second work.','contextualizes'),"
             "(10,2,'A second relation source.','contextualizes');"
             "INSERT INTO work_concepts(id,work_id,concept_id,relation_type,"
-            "centrality,confidence,historical_role) VALUES"
-            "(1,'work-000001','concept-000001','contains',100,0.9,'formative'),"
-            "(2,'work-000001','concept-000002','contains',80,1.0,NULL),"
-            "(3,'work-000002','concept-000001','contains',100,1.0,NULL),"
-            "(4,'work-000002','concept-000002','contains',80,1.0,NULL);"
+            "centrality,centrality_scale,confidence,historical_role) VALUES"
+            "(1,'work-000001','concept-000001','contains',100,'none',0.9,'"
+            "formative'),"
+            "(2,'work-000001','concept-000002','contains',80,'binary',1.0,NULL)"
+            ","
+            "(3,'work-000002','concept-000001','contains',100,'ordinal',1.0,"
+            "NULL),"
+            "(4,'work-000002','concept-000002','contains',80,'graded',1.0,NULL)"
+            ";"
             "INSERT INTO concept_relations(id,subject_concept_id,relation_type,"
             "object_concept_id,strength,from_year,to_year,region_code,"
             "confidence) VALUES"
@@ -93,15 +115,20 @@ public:
     }
 
     merge_hint_store_fixture(const merge_hint_store_fixture&) = delete;
-    merge_hint_store_fixture& operator=(const merge_hint_store_fixture&) = delete;
+    merge_hint_store_fixture& operator=(const merge_hint_store_fixture&)
+        = delete;
+
     ~merge_hint_store_fixture() {
         std::error_code ignored;
         fs::remove_all(root_, ignored);
     }
 
     [[nodiscard]] const fs::path& root() const noexcept { return root_; }
+
+    [[nodiscard]] const fs::path& state() const noexcept { return state_; }
+
     [[nodiscard]] fs::path product() const {
-        return root_ / "database" / "art-islands.sqlite";
+        return state_ / "database" / "art-islands.sqlite";
     }
 
     void execute(const std::string& sql) const {
@@ -126,7 +153,7 @@ public:
 
     void write_decisions(const std::string& bytes) const {
         std::ofstream output(
-            arachne::penelope::merge_hint_decisions_path(root_),
+            arachne::penelope::merge_hint_decisions_path(state_),
             std::ios::binary | std::ios::trunc
         );
         output << bytes;
@@ -137,11 +164,8 @@ public:
 
     [[nodiscard]] std::int64_t store_integer(const std::string& sql) const {
         sqlite3* value = nullptr;
-        const fs::path path
-            = arachne::penelope::merge_hint_store_path(root_);
-        if (sqlite3_open_v2(
-                path.c_str(), &value, SQLITE_OPEN_READONLY, nullptr
-            )
+        const fs::path path = arachne::penelope::merge_hint_store_path(root_);
+        if (sqlite3_open_v2(path.c_str(), &value, SQLITE_OPEN_READONLY, nullptr)
             != SQLITE_OK) {
             throw std::runtime_error("could not open disposable hint fixture");
         }
@@ -161,8 +185,7 @@ public:
 
     void execute_store(const std::string& sql) const {
         sqlite3* value = nullptr;
-        const fs::path path
-            = arachne::penelope::merge_hint_store_path(root_);
+        const fs::path path = arachne::penelope::merge_hint_store_path(root_);
         if (sqlite3_open_v2(
                 path.c_str(), &value, SQLITE_OPEN_READWRITE, nullptr
             )
@@ -183,18 +206,19 @@ public:
 
 private:
     fs::path root_;
+    fs::path state_;
 };
 
 TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     merge_hint_store_fixture fixture;
     const std::string before = arachne::crypto::sha256_file(fixture.product());
 
-    const auto input
-        = arachne::penelope::prepare_merge_hint_rebuild(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
-        );
+    const auto input = arachne::penelope::prepare_merge_hint_rebuild(
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
+    );
     EXPECT_EQ(input.at("product_snapshot").at("sha256"), before);
-    EXPECT_EQ(input.at("product_snapshot").at("schema_version"), 6);
+    EXPECT_EQ(input.at("product_snapshot").size(), 1U);
     EXPECT_EQ(input.at("entities").size(), 6U);
     const auto input_work = std::ranges::find_if(
         input.at("entities"), [](const nlohmann::json& value) {
@@ -205,25 +229,33 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     EXPECT_EQ(input_work->at("work").at("medium"), "film");
     EXPECT_EQ(input_work->at("entity_type"), "work");
     EXPECT_EQ(input_work->at("work").at("date_precision"), "exact");
-    EXPECT_EQ(
-        input_work->at("work").at("date_start_text"), "1980-05-17"
-    );
+    EXPECT_EQ(input_work->at("work").at("date_start_text"), "1980-05-17");
     EXPECT_TRUE(input_work->at("work").at("date_end_text").is_null());
-    EXPECT_EQ(
-        input_work->at("work").at("date_qualifier"), "documented"
-    );
+    EXPECT_EQ(input_work->at("work").at("date_qualifier"), "documented");
     ASSERT_EQ(input_work->at("work").at("credits").size(), 2U);
     EXPECT_EQ(
-        input_work->at("work").at("credits").at(0).at("importance"),
-        "primary"
+        input_work->at("work").at("credits").at(0).at("importance"), "primary"
     );
     EXPECT_EQ(
-        input_work->at("work").at("credits").at(1).at("role"),
-        "screenwriter"
+        input_work->at("work").at("credits").at(1).at("role"), "screenwriter"
     );
+    EXPECT_EQ(input_work->at("work").at("credits").at(1).at("credit_order"), 1);
+    ASSERT_EQ(input_work->at("work").at("memberships").size(), 1U);
     EXPECT_EQ(
-        input_work->at("work").at("credits").at(1).at("credit_order"), 1
+        input_work->at("work").at("memberships").at(0).at("direction"),
+        "incoming"
     );
+    ASSERT_EQ(input_work->at("work").at("events").size(), 1U);
+    EXPECT_EQ(
+        input_work->at("work").at("events").at(0).at("event_type"), "premiered"
+    );
+    ASSERT_EQ(input_work->at("work").at("manifestations").size(), 1U);
+    const auto& manifestation
+        = input_work->at("work").at("manifestations").at(0);
+    ASSERT_EQ(manifestation.at("credits").size(), 1U);
+    EXPECT_EQ(manifestation.at("credits").at(0).at("role"), "distributor");
+    ASSERT_EQ(manifestation.at("events").size(), 1U);
+    EXPECT_EQ(manifestation.at("events").at(0).at("event_type"), "released");
     const auto input_organization = std::ranges::find_if(
         input.at("entities"), [](const nlohmann::json& value) {
             return value.at("id") == "agent-000002";
@@ -231,9 +263,13 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     );
     ASSERT_NE(input_organization, input.at("entities").end());
     EXPECT_EQ(input_organization->at("entity_type"), "organization");
+    EXPECT_EQ(input_organization->at("agent").at("agent_type"), "organization");
+    ASSERT_EQ(input_organization->at("agent").at("relations").size(), 1U);
     EXPECT_EQ(
-        input_organization->at("agent").at("agent_type"), "organization"
+        input_organization->at("agent").at("relations").at(0).at("direction"),
+        "incoming"
     );
+    EXPECT_TRUE(input_organization->at("agent").at("credits").empty());
     const auto input_concept = std::ranges::find_if(
         input.at("entities"), [](const nlohmann::json& value) {
             return value.at("id") == "concept-000001";
@@ -242,13 +278,12 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     ASSERT_NE(input_concept, input.at("entities").end());
     ASSERT_FALSE(input_concept->at("concept").at("assertions").empty());
     EXPECT_EQ(
-        input_concept->at("concept").at("assertions").front().at(
-            "centrality"
-        ),
+        input_concept->at("concept").at("assertions").front().at("centrality"),
         100
     );
     const auto& assertion
         = input_concept->at("concept").at("assertions").front();
+    EXPECT_EQ(assertion.at("centrality_scale"), "none");
     EXPECT_DOUBLE_EQ(assertion.at("confidence").get<double>(), 0.9);
     EXPECT_EQ(assertion.at("historical_role"), "formative");
     ASSERT_EQ(assertion.at("evidence").size(), 1U);
@@ -256,9 +291,37 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     EXPECT_EQ(assertion.at("evidence").front().at("source_id"), "1");
     EXPECT_EQ(assertion.at("evidence").front().at("stance"), "supports");
     EXPECT_FALSE(assertion.at("evidence").front().contains("exact_quote"));
+    ASSERT_EQ(input_concept->at("concept").at("assertions").size(), 2U);
+    EXPECT_EQ(
+        input_concept->at("concept")
+            .at("assertions")
+            .at(1)
+            .at("centrality_scale"),
+        "ordinal"
+    );
+    const auto input_second_concept = std::ranges::find_if(
+        input.at("entities"), [](const nlohmann::json& value) {
+            return value.at("id") == "concept-000002";
+        }
+    );
+    ASSERT_NE(input_second_concept, input.at("entities").end());
+    ASSERT_EQ(input_second_concept->at("concept").at("assertions").size(), 2U);
+    EXPECT_EQ(
+        input_second_concept->at("concept")
+            .at("assertions")
+            .at(0)
+            .at("centrality_scale"),
+        "binary"
+    );
+    EXPECT_EQ(
+        input_second_concept->at("concept")
+            .at("assertions")
+            .at(1)
+            .at("centrality_scale"),
+        "graded"
+    );
     ASSERT_EQ(input_concept->at("concept").at("neighbors").size(), 1U);
-    const auto& relation
-        = input_concept->at("concept").at("neighbors").front();
+    const auto& relation = input_concept->at("concept").at("neighbors").front();
     EXPECT_EQ(relation.at("relation_id"), 1);
     EXPECT_EQ(relation.at("strength"), 75);
     EXPECT_EQ(relation.at("from_year"), 1970);
@@ -266,16 +329,11 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     EXPECT_EQ(relation.at("region_code"), "JP");
     EXPECT_DOUBLE_EQ(relation.at("confidence").get<double>(), 0.8);
     EXPECT_EQ(
-        relation.at("evidence_ids"),
-        nlohmann::json::array({ "2", "10" })
+        relation.at("evidence_ids"), nlohmann::json::array({ "2", "10" })
     );
-    EXPECT_EQ(
-        relation.at("source_ids"), nlohmann::json::array({ "2" })
-    );
+    EXPECT_EQ(relation.at("source_ids"), nlohmann::json::array({ "2" }));
     ASSERT_EQ(relation.at("evidence").size(), 2U);
-    EXPECT_EQ(
-        relation.at("evidence").at(0).at("stance"), "contextualizes"
-    );
+    EXPECT_EQ(relation.at("evidence").at(0).at("stance"), "contextualizes");
     EXPECT_EQ(
         input_concept->at("concept").at("neighbors").front().at("direction"),
         "outgoing"
@@ -286,9 +344,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
         }
     );
     ASSERT_NE(input_concept_right, input.at("entities").end());
-    ASSERT_EQ(
-        input_concept_right->at("concept").at("neighbors").size(), 1U
-    );
+    ASSERT_EQ(input_concept_right->at("concept").at("neighbors").size(), 1U);
     EXPECT_EQ(
         input_concept_right->at("concept")
             .at("neighbors")
@@ -304,8 +360,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
         0
     );
 
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     const auto relation_observation = std::ranges::find_if(
         projection.at("analysis").at("observations"),
         [](const nlohmann::json& value) {
@@ -314,8 +369,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
         }
     );
     ASSERT_NE(
-        relation_observation,
-        projection.at("analysis").at("observations").end()
+        relation_observation, projection.at("analysis").at("observations").end()
     );
     ASSERT_EQ(
         relation_observation->at("details")
@@ -363,18 +417,16 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
         1
     );
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
 
     EXPECT_EQ(arachne::crypto::sha256_file(fixture.product()), before);
     EXPECT_GT(fixture.store_integer("SELECT count(*) FROM blocks"), 0);
     EXPECT_GT(
-        fixture.store_integer("SELECT count(*) FROM analytical_observations"),
-        0
+        fixture.store_integer("SELECT count(*) FROM analytical_observations"), 0
     );
     EXPECT_GT(
-        fixture.store_integer("SELECT count(*) FROM analysis_projections"),
-        0
+        fixture.store_integer("SELECT count(*) FROM analysis_projections"), 0
     );
     EXPECT_EQ(
         fixture.store_integer(
@@ -390,7 +442,7 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
         fixture.store_integer(
             "SELECT count(*) FROM metadata WHERE"
             " key='structural_algorithm_version'"
-            " AND value='ariadne-structural-hints-2.2.0'"
+            " AND value='ariadne-structural-hints-2.3.0'"
         ),
         1
     );
@@ -401,10 +453,10 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
         ),
         1
     );
-    const auto selected
-        = arachne::penelope::load_merge_hint_export(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
-        );
+    const auto selected = arachne::penelope::load_merge_hint_export(
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
+    );
     EXPECT_FALSE(selected.contains("analysis"));
     const auto selected_agent = std::ranges::find_if(
         selected.at("candidates"), [](const nlohmann::json& value) {
@@ -428,67 +480,66 @@ TEST(MergeHintStore, RebuildUsesDisposableStateAndPreservesProductBytes) {
     EXPECT_EQ(review.at("source").at("productSha256"), before);
     EXPECT_FALSE(review.contains("analysis"));
     EXPECT_EQ(arachne::crypto::sha256_file(fixture.product()), before);
-    EXPECT_TRUE(fs::is_regular_file(
-        arachne::penelope::merge_hint_store_path(fixture.root())
-    ));
+    EXPECT_TRUE(
+        fs::is_regular_file(
+            arachne::penelope::merge_hint_store_path(fixture.root())
+        )
+    );
 
     arachne::penelope::discard_merge_hint_store(fixture.root());
-    EXPECT_FALSE(fs::exists(
-        arachne::penelope::merge_hint_store_path(fixture.root())
-    ));
+    EXPECT_FALSE(
+        fs::exists(arachne::penelope::merge_hint_store_path(fixture.root()))
+    );
 }
 
 TEST(MergeHintStore, ExportRejectsMissingAndStalePrerequisites) {
     merge_hint_store_fixture fixture;
     EXPECT_THROW(
-        static_cast<void>(
-            arachne::penelope::load_merge_hint_export(
-                fixture.root(), arachne::ariadne::merge_hint_generator_version
-            )
-        ),
+        static_cast<void>(arachne::penelope::load_merge_hint_export(
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
+        )),
         arachne::penelope::merge_hint_store_error
     );
 
-    const auto input
-        = arachne::penelope::prepare_merge_hint_rebuild(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
-        );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto input = arachne::penelope::prepare_merge_hint_rebuild(
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
+    );
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     fixture.execute(
         "INSERT INTO applied_batches(batch_id) VALUES('changed-after-rebuild')"
     );
 
     EXPECT_THROW(
-        static_cast<void>(
-            arachne::penelope::load_merge_hint_export(
-                fixture.root(), arachne::ariadne::merge_hint_generator_version
-            )
-        ),
+        static_cast<void>(arachne::penelope::load_merge_hint_export(
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
+        )),
         arachne::penelope::merge_hint_store_error
     );
-    EXPECT_TRUE(fs::exists(
-        arachne::penelope::merge_hint_store_path(fixture.root())
-    ));
+    EXPECT_TRUE(
+        fs::exists(arachne::penelope::merge_hint_store_path(fixture.root()))
+    );
 }
 
 TEST(MergeHintStore, ExportRejectsAnotherGeneratorVersion) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::load_merge_hint_export(
-            fixture.root(), "future-generator-version"
+            fixture.root(), fixture.state(), "future-generator-version"
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -500,11 +551,11 @@ TEST(MergeHintStore, DurableIgnoredPairsSurviveDisposableRebuilds) {
         R"({"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[{"family":"agent","left_id":"agent-000001","right_id":"agent-000002"}]})"
     );
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     ASSERT_EQ(input.at("ignored_pairs").size(), 1U);
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     const auto ignored_agent = std::ranges::find_if(
         projection.at("candidates"), [](const nlohmann::json& value) {
             return value.at("family") == "agent"
@@ -517,14 +568,16 @@ TEST(MergeHintStore, DurableIgnoredPairsSurviveDisposableRebuilds) {
     EXPECT_FALSE(ignored_agent->at("selected"));
 
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     const auto exported = arachne::penelope::load_merge_hint_export(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     EXPECT_EQ(
         std::ranges::find_if(
-            exported.at("candidates"), [](const nlohmann::json& value) {
+            exported.at("candidates"),
+            [](const nlohmann::json& value) {
                 return value.at("family") == "agent"
                     && value.at("left_id") == "agent-000001"
                     && value.at("right_id") == "agent-000002";
@@ -537,12 +590,12 @@ TEST(MergeHintStore, DurableIgnoredPairsSurviveDisposableRebuilds) {
 TEST(MergeHintStore, ExportRejectsChangedDurableDecisions) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     fixture.write_decisions(
         R"({"artifact_type":"arachne_merge_hint_decisions_v1","format_version":1,"ignored_pairs":[{"family":"agent","left_id":"agent-000001","right_id":"agent-000002"}]})"
@@ -550,7 +603,8 @@ TEST(MergeHintStore, ExportRejectsChangedDurableDecisions) {
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::load_merge_hint_export(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -559,7 +613,8 @@ TEST(MergeHintStore, ExportRejectsChangedDurableDecisions) {
 TEST(MergeHintStore, StoreRejectsMalformedProjectionRows) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     ASSERT_FALSE(projection.at("candidates").empty());
@@ -567,7 +622,7 @@ TEST(MergeHintStore, StoreRejectsMalformedProjectionRows) {
 
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), projection
+            fixture.root(), fixture.state(), projection
         ),
         arachne::penelope::merge_hint_store_error
     );
@@ -576,7 +631,8 @@ TEST(MergeHintStore, StoreRejectsMalformedProjectionRows) {
 TEST(MergeHintStore, StoreConnectionEnforcesMembershipForeignKeys) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     ASSERT_FALSE(projection.at("memberships").empty());
@@ -584,7 +640,7 @@ TEST(MergeHintStore, StoreConnectionEnforcesMembershipForeignKeys) {
 
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), projection
+            fixture.root(), fixture.state(), projection
         ),
         arachne::penelope::merge_hint_store_error
     );
@@ -593,7 +649,8 @@ TEST(MergeHintStore, StoreConnectionEnforcesMembershipForeignKeys) {
 TEST(MergeHintStore, StoreRejectsStaleAnalyticalObservation) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     ASSERT_FALSE(projection.at("analysis").at("observations").empty());
@@ -602,7 +659,7 @@ TEST(MergeHintStore, StoreRejectsStaleAnalyticalObservation) {
 
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), projection
+            fixture.root(), fixture.state(), projection
         ),
         arachne::penelope::merge_hint_store_error
     );
@@ -611,16 +668,16 @@ TEST(MergeHintStore, StoreRejectsStaleAnalyticalObservation) {
 TEST(MergeHintStore, StoreRejectsUnknownAnalyticalEntity) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     ASSERT_FALSE(projection.at("analysis").at("observations").empty());
-    projection["analysis"]["observations"][0]["left_id"]
-        = "concept-999999";
+    projection["analysis"]["observations"][0]["left_id"] = "concept-999999";
 
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), projection
+            fixture.root(), fixture.state(), projection
         ),
         arachne::penelope::merge_hint_store_error
     );
@@ -629,30 +686,30 @@ TEST(MergeHintStore, StoreRejectsUnknownAnalyticalEntity) {
 TEST(MergeHintStore, StoreAllowsOnlyDistinctChannelsForOneConcept) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     auto& observations = projection["analysis"]["observations"];
-    const auto found = std::ranges::find_if(
-        observations, [](const nlohmann::json& value) {
-            return value.value("left_family", "") == "concept"
-                && value.value("right_family", "") == "concept"
-                && !value.at("details").contains(
-                    "explicit_concept_relations"
-                )
-                && !value.at("details").contains(
-                    "explicit_concept_relation_ids"
-                );
-        }
-    );
+    const auto found
+        = std::ranges::find_if(observations, [](const nlohmann::json& value) {
+              return value.value("left_family", "") == "concept"
+                  && value.value("right_family", "") == "concept"
+                  && !value.at("details").contains("explicit_concept_relations")
+                  && !value.at("details").contains(
+                      "explicit_concept_relation_ids"
+                  );
+          });
     ASSERT_NE(found, observations.end());
     (*found)["right_id"] = found->at("left_id");
     (*found)["left_channel"] = "medium:film";
     (*found)["right_channel"] = "medium:literature";
 
-    EXPECT_NO_THROW(arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
-    ));
+    EXPECT_NO_THROW(
+        arachne::penelope::store_merge_hint_projection(
+            fixture.root(), fixture.state(), projection
+        )
+    );
     EXPECT_EQ(
         fixture.store_integer(
             "SELECT count(*) FROM analytical_observations WHERE"
@@ -664,7 +721,8 @@ TEST(MergeHintStore, StoreAllowsOnlyDistinctChannelsForOneConcept) {
     );
 
     static_cast<void>(arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     ));
     auto invalid = projection;
     invalid["analysis"]["observations"] = observations;
@@ -674,7 +732,7 @@ TEST(MergeHintStore, StoreAllowsOnlyDistinctChannelsForOneConcept) {
     invalid["analysis"]["observations"][0].erase("right_channel");
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), invalid
+            fixture.root(), fixture.state(), invalid
         ),
         arachne::penelope::merge_hint_store_error
     );
@@ -683,7 +741,8 @@ TEST(MergeHintStore, StoreAllowsOnlyDistinctChannelsForOneConcept) {
 TEST(MergeHintStore, StoreRejectsUnpinnedStructuralAlgorithmVersion) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     projection["analysis"]["algorithm_version"] = "future-structural-version";
@@ -693,7 +752,7 @@ TEST(MergeHintStore, StoreRejectsUnpinnedStructuralAlgorithmVersion) {
 
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), projection
+            fixture.root(), fixture.state(), projection
         ),
         arachne::penelope::merge_hint_store_error
     );
@@ -702,7 +761,8 @@ TEST(MergeHintStore, StoreRejectsUnpinnedStructuralAlgorithmVersion) {
 TEST(MergeHintStore, ExternalClassificationComparisonRoundTripsAndIsValidated) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     const arachne::ariadne::structural_hint_external_inputs external {
@@ -719,11 +779,9 @@ TEST(MergeHintStore, ExternalClassificationComparisonRoundTripsAndIsValidated) {
               ) } },
     };
     projection["analysis"]
-        = arachne::ariadne::structural_hint_planner::build(
-            input, {}, external
-        );
+        = arachne::ariadne::structural_hint_planner::build(input, {}, external);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     EXPECT_EQ(
         fixture.store_integer(
@@ -732,32 +790,34 @@ TEST(MergeHintStore, ExternalClassificationComparisonRoundTripsAndIsValidated) {
             " AND json_extract(payload_json,'$.status')='compared'"
             " AND json_extract(payload_json,'$.input.provider')="
             " 'store-fixture-taxonomy'"
-            " AND json_array_length(json_extract(payload_json,'$.comparisons'))=1"
+            " AND "
+            "json_array_length(json_extract(payload_json,'$.comparisons'))=1"
         ),
         1
     );
-    EXPECT_NO_THROW(static_cast<void>(
-        arachne::penelope::load_merge_hint_export(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
-        )
-    ));
+    EXPECT_NO_THROW(
+        static_cast<void>(arachne::penelope::load_merge_hint_export(
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
+        ))
+    );
 
     const auto expect_rejected = [&](const auto& mutate) {
         static_cast<void>(arachne::penelope::prepare_merge_hint_rebuild(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         ));
         auto tampered = projection;
         mutate(tampered["analysis"]["external_classification_comparison"]);
         EXPECT_THROW(
             arachne::penelope::store_merge_hint_projection(
-                fixture.root(), tampered
+                fixture.root(), fixture.state(), tampered
             ),
             arachne::penelope::merge_hint_store_error
         );
     };
     expect_rejected([](nlohmann::json& comparison) {
-        comparison["comparisons"][0]["narrower_concept_id"]
-            = "concept-999999";
+        comparison["comparisons"][0]["narrower_concept_id"] = "concept-999999";
     });
     expect_rejected([](nlohmann::json& comparison) {
         comparison["treated_as_ground_truth"] = true;
@@ -769,16 +829,16 @@ TEST(MergeHintStore, ExternalClassificationComparisonRoundTripsAndIsValidated) {
         comparison["product_snapshot"]["sha256"] = std::string(64, 'f');
     });
     static_cast<void>(arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     ));
     auto tampered_manifest = projection;
     tampered_manifest["analysis"]["manifest"]
-                     ["external_classification_calibration"]
-                     ["used_by_this_run"]
+                     ["external_classification_calibration"]["used_by_this_run"]
         = false;
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), tampered_manifest
+            fixture.root(), fixture.state(), tampered_manifest
         ),
         arachne::penelope::merge_hint_store_error
     );
@@ -787,26 +847,27 @@ TEST(MergeHintStore, ExternalClassificationComparisonRoundTripsAndIsValidated) {
 TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
 
-    const auto expect_rejected = [&](const std::string_view label,
-                                     const auto& mutate) {
-        SCOPED_TRACE(label);
-        static_cast<void>(arachne::penelope::prepare_merge_hint_rebuild(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
-        ));
-        auto tampered = projection;
-        mutate(tampered["analysis"]);
-        EXPECT_THROW(
-            arachne::penelope::store_merge_hint_projection(
-                fixture.root(), tampered
-            ),
-            arachne::penelope::merge_hint_store_error
-        );
-    };
+    const auto expect_rejected
+        = [&](const std::string_view label, const auto& mutate) {
+              SCOPED_TRACE(label);
+              static_cast<void>(arachne::penelope::prepare_merge_hint_rebuild(
+                  fixture.root(), fixture.state(),
+                  arachne::ariadne::merge_hint_generator_version
+              ));
+              auto tampered = projection;
+              mutate(tampered["analysis"]);
+              EXPECT_THROW(
+                  arachne::penelope::store_merge_hint_projection(
+                      fixture.root(), fixture.state(), tampered
+                  ),
+                  arachne::penelope::merge_hint_store_error
+              );
+          };
 
     expect_rejected("sequence", [](nlohmann::json& analysis) {
         analysis["sequences"].push_back(
@@ -825,8 +886,7 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
     expect_rejected("fingerprint distribution", [](nlohmann::json& analysis) {
         ASSERT_FALSE(analysis["structural_fingerprints"].empty());
         analysis["structural_fingerprints"][0]["work_distribution"]
-                ["work-999999"]
-            = 1.0;
+                ["work-999999"] = 1.0;
     });
     expect_rejected("observation canonical type", [](nlohmann::json& analysis) {
         ASSERT_FALSE(analysis["observations"].empty());
@@ -881,13 +941,12 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
         ASSERT_FALSE(
             analysis["clusterings"][0]["clusters"][0]["members"].empty()
         );
-        analysis["clusterings"][0]["clusters"][0]["members"][0]
-                ["concept_id"]
+        analysis["clusterings"][0]["clusters"][0]["members"][0]["concept_id"]
             = "concept-999999";
     });
     expect_rejected("top-neighbor view", [](nlohmann::json& analysis) {
-        auto& groups = analysis["views"]["top_neighbors"]
-                               ["direct_work_set_overlap"];
+        auto& groups
+            = analysis["views"]["top_neighbors"]["direct_work_set_overlap"];
         ASSERT_FALSE(groups.empty());
         ASSERT_FALSE(groups[0]["neighbors"].empty());
         groups[0]["neighbors"][0]["neighbor_id"] = "concept-999999";
@@ -947,12 +1006,11 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
             );
             ASSERT_NE(found, observations.end());
             auto& rows = (*found)["details"]["bridge_works"];
-            const auto row = std::ranges::find_if(
-                rows, [](const nlohmann::json& value) {
-                    return value.contains("evidence_ids")
-                        && !value.at("evidence_ids").empty();
-                }
-            );
+            const auto row
+                = std::ranges::find_if(rows, [](const nlohmann::json& value) {
+                      return value.contains("evidence_ids")
+                          && !value.at("evidence_ids").empty();
+                  });
             ASSERT_NE(row, rows.end());
             (*row)["evidence_ids"][0] = "999999";
         }
@@ -965,8 +1023,7 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
         }
     );
     expect_rejected(
-        "canonical concept relation provenance",
-        [](nlohmann::json& analysis) {
+        "canonical concept relation provenance", [](nlohmann::json& analysis) {
             const auto found = std::ranges::find_if(
                 analysis["observations"], [](const nlohmann::json& value) {
                     return value.at("details").contains(
@@ -1018,9 +1075,10 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
               { "shared_concept_ids", nlohmann::json::array() } }
         );
     });
-    expect_rejected("missing cross-media section", [](nlohmann::json& analysis) {
-        analysis.erase("cross_media");
-    });
+    expect_rejected(
+        "missing cross-media section",
+        [](nlohmann::json& analysis) { analysis.erase("cross_media"); }
+    );
     expect_rejected(
         "missing external-classification comparison",
         [](nlohmann::json& analysis) {
@@ -1048,8 +1106,7 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
             = "concept-999999";
     });
     expect_rejected("cross-media provenance", [](nlohmann::json& analysis) {
-        auto& profiles
-            = analysis["cross_media"]["concept_medium_profiles"];
+        auto& profiles = analysis["cross_media"]["concept_medium_profiles"];
         ASSERT_FALSE(profiles.empty());
         ASSERT_FALSE(profiles[0]["media"].empty());
         profiles[0]["media"][0]["evidence_ids"].push_back("999999");
@@ -1162,14 +1219,33 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
         ASSERT_FALSE(experiments.empty());
         experiments[0]["work_id"] = "work-999999";
     });
+    expect_rejected(
+        "centrality scale coverage work", [](nlohmann::json& analysis) {
+            auto& coverage = analysis["centrality_diagnostics"]
+                                     ["work_assignment_scale_coverage"];
+            ASSERT_FALSE(coverage.empty());
+            coverage[0]["work_id"] = "work-999999";
+        }
+    );
+    expect_rejected("credited work scale debt", [](nlohmann::json& analysis) {
+        const auto priority = std::ranges::find_if(
+            analysis["research_priorities"], [](const nlohmann::json& row) {
+                return row.at("details").contains("credited_work_scale_debt");
+            }
+        );
+        ASSERT_NE(priority, analysis["research_priorities"].end());
+        ASSERT_FALSE(
+            (*priority)["details"]["credited_work_scale_debt"].empty()
+        );
+        (*priority)["details"]["credited_work_scale_debt"][0]["work_id"]
+            = "work-999999";
+    });
     expect_rejected("genre-like signature", [](nlohmann::json& analysis) {
         ASSERT_FALSE(analysis["genre_like_signatures"].empty());
-        analysis["genre_like_signatures"][0]["concept_id"]
-            = "concept-999999";
+        analysis["genre_like_signatures"][0]["concept_id"] = "concept-999999";
     });
     expect_rejected("mixed-family member", [](nlohmann::json& analysis) {
-        auto& clusterings
-            = analysis["mixed_family_structure"]["clusterings"];
+        auto& clusterings = analysis["mixed_family_structure"]["clusterings"];
         ASSERT_FALSE(clusterings.empty());
         ASSERT_FALSE(clusterings[0]["clusters"].empty());
         ASSERT_FALSE(clusterings[0]["clusters"][0]["members"].empty());
@@ -1181,12 +1257,12 @@ TEST(MergeHintStore, StoreRejectsUnknownStructuralProjectionEntities) {
 TEST(MergeHintStore, ExportRejectsTamperedStructuralAlgorithmMetadata) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     fixture.execute_store(
         "UPDATE metadata SET value='future-structural-version'"
@@ -1195,7 +1271,8 @@ TEST(MergeHintStore, ExportRejectsTamperedStructuralAlgorithmMetadata) {
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::load_merge_hint_export(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -1204,12 +1281,12 @@ TEST(MergeHintStore, ExportRejectsTamperedStructuralAlgorithmMetadata) {
 TEST(MergeHintStore, ExportRejectsTamperedStructuralProjectionEntity) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     fixture.execute_store(
         "UPDATE analysis_projections SET payload_json=json_set("
@@ -1219,7 +1296,8 @@ TEST(MergeHintStore, ExportRejectsTamperedStructuralProjectionEntity) {
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::load_merge_hint_export(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -1228,12 +1306,12 @@ TEST(MergeHintStore, ExportRejectsTamperedStructuralProjectionEntity) {
 TEST(MergeHintStore, ExportRejectsTamperedCrossMediaProjectionEntity) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     fixture.execute_store(
         "UPDATE analysis_projections SET payload_json=json_set("
@@ -1243,7 +1321,59 @@ TEST(MergeHintStore, ExportRejectsTamperedCrossMediaProjectionEntity) {
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::load_merge_hint_export(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
+        )),
+        arachne::penelope::merge_hint_store_error
+    );
+}
+
+TEST(MergeHintStore, ExportRejectsTamperedScaleCoverageWork) {
+    merge_hint_store_fixture fixture;
+    const auto input = arachne::penelope::prepare_merge_hint_rebuild(
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
+    );
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
+    arachne::penelope::store_merge_hint_projection(
+        fixture.root(), fixture.state(), projection
+    );
+    fixture.execute_store(
+        "UPDATE analysis_projections SET payload_json=json_set("
+        " payload_json,'$.work_assignment_scale_coverage[0].work_id',"
+        " 'work-999999') WHERE section='centrality_diagnostics'"
+    );
+
+    EXPECT_THROW(
+        static_cast<void>(arachne::penelope::load_merge_hint_export(
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
+        )),
+        arachne::penelope::merge_hint_store_error
+    );
+}
+
+TEST(MergeHintStore, ExportRejectsTamperedCreditedWorkScaleDebt) {
+    merge_hint_store_fixture fixture;
+    const auto input = arachne::penelope::prepare_merge_hint_rebuild(
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
+    );
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
+    arachne::penelope::store_merge_hint_projection(
+        fixture.root(), fixture.state(), projection
+    );
+    fixture.execute_store(
+        "UPDATE analysis_projections SET payload_json=json_set("
+        " payload_json,'$[0].details.credited_work_scale_debt',"
+        " json_array(json_object('work_id','work-999999'))) "
+        "WHERE section='research_priorities'"
+    );
+
+    EXPECT_THROW(
+        static_cast<void>(arachne::penelope::load_merge_hint_export(
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -1252,7 +1382,8 @@ TEST(MergeHintStore, ExportRejectsTamperedCrossMediaProjectionEntity) {
 TEST(MergeHintStore, StructuralProjectionExtensionsRemainInLocalStore) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     auto projection = arachne::ariadne::merge_hint_planner::build(input);
     projection["analysis"]["extension_probe"] = {
@@ -1265,7 +1396,7 @@ TEST(MergeHintStore, StructuralProjectionExtensionsRemainInLocalStore) {
     };
 
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     EXPECT_EQ(
         fixture.store_integer(
@@ -1275,7 +1406,8 @@ TEST(MergeHintStore, StructuralProjectionExtensionsRemainInLocalStore) {
         17
     );
     const auto exported = arachne::penelope::load_merge_hint_export(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
     EXPECT_FALSE(exported.contains("analysis"));
 }
@@ -1283,18 +1415,19 @@ TEST(MergeHintStore, StructuralProjectionExtensionsRemainInLocalStore) {
 TEST(MergeHintStore, ExportRejectsTamperedEntityFamily) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     arachne::penelope::store_merge_hint_projection(
-        fixture.root(), projection
+        fixture.root(), fixture.state(), projection
     );
     fixture.execute_store("UPDATE candidates SET family='work'");
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::load_merge_hint_export(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -1308,7 +1441,8 @@ TEST(MergeHintStore, RebuildRejectsSymlinkedPrivateDirectory) {
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::prepare_merge_hint_rebuild(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -1326,7 +1460,8 @@ TEST(MergeHintStore, RebuildRejectsSymlinkedTemporaryDirectory) {
 
     EXPECT_THROW(
         static_cast<void>(arachne::penelope::prepare_merge_hint_rebuild(
-            fixture.root(), arachne::ariadne::merge_hint_generator_version
+            fixture.root(), fixture.state(),
+            arachne::ariadne::merge_hint_generator_version
         )),
         arachne::penelope::merge_hint_store_error
     );
@@ -1336,10 +1471,10 @@ TEST(MergeHintStore, RebuildRejectsSymlinkedTemporaryDirectory) {
 TEST(MergeHintStore, StoreRejectsSymlinkedDatabaseFile) {
     merge_hint_store_fixture fixture;
     const auto input = arachne::penelope::prepare_merge_hint_rebuild(
-        fixture.root(), arachne::ariadne::merge_hint_generator_version
+        fixture.root(), fixture.state(),
+        arachne::ariadne::merge_hint_generator_version
     );
-    const auto projection
-        = arachne::ariadne::merge_hint_planner::build(input);
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input);
     const fs::path store
         = arachne::penelope::merge_hint_store_path(fixture.root());
     const fs::path relocated = fixture.root() / "relocated-hints.sqlite";
@@ -1348,7 +1483,7 @@ TEST(MergeHintStore, StoreRejectsSymlinkedDatabaseFile) {
 
     EXPECT_THROW(
         arachne::penelope::store_merge_hint_projection(
-            fixture.root(), projection
+            fixture.root(), fixture.state(), projection
         ),
         arachne::penelope::merge_hint_store_error
     );

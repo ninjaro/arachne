@@ -3,15 +3,13 @@
   "project_timezone": "Europe/Berlin",
   "paths": {
     "legacy_inbox": null,
-    "queue": ".arachne/queue",
-    "remainders": ".arachne/remainders",
-    "ledger": ".arachne/operational-ledger.sqlite3",
-    "graph_store": ".arachne/graphs",
-    "artifact_store": ".arachne/artifacts",
-    "lock_root": ".arachne/locks",
-    "viewer_templates": "viewer",
-    "site_output": ".arachne/site",
-    "legacy_inbox_baseline": ".arachne/legacy-inbox-baseline.json"
+    "queue": "../queue",
+    "remainders": "../remainders",
+    "ledger": "../operations/ledger.sqlite3",
+    "graph_store": "../graphs",
+    "artifact_store": "../artifacts",
+    "lock_root": "../.arachne/locks",
+    "legacy_inbox_baseline": "../operations/legacy-inbox-baseline.json"
   },
   "product_integration": {
     "local_hour": 3,
@@ -215,9 +213,5 @@
     ],
     "maximum_redirects": 3,
     "allow_https_to_http": false
-  },
-  "publication": {
-    "require_reviewed_change": true,
-    "pages_artifact_name": "arachne-viewer-site"
   }
 }

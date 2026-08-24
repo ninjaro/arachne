@@ -5,52 +5,76 @@
 
 # Arachne
 
-Arachne is a repository-driven pipeline for Art Lineages research. It applies
-strict human-authored product batches transactionally, coordinates candidate
-graph builds, and generates a static viewer without a continuously running
-server.
+Arachne is the code and canonical-write boundary for Art Lineages research. It
+validates human-authored batches, applies them transactionally, transports
+reviewed source bytes, and owns candidate, research, and taste semantics. It no
+longer contains the product database or the public viewer.
 
-The central trust rule is simple: miners remain responsible for factual and
-semantic correctness. Arachne checks mechanical properties and provenance; it
-does not certify truth or silently rewrite research.
+The sibling repositories have deliberately separate lifecycles:
 
-## Actors and graph domains
+- `ninjaro/arachne` (this repository) contains code, schemas, contracts, tests,
+  the fixed `inbox/`, and the only canonical product writer.
+- private `ninjaro/arachne-data` contains the latest authoritative SQLite and
+  durable reviewed state. SQLite is tracked through Git LFS.
+- public `ninjaro/arachne-demo` contains the React/static presentation and a
+  read-only, pinned `arachne-data` submodule.
 
-- **Arachne** is the only external API and owns intake, cocoons, status,
-  scheduling, and orchestration.
-- **Pheidippides** transports bytes and records transport evidence. Delivery does
-  not imply correctness, completeness, or trust.
-- **Ariadne** owns candidate algorithms, query planning, projections, layouts, and
-  the static viewer.
-- **Penelope** owns graph schemas, transactions, materialization, snapshots, and
-  low-level exports.
+No repository commits generated catalog, research, taste, or product-graph
+mirrors of the canonical SQLite. Native projections are generated transiently
+from the exact selected product state.
 
-The durable product graph contains only accepted human-mined research. The
-research-candidate graph is replaceable, untrusted soft guidance derived from
-external data. Neither Pheidippides nor Ariadne writes a graph database directly.
+## Trust and actor boundaries
+
+Miners remain responsible for factual and semantic correctness. Arachne checks
+mechanical properties and provenance; it does not certify truth or silently
+rewrite research.
+
+- Arachne owns intake, scheduling, orchestration, and canonical publication.
+- Pheidippides transports bytes and records transport evidence.
+- Ariadne owns candidate algorithms and native domain projections.
+- Penelope owns graph schemas, transactions, snapshots, and base exports.
 
 ## Repository map
 
 | Path | Purpose |
 |---|---|
-| `contracts/` | Versioned JSON Schemas, examples, artifact formats and validator |
-| `src/arachne/` | Intake, cocoon and coordinator implementation |
-| `src/pheidippides/` | Domain-blind transport |
-| `src/ariadne/` | Candidate planning, projections and viewer build logic |
-| `src/penelope/` | SQLite graph stores, staging, activation and exports |
-| `viewer/` | Static Ariadne viewer assets |
-| `hpc/wikidata/` | Bulk-first streaming Wikidata source-graph worker |
-| `scripts/` | Local/CI adapters, one-way schema conversion, and repository checks |
-| `.github/workflows/` | Validation, intake, graph operations and verified immutable publication |
+| `schema/` | Sole current product schema |
+| `contracts/` | Current actor-boundary schemas and examples |
+| `src/` and `include/` | Native actors, stores, and CLI |
+| `inbox/` | Reviewed strict product batches; stays with the writer |
+| `hpc/wikidata/` | Bulk-first streaming Wikidata worker |
+| `scripts/` | State guards, operational adapters, and validation |
+| `tests/` | Hermetic fixtures with explicit source/state paths |
+
+## Local sibling setup
+
+Place the repositories side by side:
+
+```text
+~/Projects/art/arachne
+~/Projects/art/arachne-data
+~/Projects/art/arachne-demo
+```
+
+Arachne uses `../arachne-data` by default. Override it only with a deliberate
+local path:
+
+```sh
+export ARACHNE_STATE_REPOSITORY=/absolute/path/to/arachne-data
+python3 scripts/state_manifest.py check
+build/arachne product check-inbox
+```
+
+The state manifest binds the database hash to this repository's
+`schema/product.sql` hash and producer commit. A mismatch fails closed. Config
+paths are resolved relative to the selected config file, so the reviewed
+`arachne-data/config/arachne.json` naturally owns queue, graphs, artifacts, and
+operational state.
 
 ## Build and test
 
 Requirements are CMake 3.28+, a C++23 compiler, libcurl, SQLite, utf8proc,
-nlohmann-json, GoogleTest for test builds, and `yamllint` for workflow checks.
-On Debian/Ubuntu, install `libcurl4-openssl-dev`, `libsqlite3-dev`,
-`libutf8proc-dev`, `nlohmann-json3-dev`, `libgtest-dev`, and `yamllint`.
-
-Run the same checks used by the validation workflow:
+nlohmann-json, GoogleTest, and `yamllint`.
 
 ```sh
 scripts/run_checks.sh
@@ -62,24 +86,9 @@ Or build only the application:
 ARACHNE_BUILD_TYPE=Release ARACHNE_BUILD_TESTS=OFF scripts/build.sh
 ```
 
-The build produces `build/arachne`. Network tests and the deprecated 1.x client
-are disabled by the local scripts unless explicitly requested.
+## Canonical writes
 
-## Operations
-
-Copy the conservative example configuration, create the temporary working paths,
-and run read-only preflight checks:
-
-```sh
-cp config/arachne.example.json config/arachne.local.json
-mkdir -p .arachne/queue .arachne/remainders
-python3 scripts/arachne_ops.py preflight
-python3 scripts/arachne_ops.py capabilities
-```
-
-The local adapter negotiates the advertised capabilities it uses for actor
-operations. Product-database work deliberately bypasses configurable adapters
-and exposes four explicit tasks:
+Product tasks use the fixed code-repository inbox and external state root:
 
 ```sh
 build/arachne product check-inbox
@@ -88,55 +97,25 @@ build/arachne product rebuild-merge-hints
 build/arachne product export-merge-hints
 ```
 
-`check-inbox` is a read-only preflight. `apply-inbox` transactionally applies
-eligible batches but never updates merge hints. When local hint research is
-needed, an operator explicitly rebuilds the disposable Ariadne hint store and
-then exports its bounded review artifact. Export does not rebuild implicitly:
-it rejects stale product, generator, or durable-decision identity, atomically
-replaces `.arachne/merge-hints-review.json`, and retains the queryable structural
-hint store for local research. The review is identity-only, local, and ignored
-by Git; `database/merge-hint-decisions.json` remains tracked human state. Tasks
-can be supplied in one command and execute strictly in the order written.
+GitHub product writes are serialized with every other `arachne-data` writer.
+The workflow captures the exact starting data commit, validates its manifest,
+mutates only authorized paths, refreshes the manifest when SQLite changes,
+fetches the remote again, and rejects a stale base. It never rebases, retries,
+force-pushes, or commits generated product mirrors.
 
-Remote writes are disabled by default. A production deployment needs protected
-branches, Git LFS for the canonical SQLite database, and a least-privilege token.
-Successful product batches are removed only after commit; rejected files move to
-`inbox/rejected/` and their concrete problems are stored in the database.
+Writers mint a short-lived installation token from the dedicated Arachne data
+writer GitHub App. Non-writers use the separate read-only state credential.
+Demo, Renovate, and deployment credentials are independent.
 
-The included Issue Form accepts one plain UTF-8 `arachne_batch_v2` JSON file for
-review. ZIP packages, sidecars, legacy variants, and arbitrary batch metadata are
-not product input.
-
-Periodic external processing is bulk-first. The source-refresh workflow honors the
-reviewed per-source cadence, downloads the official Wikidata dump through the
-declarative Pheidippides door registry, builds the compact external graph with a
-streaming HPC worker, fully recomputes candidate state, and removes disposable raw
-and scratch data after success. Point APIs remain bounded enrichment paths.
-
-Product changes use strict `arachne_batch_v2` JSON files in the repository
-`inbox/`. See [Product inbox](docs/PRODUCT_INBOX.md) for the fixed validation and
-application commands, explicit update and merge operations, rejected-batch
-issues, and merge hints.
-
-See [Operations](docs/OPERATIONS.md) for current CLI mappings, state
-configuration, and recovery.
-
-## Contracts and architecture
-
-- [Architecture and actor boundaries](docs/ARCHITECTURE.md)
-- [Operations and recovery](docs/OPERATIONS.md)
-- [Contract compatibility notes](contracts/VERSIONS.md)
-- [Example configuration](config/README.md)
-
-The version-2 repository surface is designed to fail closed when persistent state,
-credentials, capability negotiation, or reviewed publication approval is missing.
-Static scaffolding alone is not a production deployment; configure and protect the
-external state domain before enabling remote writes.
+See [Operations](docs/OPERATIONS.md),
+[Architecture](docs/ARCHITECTURE.md),
+[Product inbox](docs/PRODUCT_INBOX.md), and
+[contract versions](contracts/VERSIONS.md).
 
 ## Security and license
 
 Treat inbox batches, external responses, and filenames as untrusted data. Report
-vulnerabilities through GitHub private vulnerability reporting or the contact in
-[.github/SECURITY.md](.github/SECURITY.md).
+vulnerabilities through GitHub private vulnerability reporting or
+[the security policy](.github/SECURITY.md).
 
 Arachne is available under the [MIT License](license).

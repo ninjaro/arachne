@@ -13,7 +13,7 @@ namespace arachnespace::contracts {
 inline constexpr std::string_view structural_analysis_contract
     = "arachne_structural_analysis_v1";
 inline constexpr std::string_view structural_analysis_algorithm_version
-    = "ariadne-structural-hints-2.2.0";
+    = "ariadne-structural-hints-2.3.0";
 
 /** Supported active actor-boundary and product-inbox contracts. */
 enum class contract_name {
@@ -25,8 +25,6 @@ enum class contract_name {
     research_candidate_graph_plan,
     product_graph_snapshot,
     research_candidate_graph_snapshot,
-    viewer_projection,
-    site_bundle,
 };
 
 /** One independently actionable validation failure. */
@@ -47,7 +45,7 @@ struct validation_result {
     explicit operator bool() const noexcept { return valid(); }
 };
 
-/** Return the canonical wire name, including its major-version suffix. */
+/** Return the canonical wire name for the current contract. */
 [[nodiscard]] std::string_view to_string(contract_name name) noexcept;
 
 /** Parse an exact, currently supported wire name. */

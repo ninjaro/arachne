@@ -1,5 +1,5 @@
 name: Arachne product batches
-description: Submit one or more strict arachne_batch_v2 JSON files for review.
+description: Submit one or more strict arachne_batch JSON files for review.
 title: "[Arachne batch] "
 labels:
   - arachne-batch
@@ -8,8 +8,8 @@ body:
     attributes:
       value: |
         Attach one or more plain UTF-8 `.json` files. Every file must contain
-        exactly one root object whose format is `arachne_batch_v2`. ZIPs,
-        sidecars, legacy batch types, and arbitrary metadata are not accepted.
+        exactly one root object whose format is `arachne_batch`. ZIPs,
+        sidecars, undeclared batch types, and arbitrary metadata are not accepted.
         Use the issue title for a short description; no local command-line setup
         is required.
 
@@ -30,7 +30,7 @@ body:
     id: batch_files
     attributes:
       label: Batch files
-      description: Drag all arachne_batch_v2 `.json` files into this field.
+      description: Drag all arachne_batch `.json` files into this field.
       placeholder: Drag one or more batch files here; GitHub will insert attachment links.
     validations:
       required: true

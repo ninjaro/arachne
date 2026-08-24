@@ -50,8 +50,6 @@ class OperationsCliTests(unittest.TestCase):
                 "graph_store": str(self.root / "graphs"),
                 "artifact_store": str(self.root / "artifacts"),
                 "lock_root": str(self.root / "locks"),
-                "viewer_templates": str(ROOT / "viewer"),
-                "site_output": str(self.root / "site"),
                 "legacy_inbox_baseline": str(
                     self.root / "state" / "legacy-baseline.json"
                 ),
@@ -145,10 +143,6 @@ class OperationsCliTests(unittest.TestCase):
                 ],
             },
             "security": {"submission_max_bytes": 1024 * 1024},
-            "publication": {
-                "require_reviewed_change": True,
-                "pages_artifact_name": "test-site",
-            },
         }
         self.config_path.write_text(
             json.dumps(document, indent=2) + "\n", encoding="utf-8"
@@ -188,7 +182,7 @@ class OperationsCliTests(unittest.TestCase):
         path.write_text(
             json.dumps(
                 {
-                    "format": "arachne_batch_v2",
+                    "format": "arachne_batch",
                     "batch_id": name,
                     "create": {},
                     "update": {},
@@ -262,7 +256,6 @@ class OperationsCliTests(unittest.TestCase):
                 "product-taste-index",
                 "candidate-plan",
                 "candidate-rebuild",
-                "viewer-build",
             },
         )
 
@@ -343,7 +336,7 @@ class OperationsCliTests(unittest.TestCase):
                 "table": "credits",
                 "row": {
                     "id": 1,
-                    "work_id": "work-000001",
+                    "entity_id": "work-000001",
                     "agent_id": "agent-000001",
                     "role": "director",
                     "importance": "primary",
@@ -359,6 +352,7 @@ class OperationsCliTests(unittest.TestCase):
                     "concept_id": "concept-000001",
                     "relation_type": "exemplifies",
                     "centrality": 90,
+                    "centrality_scale": "none",
                     "historical_role": "canonical",
                     "confidence": 0.9,
                 },
@@ -642,7 +636,7 @@ class OperationsCliTests(unittest.TestCase):
             "--config",
             str(self.config_path),
             "--contract",
-            "arachne_batch_v2",
+            "arachne_batch",
             "--input",
             str(batch),
         )
@@ -656,7 +650,7 @@ class OperationsCliTests(unittest.TestCase):
             "--config",
             str(self.config_path),
             "--contract",
-            "arachne_batch_v2",
+            "arachne_batch",
             "--input",
             str(batch),
         )

@@ -1,0 +1,1785 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/schemas/arachne_batch.schema.json",
+  "title": "Arachne product inbox batch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "batch_id",
+    "create",
+    "update",
+    "merge"
+  ],
+  "properties": {
+    "format": {
+      "const": "arachne_batch"
+    },
+    "batch_id": {
+      "$ref": "#/$defs/stable_id"
+    },
+    "create": {
+      "$ref": "#/$defs/create_operations"
+    },
+    "update": {
+      "$ref": "#/$defs/update_operations"
+    },
+    "merge": {
+      "$ref": "#/$defs/merge_operations"
+    }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "local_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?!(?:agent|work|concept|manifestation)-[0-9]{6,}$)[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^agent-[0-9]{6,}$"
+    },
+    "work_id": {
+      "type": "string",
+      "pattern": "^work-[0-9]{6,}$"
+    },
+    "concept_id": {
+      "type": "string",
+      "pattern": "^concept-[0-9]{6,}$"
+    },
+    "manifestation_id": {
+      "type": "string",
+      "pattern": "^manifestation-[0-9]{6,}$"
+    },
+    "entity_reference": {
+      "$ref": "#/$defs/stable_id"
+    },
+    "database_or_local_reference": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "$ref": "#/$defs/local_id"
+        }
+      ]
+    },
+    "year": {
+      "type": "integer",
+      "minimum": -9999,
+      "maximum": 9999
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "agent_type": {
+      "type": "string",
+      "enum": [
+        "person",
+        "organization",
+        "group"
+      ]
+    },
+    "medium": {
+      "type": "string",
+      "enum": [
+        "film",
+        "short_film",
+        "television",
+        "novel",
+        "novella",
+        "short_story",
+        "poetry",
+        "play",
+        "essay",
+        "album",
+        "single",
+        "composition",
+        "painting",
+        "print",
+        "engraving",
+        "drawing",
+        "sculpture",
+        "installation",
+        "photography",
+        "mixed_media",
+        "nonfiction",
+        "comic",
+        "performance"
+      ]
+    },
+    "date_precision": {
+      "type": "string",
+      "enum": [
+        "year",
+        "month",
+        "decade",
+        "approximate",
+        "range",
+        "exact"
+      ]
+    },
+    "name_type": {
+      "type": "string",
+      "enum": [
+        "original",
+        "english",
+        "transliteration",
+        "translation",
+        "alias",
+        "credited"
+      ]
+    },
+    "concept_type": {
+      "type": "string",
+      "enum": [
+        "genre",
+        "style",
+        "theme",
+        "keyword",
+        "motif",
+        "trope",
+        "phobia",
+        "taboo",
+        "technique",
+        "movement",
+        "setting",
+        "mood",
+        "content_warning"
+      ]
+    },
+    "concept_slug": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "manifestation_type": {
+      "type": "string",
+      "enum": [
+        "edition",
+        "translation",
+        "release",
+        "pressing",
+        "cut",
+        "restoration",
+        "reissue"
+      ]
+    },
+    "membership_type": {
+      "type": "string",
+      "enum": [
+        "episode_of",
+        "season_of",
+        "track_of",
+        "volume_of",
+        "issue_of",
+        "chapter_of",
+        "part_of",
+        "collected_in"
+      ]
+    },
+    "agent_relation_type": {
+      "type": "string",
+      "enum": [
+        "member_of",
+        "founder_of",
+        "subsidiary_of",
+        "division_of",
+        "imprint_of",
+        "owned_by",
+        "successor_of",
+        "predecessor_of"
+      ]
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "created",
+        "published",
+        "released",
+        "premiered",
+        "broadcast",
+        "performed",
+        "exhibited",
+        "recorded"
+      ]
+    },
+    "credit_role": {
+      "type": "string",
+      "enum": [
+        "author",
+        "director",
+        "screenwriter",
+        "producer",
+        "actor",
+        "composer",
+        "performer",
+        "artist",
+        "engraver",
+        "sculptor",
+        "photographer",
+        "editor",
+        "cinematographer",
+        "production_company",
+        "publisher",
+        "record_label",
+        "band",
+        "distributor",
+        "broadcaster",
+        "platform",
+        "translator",
+        "illustrator",
+        "printer",
+        "curator",
+        "choreographer",
+        "narrator",
+        "lyricist",
+        "songwriter",
+        "arranger",
+        "sound_engineer",
+        "designer",
+        "animator"
+      ]
+    },
+    "credit_importance": {
+      "type": "string",
+      "enum": [
+        "primary",
+        "key",
+        "supporting"
+      ]
+    },
+    "measurement_type": {
+      "type": "string",
+      "enum": [
+        "duration",
+        "height",
+        "width",
+        "depth",
+        "pages"
+      ]
+    },
+    "measurement_unit": {
+      "type": "string",
+      "enum": [
+        "seconds",
+        "millimetres",
+        "pages"
+      ]
+    },
+    "source_type": {
+      "type": "string",
+      "enum": [
+        "book",
+        "article",
+        "catalogue",
+        "web_page",
+        "interview",
+        "database",
+        "video",
+        "audio",
+        "PDF"
+      ]
+    },
+    "evidence_stance": {
+      "type": "string",
+      "enum": [
+        "supports",
+        "contradicts",
+        "contextualizes"
+      ]
+    },
+    "work_concept_relation_type": {
+      "type": "string",
+      "enum": [
+        "exemplifies",
+        "contains",
+        "anticipates",
+        "influenced_by",
+        "influences",
+        "revives",
+        "parodies",
+        "deconstructs",
+        "associated_with"
+      ]
+    },
+    "centrality_scale": {
+      "type": "string",
+      "enum": [
+        "none",
+        "binary",
+        "ordinal",
+        "graded"
+      ]
+    },
+    "reviewed_centrality_scale": {
+      "type": "string",
+      "enum": [
+        "binary",
+        "ordinal",
+        "graded"
+      ]
+    },
+    "historical_role": {
+      "type": "string",
+      "enum": [
+        "formative",
+        "canonical",
+        "transitional",
+        "hybrid",
+        "revival",
+        "late_derivative",
+        "peripheral",
+        "precursor"
+      ]
+    },
+    "concept_relation_type": {
+      "type": "string",
+      "enum": [
+        "broader_than",
+        "narrower_than",
+        "derived_from",
+        "precursor_of",
+        "hybrid_of",
+        "revival_of",
+        "regional_variant_of",
+        "influenced_by",
+        "opposes",
+        "alias_of"
+      ]
+    },
+    "parent_guide_category": {
+      "type": "string",
+      "enum": [
+        "violence",
+        "sex_nudity",
+        "language",
+        "drugs",
+        "frightening",
+        "self_harm",
+        "discrimination",
+        "abuse",
+        "taboo"
+      ]
+    },
+    "spoiler_level": {
+      "type": "string",
+      "enum": [
+        "none",
+        "mild",
+        "major"
+      ]
+    },
+    "evidence_reference_list": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/database_or_local_reference"
+      }
+    },
+    "create_operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_agent"
+          }
+        },
+        "works": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_work"
+          }
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_concept"
+          }
+        },
+        "manifestations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_manifestation"
+          }
+        },
+        "work_memberships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_work_membership"
+          }
+        },
+        "agent_relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_agent_relation"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_event"
+          }
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_name"
+          }
+        },
+        "external_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_external_id"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_source"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_evidence"
+          }
+        },
+        "credits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_credit"
+          }
+        },
+        "measurements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_measurement"
+          }
+        },
+        "financial_facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_financial_fact"
+          }
+        },
+        "work_concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_work_concept"
+          }
+        },
+        "concept_relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_concept_relation"
+          }
+        },
+        "parent_guide_assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_parent_guide_assertion"
+          }
+        }
+      }
+    },
+    "create_agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "agent_type"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "agent_type": {
+          "$ref": "#/$defs/agent_type"
+        },
+        "birth_year": {
+          "$ref": "#/$defs/year"
+        },
+        "death_year": {
+          "$ref": "#/$defs/year"
+        }
+      }
+    },
+    "create_work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "medium"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "medium": {
+          "$ref": "#/$defs/medium"
+        },
+        "year_start": {
+          "$ref": "#/$defs/year"
+        },
+        "year_end": {
+          "$ref": "#/$defs/year"
+        },
+        "date_precision": {
+          "$ref": "#/$defs/date_precision"
+        },
+        "date_start_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "date_end_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "date_qualifier": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "country_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "production_info_json": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_concept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "concept_type",
+        "slug"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "concept_type": {
+          "$ref": "#/$defs/concept_type"
+        },
+        "slug": {
+          "$ref": "#/$defs/concept_slug"
+        }
+      }
+    },
+    "create_manifestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "work_id",
+        "manifestation_type",
+        "label"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "manifestation_type": {
+          "$ref": "#/$defs/manifestation_type"
+        },
+        "release_year": {
+          "$ref": "#/$defs/year"
+        },
+        "region_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "label": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_work_membership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "child_work_id",
+        "parent_work_id",
+        "membership_type"
+      ],
+      "properties": {
+        "child_work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "parent_work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "membership_type": {
+          "$ref": "#/$defs/membership_type"
+        },
+        "position": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "position_text": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_agent_relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject_agent_id",
+        "relation_type",
+        "object_agent_id"
+      ],
+      "properties": {
+        "subject_agent_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "relation_type": {
+          "$ref": "#/$defs/agent_relation_type"
+        },
+        "object_agent_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "from_year": {
+          "$ref": "#/$defs/year"
+        },
+        "to_year": {
+          "$ref": "#/$defs/year"
+        },
+        "period_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "role_text": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "event_type"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "event_type": {
+          "$ref": "#/$defs/event_type"
+        },
+        "year_start": {
+          "$ref": "#/$defs/year"
+        },
+        "year_end": {
+          "$ref": "#/$defs/year"
+        },
+        "date_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "date_precision": {
+          "$ref": "#/$defs/date_precision"
+        },
+        "place_text": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_name": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "name_type",
+        "value",
+        "is_preferred"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "name_type": {
+          "$ref": "#/$defs/name_type"
+        },
+        "language_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "script_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "value": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "is_preferred": {
+          "type": "boolean"
+        }
+      }
+    },
+    "create_external_id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "scheme",
+        "value"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "scheme": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "value": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "canonical_url": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "source_type"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "source_type": {
+          "$ref": "#/$defs/source_type"
+        },
+        "title": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "bibliography_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "author_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "publisher": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "publication_date": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "url": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "doi": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "isbn": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language_code": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "url"
+          ]
+        },
+        {
+          "required": [
+            "doi"
+          ]
+        },
+        {
+          "required": [
+            "isbn"
+          ]
+        },
+        {
+          "required": [
+            "bibliography_text"
+          ]
+        }
+      ]
+    },
+    "create_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "source_id",
+        "exact_quote",
+        "stance"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "source_id": {
+          "$ref": "#/$defs/database_or_local_reference"
+        },
+        "exact_quote": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "quote_language": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "quote_translation": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "locator_json": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "stance": {
+          "$ref": "#/$defs/evidence_stance"
+        }
+      }
+    },
+    "create_credit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "agent_id",
+        "role",
+        "importance"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "role": {
+          "$ref": "#/$defs/credit_role"
+        },
+        "credit_order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "importance": {
+          "$ref": "#/$defs/credit_importance"
+        },
+        "credited_as": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "measurement_type",
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "measurement_type": {
+          "$ref": "#/$defs/measurement_type"
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unit": {
+          "$ref": "#/$defs/measurement_unit"
+        },
+        "qualifier": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "create_financial_fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "work_id",
+        "fact_type",
+        "amount_min",
+        "currency_code",
+        "is_estimate"
+      ],
+      "properties": {
+        "work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "fact_type": {
+          "const": "budget"
+        },
+        "amount_min": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "amount_max": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "currency_code": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "value_year": {
+          "$ref": "#/$defs/year"
+        },
+        "is_estimate": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        }
+      }
+    },
+    "create_work_concept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "work_id",
+        "concept_id",
+        "relation_type",
+        "centrality",
+        "centrality_scale",
+        "evidence"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "concept_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "relation_type": {
+          "$ref": "#/$defs/work_concept_relation_type"
+        },
+        "centrality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "centrality_scale": {
+          "$ref": "#/$defs/reviewed_centrality_scale"
+        },
+        "historical_role": {
+          "$ref": "#/$defs/historical_role"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_reference_list"
+        }
+      }
+    },
+    "create_concept_relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "subject_concept_id",
+        "relation_type",
+        "object_concept_id",
+        "evidence"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "subject_concept_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "relation_type": {
+          "$ref": "#/$defs/concept_relation_type"
+        },
+        "object_concept_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "strength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "from_year": {
+          "$ref": "#/$defs/year"
+        },
+        "to_year": {
+          "$ref": "#/$defs/year"
+        },
+        "region_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_reference_list"
+        }
+      }
+    },
+    "create_parent_guide_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "work_id",
+        "concept_id",
+        "category",
+        "intensity",
+        "explicitness",
+        "frequency",
+        "centrality",
+        "realism",
+        "spoiler_level",
+        "evidence"
+      ],
+      "properties": {
+        "local_id": {
+          "$ref": "#/$defs/local_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "concept_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "category": {
+          "$ref": "#/$defs/parent_guide_category"
+        },
+        "intensity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "explicitness": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "frequency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "centrality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "realism": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "spoiler_level": {
+          "$ref": "#/$defs/spoiler_level"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_reference_list"
+        }
+      }
+    },
+    "update_operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/update_agent"
+          }
+        },
+        "works": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/update_work"
+          }
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/update_concept"
+          }
+        },
+        "manifestations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/update_manifestation"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/update_source"
+          }
+        },
+        "work_concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/update_work_concept"
+          }
+        },
+        "delete": {
+          "$ref": "#/$defs/delete_operations"
+        }
+      }
+    },
+    "agent_update_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "birth_year": {
+          "$ref": "#/$defs/year"
+        },
+        "death_year": {
+          "$ref": "#/$defs/year"
+        }
+      }
+    },
+    "update_agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/agent_id"
+        },
+        "set": {
+          "$ref": "#/$defs/agent_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "birth_year",
+              "death_year"
+            ]
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "set": {
+              "minProperties": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "unset": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "work_update_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "medium": {
+          "$ref": "#/$defs/medium"
+        },
+        "year_start": {
+          "$ref": "#/$defs/year"
+        },
+        "year_end": {
+          "$ref": "#/$defs/year"
+        },
+        "date_precision": {
+          "$ref": "#/$defs/date_precision"
+        },
+        "date_start_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "date_end_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "date_qualifier": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "country_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "production_info_json": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "work_unset_field": {
+      "type": "string",
+      "enum": [
+        "year_start",
+        "year_end",
+        "date_precision",
+        "date_start_text",
+        "date_end_text",
+        "date_qualifier",
+        "language_code",
+        "country_code",
+        "production_info_json"
+      ]
+    },
+    "update_work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/work_id"
+        },
+        "set": {
+          "$ref": "#/$defs/work_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/work_unset_field"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "set": {
+              "minProperties": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "unset": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "concept_update_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "concept_type": {
+          "$ref": "#/$defs/concept_type"
+        },
+        "slug": {
+          "$ref": "#/$defs/concept_slug"
+        }
+      }
+    },
+    "update_concept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/concept_id"
+        },
+        "set": {
+          "$ref": "#/$defs/concept_update_set",
+          "minProperties": 1
+        },
+        "unset": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "manifestation_update_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "work_id": {
+          "$ref": "#/$defs/work_id"
+        },
+        "manifestation_type": {
+          "$ref": "#/$defs/manifestation_type"
+        },
+        "release_year": {
+          "$ref": "#/$defs/year"
+        },
+        "region_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language_code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "label": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "update_manifestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/manifestation_id"
+        },
+        "set": {
+          "$ref": "#/$defs/manifestation_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "release_year",
+              "region_code",
+              "language_code"
+            ]
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "set": {
+              "minProperties": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "unset": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "source_update_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_type": {
+          "$ref": "#/$defs/source_type"
+        },
+        "title": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "bibliography_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "author_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "publisher": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "publication_date": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "url": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "doi": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "isbn": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "language_code": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "source_unset_field": {
+      "type": "string",
+      "enum": [
+        "title",
+        "bibliography_text",
+        "author_text",
+        "publisher",
+        "publication_date",
+        "url",
+        "doi",
+        "isbn",
+        "language_code"
+      ]
+    },
+    "update_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "set": {
+          "$ref": "#/$defs/source_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/source_unset_field"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "set": {
+              "minProperties": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "unset": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "work_concept_update_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "centrality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "centrality_scale": {
+          "$ref": "#/$defs/reviewed_centrality_scale"
+        },
+        "historical_role": {
+          "$ref": "#/$defs/historical_role"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        }
+      }
+    },
+    "work_concept_unset_field": {
+      "type": "string",
+      "enum": [
+        "historical_role",
+        "confidence"
+      ]
+    },
+    "update_work_concept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "set": {
+          "$ref": "#/$defs/work_concept_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/work_concept_unset_field"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "set": {
+              "minProperties": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "unset": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "positive_id_array": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "ingest_issue_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batch_id",
+        "code",
+        "json_path"
+      ],
+      "properties": {
+        "batch_id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "code": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "json_path": {
+          "type": "string",
+          "pattern": "^/"
+        }
+      }
+    },
+    "delete_operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "names": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "external_ids": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "credits": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "work_memberships": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "agent_relations": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "events": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "measurements": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "financial_facts": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "evidence": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "work_concepts": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "concept_relations": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "parent_guide_assertions": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "ingest_issues": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ingest_issue_key"
+          }
+        }
+      }
+    },
+    "merge_operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/merge_agents"
+          }
+        },
+        "works": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/merge_works"
+          }
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/merge_concepts"
+          }
+        }
+      }
+    },
+    "agent_merge_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agent_type": {
+          "$ref": "#/$defs/agent_type"
+        },
+        "birth_year": {
+          "$ref": "#/$defs/year"
+        },
+        "death_year": {
+          "$ref": "#/$defs/year"
+        }
+      }
+    },
+    "merge_agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "members",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/agent_id"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/agent_id"
+          }
+        },
+        "set": {
+          "$ref": "#/$defs/agent_merge_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "birth_year",
+              "death_year"
+            ]
+          }
+        }
+      }
+    },
+    "merge_works": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "members",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/work_id"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/work_id"
+          }
+        },
+        "set": {
+          "$ref": "#/$defs/work_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/work_unset_field"
+          }
+        }
+      }
+    },
+    "merge_concepts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "members",
+        "set",
+        "unset"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/concept_id"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/concept_id"
+          }
+        },
+        "set": {
+          "$ref": "#/$defs/concept_update_set"
+        },
+        "unset": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    }
+  }
+}

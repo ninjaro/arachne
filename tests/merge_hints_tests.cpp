@@ -21,7 +21,7 @@ json input(std::initializer_list<json> entities) {
         { "artifact_type", "merge_hint_input_v1" },
         { "format_version", 1 },
         { "product_snapshot",
-          { { "schema_version", 6 }, { "sha256", std::string(64, 'a') } } },
+          { { "sha256", std::string(64, 'a') } } },
         { "decisions_snapshot",
           { { "sha256", std::string(64, 'b') },
             { "ignored_pair_count", 0 } } },
@@ -41,12 +41,23 @@ json agent(
     std::string id, std::string name, json credits = json::array(),
     json identifiers = json::array()
 ) {
+    for (auto& credit : credits) {
+        if (!credit.contains("role")) {
+            credit["role"] = "artist";
+        }
+        if (!credit.contains("importance")) {
+            credit["importance"] = "primary";
+        }
+    }
     return {
         { "id", std::move(id) },
         { "family", "agent" },
         { "labels", json::array({ label(std::move(name)) }) },
         { "external_ids", std::move(identifiers) },
-        { "agent", { { "credits", std::move(credits) } } },
+        { "agent",
+          { { "agent_type", "person" },
+            { "credits", std::move(credits) },
+            { "relations", json::array() } } },
     };
 }
 
@@ -55,11 +66,22 @@ json work(
     json identifiers = json::array(), json measurements = json::array(),
     std::optional<int> year = std::nullopt
 ) {
+    for (auto& credit : credits) {
+        if (!credit.contains("role")) {
+            credit["role"] = "artist";
+        }
+        if (!credit.contains("importance")) {
+            credit["importance"] = "primary";
+        }
+    }
     json payload {
         { "medium", "film" },
         { "credits", std::move(credits) },
         { "concept_ids", json::array() },
         { "measurements", std::move(measurements) },
+        { "memberships", json::array() },
+        { "events", json::array() },
+        { "manifestations", json::array() },
     };
     if (year) {
         payload["year_start"] = *year;
@@ -196,6 +218,23 @@ TEST(AriadneMergeHints, StrictSubsetDoesNotBecomePerfectTextSimilarity) {
     EXPECT_FALSE(value.at("strong_identity"));
 }
 
+TEST(AriadneMergeHints, SymbolOnlyPreferredLabelUsesTextualAliasForMatching) {
+    auto left = work("work-000001", "****");
+    left["labels"].push_back(label("Four Stars", false));
+    const auto projection = arachne::ariadne::merge_hint_planner::build(input({
+        std::move(left),
+        work("work-000002", "Four Stars"),
+    }));
+    const auto value = candidate(
+        projection, "work", "work-000001", "work-000002"
+    );
+
+    EXPECT_EQ(value.at("left_label"), "****");
+    EXPECT_EQ(value.at("signals").at("ordered_left"), "four stars");
+    EXPECT_EQ(value.at("signals").at("ordered_right"), "four stars");
+    EXPECT_EQ(value.at("text_basis_points"), 10'000);
+}
+
 TEST(AriadneMergeHints, InstallmentPartitionsSuppressDifferentSequels) {
     const json credit = {
         { "agent_id", "agent-000001" },
@@ -292,6 +331,7 @@ TEST(AriadneMergeHints, ConceptProvenanceCorroboratesNearSpelling) {
     const json assertion = {
         { "work_id", "work-000001" },
         { "relation_type", "contains" },
+        { "centrality_scale", "none" },
         { "evidence_ids", json::array({ "evidence-42" }) },
         { "source_ids", json::array({ "source-7" }) },
     };
@@ -312,6 +352,97 @@ TEST(AriadneMergeHints, ConceptProvenanceCorroboratesNearSpelling) {
     EXPECT_TRUE(has_support(value, "matching_assertion_source"));
     EXPECT_TRUE(value.at("strong_identity"));
     EXPECT_TRUE(value.at("selected"));
+}
+
+TEST(AriadneMergeHints, RejectsUnknownPairLevelCentralityScale) {
+    const json assertion = {
+        { "work_id", "work-000001" },
+        { "relation_type", "contains" },
+        { "centrality", 75 },
+        { "centrality_scale", "continuous" },
+        { "evidence_ids", json::array() },
+        { "source_ids", json::array() },
+    };
+    const auto source = input({ concept_entity(
+        "concept-000001", "Scale validation", json::array({ assertion })
+    ) });
+
+    EXPECT_THROW(
+        static_cast<void>(
+            arachne::ariadne::merge_hint_planner::build(source)
+        ),
+        std::invalid_argument
+    );
+}
+
+TEST(AriadneMergeHints, RejectsUnknownCurrentProductEnums) {
+    const auto rejects = [](json source) {
+        EXPECT_THROW(
+            static_cast<void>(
+                arachne::ariadne::merge_hint_planner::build(source)
+            ),
+            std::invalid_argument
+        );
+    };
+
+    auto invalid_agent = input({ agent("agent-000001", "Invalid agent") });
+    invalid_agent["entities"][0]["agent"]["agent_type"] = "studio";
+    rejects(std::move(invalid_agent));
+
+    auto invalid_concept = input(
+        { concept_entity("concept-000001", "Invalid concept") }
+    );
+    invalid_concept["entities"][0]["concept"]["concept_type"] = "category";
+    rejects(std::move(invalid_concept));
+
+    auto invalid_role = input({ work(
+        "work-000001", "Invalid role",
+        json::array(
+            { { { "agent_id", "agent-000001" },
+                { "role", "studio" },
+                { "importance", "primary" } } }
+        )
+    ) });
+    rejects(std::move(invalid_role));
+
+    auto invalid_importance = input({ work(
+        "work-000001", "Invalid importance",
+        json::array(
+            { { { "agent_id", "agent-000001" },
+                { "role", "artist" },
+                { "importance", "featured" } } }
+        )
+    ) });
+    rejects(std::move(invalid_importance));
+
+    json invalid_assertion {
+        { "work_id", "work-000001" },
+        { "relation_type", "about" },
+        { "centrality_scale", "none" },
+        { "evidence_ids", json::array() },
+        { "source_ids", json::array() },
+    };
+    rejects(input({ concept_entity(
+        "concept-000001", "Invalid relation",
+        json::array({ invalid_assertion })
+    ) }));
+
+    invalid_assertion["relation_type"] = "contains";
+    invalid_assertion["historical_role"] = "established";
+    rejects(input({ concept_entity(
+        "concept-000001", "Invalid historical role",
+        json::array({ invalid_assertion })
+    ) }));
+
+    rejects(input({ work(
+        "work-000001", "Invalid measurement", json::array(), json::array(),
+        json::array(
+            { { { "type", "weight" },
+                { "value", 2.0 },
+                { "unit", "millimetres" },
+                { "qualifier", nullptr } } }
+        )
+    ) }));
 }
 
 TEST(AriadneMergeHints, TrustedExternalIdentifiersApplyToEveryFamily) {

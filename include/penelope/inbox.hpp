@@ -52,20 +52,25 @@ public:
 };
 
 /**
- * Validate every plain-JSON batch under `<repository_root>/inbox`.
+ * Validate every plain-JSON batch under `<source_root>/inbox` against the
+ * canonical database under `<state_root>/database`.
  *
  * The database is opened read-only. No issue rows, hints, files, or product
  * records are modified.
  */
-[[nodiscard]] inbox_result
-check_product_inbox(const std::filesystem::path& repository_root);
+[[nodiscard]] inbox_result check_product_inbox(
+    const std::filesystem::path& source_root,
+    const std::filesystem::path& state_root
+);
 
 /**
  * Validate every pending batch first, then apply valid batches directly to the
- * schema-v6 product database, one BEGIN IMMEDIATE transaction per batch.
+ * current product database, one BEGIN IMMEDIATE transaction per batch.
  */
-[[nodiscard]] inbox_result
-apply_product_inbox(const std::filesystem::path& repository_root);
+[[nodiscard]] inbox_result apply_product_inbox(
+    const std::filesystem::path& source_root,
+    const std::filesystem::path& state_root
+);
 
 [[nodiscard]] const char* to_string(inbox_batch_status status) noexcept;
 

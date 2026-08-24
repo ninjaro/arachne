@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ MAX_CONTROL_BYTES = 1024 * 1024
 SNAPSHOT_FILES = {
     "graph.sqlite",
     "product.jsonl",
-    "snapshot-control.json",
+    "metadata.json",
     "structural-validation.json",
 }
 
@@ -112,6 +113,25 @@ def write_new_json(path: Path, document: dict[str, Any]) -> None:
         os.fsync(stream.fileno())
 
 
+def replace_json(path: Path, document: dict[str, Any]) -> None:
+    if path.is_symlink():
+        raise SnapshotError(f"output control must not be a symbolic link: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(document, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def read_json(path: Path, description: str) -> dict[str, Any]:
     try:
         if path.is_symlink() or not path.is_file():
@@ -164,7 +184,7 @@ def verify_existing_snapshot(
         raise SnapshotError(
             "existing local product snapshot has an unexpected artifact set"
         )
-    control = read_json(snapshot / "snapshot-control.json", "snapshot control")
+    control = read_json(snapshot / "metadata.json", "snapshot control")
     required = {
         "contract",
         "format_version",
@@ -185,7 +205,7 @@ def verify_existing_snapshot(
         or control.get("format_version") != 1
         or control.get("snapshot_id") != snapshot_id
         or control.get("run_id") != f"product-materialize-{database_hash[:16]}"
-        or control.get("graph_version") != "canonical-schema-v6"
+        or control.get("graph_version") != "canonical-product-schema"
         or control.get("content_sha256") != database_hash
         or not valid_timestamp(control.get("activated_at"))
         or control.get("extensions")
@@ -232,10 +252,12 @@ def verify_existing_snapshot(
     )
     if (
         report.get("status") != "clean"
-        or report.get("schemaVersion") != 6
         or report.get("integrityCheck") != ["ok"]
         or report.get("foreignKeyErrors") != []
         or report.get("disposableTables") != []
+        or report.get("missingSchemaObjects") != []
+        or report.get("unexpectedSchemaObjects") != []
+        or report.get("driftedSchemaObjects") != []
     ):
         raise SnapshotError("existing structural validation report is not clean")
     try:
@@ -259,6 +281,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--database", type=Path, required=True)
     result.add_argument("--graph-store", type=Path, required=True)
     result.add_argument("--output-control", type=Path, required=True)
+    result.add_argument("--replace-output-control", action="store_true")
     return result
 
 
@@ -281,7 +304,7 @@ def main() -> int:
     graph_store = graph_store_argument.resolve(strict=True)
 
     output = arguments.output_control.expanduser().absolute()
-    if output.exists() or output.is_symlink():
+    if (output.exists() or output.is_symlink()) and not arguments.replace_output_control:
         raise SnapshotError(f"output control already exists: {output}")
 
     validation_bytes = run_checked(
@@ -324,7 +347,7 @@ def main() -> int:
             staged_database = staging / database_path.name
             staged_export = staging / export_path.name
             staged_report = staging / report_path.name
-            staged_control = staging / "snapshot-control.json"
+            staged_control = staging / "metadata.json"
             shutil.copyfile(database, staged_database)
             if sha256_file(staged_database) != database_hash:
                 raise SnapshotError(
@@ -333,11 +356,9 @@ def main() -> int:
             run_checked(
                 [
                     sys.executable,
-                    ROOT / "viewer" / "scripts" / "build_catalog.py",
+                    ROOT / "scripts" / "export_product_jsonl.py",
                     staged_database,
-                    "--product-export",
                     staged_export,
-                    "--export-only",
                 ],
                 "generic product JSONL export",
             )
@@ -358,7 +379,7 @@ def main() -> int:
                 "format_version": 1,
                 "snapshot_id": snapshot_id,
                 "run_id": f"product-materialize-{database_hash[:16]}",
-                "graph_version": "canonical-schema-v6",
+                "graph_version": "canonical-product-schema",
                 "content_sha256": database_hash,
                 "database": artifact(
                     staged_database,
@@ -409,7 +430,10 @@ def main() -> int:
     reject_sqlite_sidecars(database)
     if sha256_file(database) != database_hash:
         raise SnapshotError("canonical product database changed during materialization")
-    write_new_json(output, control)
+    if arguments.replace_output_control:
+        replace_json(output, control)
+    else:
+        write_new_json(output, control)
     print(output)
     return 0
 

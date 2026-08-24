@@ -81,6 +81,7 @@ struct assertion_record final {
     std::string work_id;
     std::string relation_type;
     std::optional<int> centrality;
+    std::optional<std::string> centrality_scale;
     std::set<std::string, std::less<>> evidence_ids;
     std::set<std::string, std::less<>> source_ids;
 };
@@ -651,9 +652,6 @@ template <typename T>
         result.preferred = preferred->get<bool>();
     }
     result.normalized = normalize_text(result.value);
-    if (result.normalized.ordered.empty()) {
-        invalid(std::string(context) + ".value has no normalized text");
-    }
     result.parsed_installment = parse_installment(result.normalized);
     return result;
 }
@@ -680,9 +678,27 @@ template <typename T>
     } else {
         result.peer_id = required_string(value, "agent_id", context);
     }
-    result.role = value.value("role", "");
+    static const std::set<std::string, std::less<>> roles {
+        "author", "director", "screenwriter", "producer", "actor",
+        "composer", "performer", "artist", "engraver", "sculptor",
+        "photographer", "editor", "cinematographer", "production_company",
+        "publisher", "record_label", "band", "distributor", "broadcaster",
+        "platform", "translator", "illustrator", "printer", "curator",
+        "choreographer", "narrator", "lyricist", "songwriter", "arranger",
+        "sound_engineer", "designer", "animator"
+    };
+    result.role = required_string(value, "role", context);
+    if (!roles.contains(result.role)) {
+        invalid(std::string(context) + ".role is invalid");
+    }
     result.normalized_role = normalized_role(result.role);
-    result.importance = value.value("importance", "supporting");
+    static const std::set<std::string, std::less<>> importance_values {
+        "primary", "key", "supporting"
+    };
+    result.importance = required_string(value, "importance", context);
+    if (!importance_values.contains(result.importance)) {
+        invalid(std::string(context) + ".importance is invalid");
+    }
     result.credit_order = optional_integer<int>(
         value, "credit_order", context
     );
@@ -707,6 +723,18 @@ template <typename T>
     measurement_record result;
     result.type = required_string(value, "type", context);
     result.unit = required_string(value, "unit", context);
+    static const std::set<std::string, std::less<>> measurement_types {
+        "duration", "height", "width", "depth", "pages"
+    };
+    static const std::set<std::string, std::less<>> measurement_units {
+        "seconds", "millimetres", "pages"
+    };
+    if (!measurement_types.contains(result.type)) {
+        invalid(std::string(context) + ".type is invalid");
+    }
+    if (!measurement_units.contains(result.unit)) {
+        invalid(std::string(context) + ".unit is invalid");
+    }
     const auto number = value.find("value");
     if (number == value.end() || !number->is_number()
         || (number->is_number_float()
@@ -724,20 +752,209 @@ template <typename T>
     return result;
 }
 
+void validate_nullable_string(
+    const json& value, const std::string_view field,
+    const std::string_view context
+) {
+    const auto found = value.find(field);
+    if (found != value.end() && !found->is_null()
+        && (!found->is_string()
+            || found->get_ref<const std::string&>().empty())) {
+        invalid(
+            std::string(context) + "." + std::string(field)
+            + " must be a non-empty string or null"
+        );
+    }
+}
+
+void validate_event_metadata(
+    const json& value, const std::string_view context
+) {
+    require_only_fields(
+        value,
+        { "id", "event_type", "year_start", "year_end", "date_text",
+          "date_precision", "place_text" },
+        context
+    );
+    static const std::set<std::string, std::less<>> event_types {
+        "created", "published", "released", "premiered", "broadcast",
+        "performed", "exhibited", "recorded"
+    };
+    static const std::set<std::string, std::less<>> precisions {
+        "year", "month", "exact", "decade", "approximate", "range"
+    };
+    if (!value.contains("id") || !value.at("id").is_number_integer()
+        || value.at("id").get<long long>() <= 0) {
+        invalid(std::string(context) + ".id must be a positive integer");
+    }
+    const auto type = required_string(value, "event_type", context);
+    if (!event_types.contains(type)) {
+        invalid(std::string(context) + ".event_type is invalid");
+    }
+    const auto from = optional_integer<int>(value, "year_start", context);
+    const auto to = optional_integer<int>(value, "year_end", context);
+    if (from && to && *to < *from) {
+        invalid(std::string(context) + ".year_end precedes year_start");
+    }
+    validate_nullable_string(value, "date_text", context);
+    validate_nullable_string(value, "place_text", context);
+    if (const auto precision = value.find("date_precision");
+        precision != value.end() && !precision->is_null()
+        && (!precision->is_string()
+            || !precisions.contains(precision->get<std::string>()))) {
+        invalid(std::string(context) + ".date_precision is invalid");
+    }
+}
+
+void validate_membership_metadata(
+    const json& value, const std::string_view context
+) {
+    require_only_fields(
+        value,
+        { "direction", "work_id", "membership_type", "position",
+          "position_text" },
+        context
+    );
+    const auto direction = required_string(value, "direction", context);
+    if (direction != "incoming" && direction != "outgoing") {
+        invalid(std::string(context) + ".direction is invalid");
+    }
+    static const std::set<std::string, std::less<>> membership_types {
+        "episode_of", "season_of", "track_of", "volume_of", "issue_of",
+        "chapter_of", "part_of", "collected_in"
+    };
+    if (!membership_types.contains(
+            required_string(value, "membership_type", context)
+        )) {
+        invalid(std::string(context) + ".membership_type is invalid");
+    }
+    static_cast<void>(required_string(value, "work_id", context));
+    const auto position = optional_integer<int>(value, "position", context);
+    if (position && *position < 0) {
+        invalid(std::string(context) + ".position must be non-negative");
+    }
+    validate_nullable_string(value, "position_text", context);
+}
+
+void validate_agent_relation_metadata(
+    const json& value, const std::string_view context
+) {
+    require_only_fields(
+        value,
+        { "direction", "agent_id", "relation_type", "from_year",
+          "to_year", "period_text", "role_text" },
+        context
+    );
+    const auto direction = required_string(value, "direction", context);
+    if (direction != "incoming" && direction != "outgoing") {
+        invalid(std::string(context) + ".direction is invalid");
+    }
+    static const std::set<std::string, std::less<>> relation_types {
+        "member_of", "founder_of", "subsidiary_of", "division_of",
+        "imprint_of", "owned_by", "successor_of", "predecessor_of"
+    };
+    if (!relation_types.contains(
+            required_string(value, "relation_type", context)
+        )) {
+        invalid(std::string(context) + ".relation_type is invalid");
+    }
+    static_cast<void>(required_string(value, "agent_id", context));
+    const auto from = optional_integer<int>(value, "from_year", context);
+    const auto to = optional_integer<int>(value, "to_year", context);
+    if (from && to && *to < *from) {
+        invalid(std::string(context) + ".to_year precedes from_year");
+    }
+    validate_nullable_string(value, "period_text", context);
+    validate_nullable_string(value, "role_text", context);
+}
+
+void validate_manifestation_metadata(
+    const json& value, const std::string_view context
+) {
+    require_only_fields(
+        value,
+        { "entity_id", "manifestation_type", "release_year", "region_code",
+          "language_code", "label", "credits", "events" },
+        context
+    );
+    static_cast<void>(required_string(value, "entity_id", context));
+    static const std::set<std::string, std::less<>> types {
+        "edition", "translation", "release", "pressing", "cut",
+        "restoration", "reissue"
+    };
+    if (!types.contains(required_string(value, "manifestation_type", context))) {
+        invalid(std::string(context) + ".manifestation_type is invalid");
+    }
+    static_cast<void>(optional_integer<int>(value, "release_year", context));
+    for (const auto* field : { "region_code", "language_code", "label" }) {
+        validate_nullable_string(value, field, context);
+    }
+    const auto credits = value.find("credits");
+    if (credits == value.end() || !credits->is_array()) {
+        invalid(std::string(context) + ".credits must be an array");
+    }
+    for (std::size_t index = 0; index < credits->size(); ++index) {
+        static_cast<void>(parse_credit(
+            credits->at(index), "work",
+            std::string(context) + ".credits[" + std::to_string(index) + "]"
+        ));
+    }
+    const auto events = value.find("events");
+    if (events == value.end() || !events->is_array()) {
+        invalid(std::string(context) + ".events must be an array");
+    }
+    for (std::size_t index = 0; index < events->size(); ++index) {
+        validate_event_metadata(
+            events->at(index),
+            std::string(context) + ".events[" + std::to_string(index) + "]"
+        );
+    }
+}
+
 [[nodiscard]] assertion_record parse_assertion(
     const json& value, const std::string_view context
 ) {
     require_only_fields(
         value,
         { "work_id", "relation_type", "centrality", "evidence_ids",
-          "source_ids", "confidence", "historical_role", "evidence" },
+          "source_ids", "confidence", "historical_role", "evidence",
+          "centrality_scale" },
         context
     );
+    static const std::set<std::string, std::less<>> relation_types {
+        "exemplifies", "contains", "anticipates", "influenced_by",
+        "influences", "revives", "parodies", "deconstructs",
+        "associated_with"
+    };
+    const std::string relation_type
+        = required_string(value, "relation_type", context);
+    if (!relation_types.contains(relation_type)) {
+        invalid(std::string(context) + ".relation_type is invalid");
+    }
     const auto centrality = optional_integer<int>(
         value, "centrality", context
     );
     if (centrality && (*centrality < 1 || *centrality > 100)) {
         invalid(std::string(context) + ".centrality must be between 1 and 100");
+    }
+    std::optional<std::string> centrality_scale;
+    if (const auto scale = value.find("centrality_scale");
+        scale != value.end() && !scale->is_null()) {
+        if (!scale->is_string()) {
+            invalid(
+                std::string(context) + ".centrality_scale must be a string"
+            );
+        }
+        const std::string candidate = scale->get<std::string>();
+        if (candidate != "none" && candidate != "binary"
+            && candidate != "ordinal" && candidate != "graded") {
+            invalid(
+                std::string(context) + ".centrality_scale is invalid"
+            );
+        }
+        centrality_scale = candidate;
+    } else {
+        invalid(std::string(context) + ".centrality_scale is required");
     }
     if (const auto confidence = value.find("confidence");
         confidence != value.end() && !confidence->is_null()
@@ -750,13 +967,15 @@ template <typename T>
         );
     }
     if (const auto role = value.find("historical_role");
-        role != value.end() && !role->is_null()
-        && (!role->is_string()
-            || role->get_ref<const std::string&>().empty())) {
-        invalid(
-            std::string(context)
-            + ".historical_role must be null or a non-empty string"
-        );
+        role != value.end() && !role->is_null()) {
+        static const std::set<std::string, std::less<>> historical_roles {
+            "formative", "canonical", "transitional", "hybrid", "revival",
+            "late_derivative", "peripheral", "precursor"
+        };
+        if (!role->is_string()
+            || !historical_roles.contains(role->get<std::string>())) {
+            invalid(std::string(context) + ".historical_role is invalid");
+        }
     }
     if (const auto evidence = value.find("evidence");
         evidence != value.end()) {
@@ -787,8 +1006,9 @@ template <typename T>
     }
     return {
         .work_id = required_string(value, "work_id", context),
-        .relation_type = value.value("relation_type", ""),
+        .relation_type = relation_type,
         .centrality = centrality,
+        .centrality_scale = std::move(centrality_scale),
         .evidence_ids = string_array(value, "evidence_ids", context),
         .source_ids = string_array(value, "source_ids", context),
     };
@@ -914,7 +1134,9 @@ template <typename T>
     }
     if (result.family == "agent") {
         require_only_fields(
-            *payload, { "agent_type", "birth_year", "death_year", "credits" },
+            *payload,
+            { "agent_type", "birth_year", "death_year", "credits",
+              "relations" },
             context + ".agent"
         );
         result.birth_year = optional_integer<int>(
@@ -923,15 +1145,34 @@ template <typename T>
         result.death_year = optional_integer<int>(
             *payload, "death_year", context + ".agent"
         );
+        static const std::set<std::string, std::less<>> agent_types {
+            "person", "organization", "group"
+        };
+        const std::string agent_type
+            = required_string(*payload, "agent_type", context + ".agent");
+        if (!agent_types.contains(agent_type)) {
+            invalid(context + ".agent.agent_type is invalid");
+        }
     } else if (result.family == "work") {
         require_only_fields(
             *payload,
             { "medium", "year_start", "year_end", "date_precision", "credits",
               "date_start_text", "date_end_text", "date_qualifier",
-              "concept_ids", "measurements" },
+              "concept_ids", "measurements", "memberships", "events",
+              "manifestations" },
             context + ".work"
         );
         result.medium = payload->value("medium", "");
+        static const std::set<std::string, std::less<>> media {
+            "film", "short_film", "television", "novel", "novella",
+            "short_story", "poetry", "play", "essay", "album", "single",
+            "composition", "painting", "print", "engraving", "drawing",
+            "sculpture", "installation", "photography", "mixed_media",
+            "nonfiction", "comic", "performance"
+        };
+        if (!media.contains(result.medium)) {
+            invalid(context + ".work.medium is invalid");
+        }
         result.year_start = optional_integer<int>(
             *payload, "year_start", context + ".work"
         );
@@ -944,6 +1185,12 @@ template <typename T>
                 invalid(context + ".work.date_precision must be a string or null");
             }
             result.date_precision = precision->get<std::string>();
+            static const std::set<std::string, std::less<>> precisions {
+                "year", "month", "exact", "decade", "approximate", "range"
+            };
+            if (!precisions.contains(result.date_precision)) {
+                invalid(context + ".work.date_precision is invalid");
+            }
         }
         result.concept_ids = string_array(
             *payload, "concept_ids", context + ".work"
@@ -954,7 +1201,16 @@ template <typename T>
             { "concept_type", "assertions", "neighbors" },
             context + ".concept"
         );
-        result.concept_type = payload->value("concept_type", "");
+        static const std::set<std::string, std::less<>> concept_types {
+            "genre", "style", "theme", "keyword", "motif", "trope",
+            "phobia", "taboo", "technique", "movement", "setting", "mood",
+            "content_warning"
+        };
+        result.concept_type
+            = required_string(*payload, "concept_type", context + ".concept");
+        if (!concept_types.contains(result.concept_type)) {
+            invalid(context + ".concept.concept_type is invalid");
+        }
     }
 
     if (result.family == "agent" || result.family == "work") {
@@ -987,7 +1243,49 @@ template <typename T>
             });
         }
     }
+    if (result.family == "agent") {
+        const auto relations = payload->find("relations");
+        if (relations == payload->end() || !relations->is_array()) {
+            invalid(context + ".agent.relations must be an array");
+        }
+        for (std::size_t index = 0; index < relations->size(); ++index) {
+            validate_agent_relation_metadata(
+                relations->at(index), context + ".agent.relations["
+                    + std::to_string(index) + "]"
+            );
+        }
+    }
     if (result.family == "work") {
+        const auto memberships = payload->find("memberships");
+        if (memberships == payload->end() || !memberships->is_array()) {
+            invalid(context + ".work.memberships must be an array");
+        }
+        for (std::size_t index = 0; index < memberships->size(); ++index) {
+            validate_membership_metadata(
+                memberships->at(index), context + ".work.memberships["
+                    + std::to_string(index) + "]"
+            );
+        }
+        const auto events = payload->find("events");
+        if (events == payload->end() || !events->is_array()) {
+            invalid(context + ".work.events must be an array");
+        }
+        for (std::size_t index = 0; index < events->size(); ++index) {
+            validate_event_metadata(
+                events->at(index), context + ".work.events["
+                    + std::to_string(index) + "]"
+            );
+        }
+        const auto manifestations = payload->find("manifestations");
+        if (manifestations == payload->end() || !manifestations->is_array()) {
+            invalid(context + ".work.manifestations must be an array");
+        }
+        for (std::size_t index = 0; index < manifestations->size(); ++index) {
+            validate_manifestation_metadata(
+                manifestations->at(index), context + ".work.manifestations["
+                    + std::to_string(index) + "]"
+            );
+        }
         if (const auto measurements = payload->find("measurements");
             measurements != payload->end()) {
             if (!measurements->is_array()) {
@@ -1074,13 +1372,8 @@ struct parsed_input final {
         invalid("root.product_snapshot is required");
     }
     require_only_fields(
-        *snapshot, { "schema_version", "sha256" }, "product_snapshot"
+        *snapshot, { "sha256" }, "product_snapshot"
     );
-    if (!snapshot->contains("schema_version")
-        || !snapshot->at("schema_version").is_number_integer()
-        || snapshot->at("schema_version").get<int>() <= 0) {
-        invalid("product_snapshot.schema_version must be positive");
-    }
     const std::string sha256 = required_string(
         *snapshot, "sha256", "product_snapshot"
     );
@@ -1106,7 +1399,6 @@ struct parsed_input final {
     }
     parsed_input result {
         .product_snapshot = json {
-            { "schema_version", snapshot->at("schema_version") },
             { "sha256", sha256 },
         },
         .decisions_snapshot = json {
@@ -1336,6 +1628,10 @@ template <typename T>
         for (const auto& right_label : right.labels) {
             const auto& left_text = left_label.normalized;
             const auto& right_text = right_label.normalized;
+            if (left_text.folded_ordered.empty()
+                || right_text.folded_ordered.empty()) {
+                continue;
+            }
             const bool exact_ordered
                 = left_text.ordered == right_text.ordered;
             const bool exact_folded
@@ -1436,6 +1732,9 @@ build_blocks(const std::vector<entity_record>& entities) {
     std::map<block_key, std::set<std::string, std::less<>>, std::less<>> blocks;
     for (const auto& entity : entities) {
         for (const auto& label : entity.labels) {
+            if (label.normalized.folded_ordered.empty()) {
+                continue;
+            }
             const std::string partition = installment_partition(label);
             const std::string token_key = label_block_value(label);
             add_block(blocks, entity, "label_token_fingerprint", token_key);
@@ -1602,6 +1901,9 @@ using label_frequency_map = std::map<
         std::set<std::string, std::less<>>, std::less<>> members;
     for (const auto& entity : entities) {
         for (const auto& label : entity.labels) {
+            if (label.normalized.folded_ordered.empty()) {
+                continue;
+            }
             members[{ entity.family, label.normalized.folded_ordered }]
                 .emplace(entity.id);
         }
@@ -2739,9 +3041,7 @@ json merge_hint_planner::export_review(const json& projection) {
         { "artifactType", merge_hint_review_contract },
         { "formatVersion", 1 },
         { "source",
-          { { "schemaVersion",
-              projection.at("product_snapshot").at("schema_version") },
-            { "productSha256",
+          { { "productSha256",
               projection.at("product_snapshot").at("sha256") },
             { "generatorVersion",
               projection.at("generator").at("version") },

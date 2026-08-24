@@ -1,4 +1,4 @@
-name: Deploy
+name: Documentation and coverage
 
 on:
   push:
@@ -8,9 +8,6 @@ on:
       - 'src/**/*.cpp'
       - 'include/**/*.hpp'
       - 'tests/**'
-      - 'scripts/patch_doxygen_pages.py'
-      - 'viewer/**'
-      - 'database/art-islands.sqlite'
       - 'docs/**'
       - 'readme.md'
       - 'Doxyfile'
@@ -20,11 +17,9 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: arachne-documentation
   cancel-in-progress: true
 
 jobs:
@@ -32,16 +27,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - uses: MarkusJx/googletest-installer@28c5d4102d9d57b46254be19a940bf038a9c850a
       - uses: ssciwr/doxygen-install@501e53b879da7648ab392ee226f5b90e42148449
         with:
           version: "1.15.0"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: viewer/package-lock.json
 
       - name: Install documentation and build dependencies
         run: |
@@ -80,6 +69,7 @@ jobs:
             -format=html \
             -output-dir=cov \
             -ignore-filename-regex='/(tests|build-coverage|usr)/'
+
       - name: Upload results to Codecov
         if: ${{ hashFiles('build/coverage.info') != '' }}
         uses: codecov/codecov-action@9b6d1f84bde660b0f784003009b1f0aa4663cdeb
@@ -89,44 +79,17 @@ jobs:
           fail_ci_if_error: false
           use_oidc: true
           token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Build static viewer
-        working-directory: viewer
-        env:
-          ARACHNE_VIEWER_BASE: /${{ github.event.repository.name }}/viewer/
-          ARACHNE_BINARY: ../build-coverage/arachne
-        run: |
-          npm ci
-          npm run data
-          npm run build
-          npm run test:static
 
-      - name: Install viewer into Pages site
-        run: |
-          rm -rf doc/viewer
-          mkdir -p doc/viewer
-          cp -a viewer/dist/. doc/viewer/
-
-      - name: Install coverage report
+      - name: Bundle code documentation and coverage
         run: |
           test -f cov/index.html
-          rm -rf doc/cov
-          cp -a cov doc/cov
+          mkdir -p doc/cov
+          cp -a cov/. doc/cov/
 
-      - name: Link standalone sites from Doxygen
-        run: python3 scripts/patch_doxygen_pages.py doc
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+      - name: Upload documentation artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          name: arachne-code-documentation
           path: doc
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+          if-no-files-found: error
+          retention-days: 14

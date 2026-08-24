@@ -11,7 +11,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGER = ROOT / "viewer" / "scripts" / "stage_image_hints.py"
+STAGER = ROOT / "scripts" / "stage_image_hints.py"
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
@@ -111,23 +111,6 @@ class StageImageHintsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("product identity mismatch", result.stderr)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "previous\n")
-
-    def test_local_catalog_mode_checks_the_database_content_hash(self) -> None:
-        catalog = self.root / "catalog.json"
-        catalog.write_text(
-            json.dumps({"databaseSha256": SHA_A}) + "\n",
-            encoding="utf-8",
-        )
-
-        result = self.run_stager(
-            str(self.artifact),
-            str(self.output),
-            "--catalog",
-            str(catalog),
-        )
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.output.read_bytes(), self.artifact.read_bytes())
 
     def test_state_root_accepts_only_confined_relative_artifact_paths(self) -> None:
         state = self.root / "state"
