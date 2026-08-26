@@ -28,6 +28,7 @@ CONTROL_CONTRACTS = (
 
 ARTIFACT_FORMATS = (
     "external_candidate_source_graph_v1",
+    "external_enrichment_review_v1",
     "wikidata_image_hints_v1",
     "research_candidate_graph_materialization_v1",
 )

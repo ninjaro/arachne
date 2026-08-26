@@ -135,7 +135,7 @@ structurally valid batch is not replayed.
 The current schema stores readable `agent-*`, `work-*`, `concept-*`, and
 `manifestation-*` IDs. Internal and relationship rows use integer primary keys
 with natural uniqueness constraints. It has no redirect, canonical-ID alias,
-source-URL alias, remote-asset, source-archive, or legacy-ID mapping tables.
+source-URL alias, source-archive, or legacy-ID mapping tables.
 It also has no merge-hint candidates, blocks, or block memberships. A normal
 batch transaction never performs similarity calculations or hint maintenance.
 
@@ -244,9 +244,35 @@ worker hash-verifies the source receipt and product export, derives coverage, an
 emits `external_candidate_source_graph_v1`. Its first existing dump pass also
 derives the separate, bounded `wikidata_image_hints_v1` Commons-filename cache
 for product works and agents. Image targets never enter work-only coverage and
-neither image hints nor image data enter the canonical database. Point requests
-are reserved for bounded enrichment or repair. A failed fresh acquisition cannot
-be relabelled as a fresh rebuild using old cache data.
+disposable image suggestions never become product data automatically. After
+human review, a normal product batch may store a provider reference, URL, and
+rights metadata in `remote_assets`; media bytes are never canonical. Point
+requests are reserved for bounded enrichment or repair. A failed fresh
+acquisition cannot be relabelled as a fresh rebuild using old cache data.
+
+Point enrichment follows the same ownership boundary and is staged uniformly
+across the eligible product rather than ranked by popularity:
+
+1. Existing Wikidata QIDs request multilingual profiles and general claims;
+   the QID remains an identity candidate and is checked against canonical
+   names, types, dates, identifiers, and nearby relations.
+2. Entities without a QID produce discovery requests from names in every
+   available language/script and from external-ID schemes the adapter can map.
+   Ambiguous search results remain separate candidates.
+3. Every discovered candidate QID enters the detail follow-up, so comparison
+   uses full profiles rather than accepting a search label or dropping a tail.
+4. When `wikidata_image_hints_v1` is supplied, its P18/P154/P3383 filenames
+   produce optional Commons `imageinfo` requests for links, dimensions, MIME,
+   and rights metadata. Image bytes are never requested.
+5. Verified request controls, acquisition receipts, and response payloads are
+   correlated into a disposable `wikidata_response_bundle_v1`. The Wikidata
+   adapter normalizes that bundle; Ariadne then emits the snapshot-bound
+   `external_enrichment_review_v1` with identity signals and field, relation,
+   media, conflict, and unmapped-value records.
+
+The adapter performs no transport and writes no Penelope state. Both the bundle
+and review are mining inputs only. Any accepted identifier, metadata, relation,
+or remote-asset link still arrives through a human-reviewed `arachne_batch`.
 
 Ariadne owns product catalog, research, and taste projection semantics.
 The native CLI can write a physical report, inspect a work or agent, or produce

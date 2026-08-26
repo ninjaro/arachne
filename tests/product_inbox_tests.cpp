@@ -485,6 +485,30 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
                   { "source_type", "book" },
                   { "isbn", "9780000000001" } } }
           ) },
+        { "remote_assets",
+          json::array(
+              { { { "entity_id", "w" },
+                  { "provider", "wikimedia_commons" },
+                  { "remote_key", "File:Example Work.jpg" },
+                  { "media_kind", "image" },
+                  { "direct_url",
+                    "https://upload.wikimedia.org/example/Example_Work.jpg" },
+                  { "source_page_url",
+                    "https://commons.wikimedia.org/wiki/File:Example_Work.jpg" },
+                  { "origin_provider", "wikidata" },
+                  { "origin_entity_id", "Q1" },
+                  { "origin_property", "P18" },
+                  { "mime_type", "image/jpeg" },
+                  { "width_pixels", 1200 },
+                  { "height_pixels", 800 },
+                  { "license_id", "CC-BY-4.0" },
+                  { "license_name", "Creative Commons Attribution 4.0" },
+                  { "license_url",
+                    "https://creativecommons.org/licenses/by/4.0/" },
+                  { "attribution_text", "Example Photographer" },
+                  { "rights_status", "licensed" },
+                  { "display_allowed", true } } }
+          ) },
         { "evidence",
           json::array(
               { { { "local_id", "e" },
@@ -534,6 +558,11 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
         3
     );
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 1);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM remote_assets"), 1);
+    EXPECT_EQ(
+        fixture.text("SELECT rights_status FROM remote_assets WHERE id=1"),
+        "licensed"
+    );
     EXPECT_EQ(
         fixture.text("SELECT centrality_scale FROM work_concepts WHERE id=1"),
         "graded"
@@ -549,6 +578,7 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
 
     json cleanup = empty_batch("create-cleanup");
     cleanup["update"]["delete"] = {
+        { "remote_assets", json::array({ 1 }) },
         { "work_concepts", json::array({ 1 }) },
         { "evidence", json::array({ 1 }) },
     };
@@ -559,6 +589,7 @@ TEST(ProductInbox, AppliesCreatesAndRetiresOnlyAfterCommit) {
     ASSERT_TRUE(cleaned.ok) << issues_text(cleaned);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM work_concepts"), 0);
     EXPECT_EQ(fixture.integer("SELECT count(*) FROM evidence"), 0);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM remote_assets"), 0);
 }
 
 TEST(ProductInbox, CreatesAndDeletesCurrentProductRelationshipsUsingLocalIds) {
@@ -1260,6 +1291,146 @@ TEST(ProductInbox, ExplicitAgentMergeRewritesAndDeduplicatesCredits) {
             "SELECT count(*) FROM credits WHERE agent_id='agent-000001'"
         ),
         1
+    );
+    EXPECT_EQ(
+        fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0
+    );
+}
+
+TEST(ProductInbox, EntityMergeRewritesAndDeduplicatesRemoteAssets) {
+    inbox_fixture fixture;
+    json seed = empty_batch("remote-asset-merge-seed");
+    seed["create"] = {
+        { "agents",
+          json::array(
+              { { { "local_id", "target" }, { "agent_type", "person" } },
+                { { "local_id", "member" }, { "agent_type", "person" } } }
+          ) },
+        { "remote_assets",
+          json::array(
+              { { { "entity_id", "target" },
+                  { "provider", "wikimedia_commons" },
+                  { "remote_key", "File:Shared portrait.jpg" },
+                  { "media_kind", "portrait" },
+                  { "source_page_url",
+                    "https://commons.wikimedia.org/wiki/File:Shared_portrait.jpg" },
+                  { "rights_status", "licensed" },
+                  { "display_allowed", true } },
+                { { "entity_id", "member" },
+                  { "provider", "wikimedia_commons" },
+                  { "remote_key", "File:Shared portrait.jpg" },
+                  { "media_kind", "portrait" },
+                  { "source_page_url",
+                    "https://commons.wikimedia.org/wiki/File:Shared_portrait.jpg" },
+                  { "rights_status", "licensed" },
+                  { "display_allowed", true } },
+                { { "entity_id", "member" },
+                  { "provider", "wikimedia_commons" },
+                  { "remote_key", "File:Member portrait.jpg" },
+                  { "media_kind", "portrait" },
+                  { "source_page_url",
+                    "https://commons.wikimedia.org/wiki/File:Member_portrait.jpg" },
+                  { "rights_status", "unknown" } } }
+          ) },
+    };
+    fixture.write("seed.json", seed);
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+    ASSERT_EQ(fixture.integer("SELECT count(*) FROM remote_assets"), 3);
+
+    json merge = empty_batch("remote-asset-merge");
+    merge["merge"]["agents"] = json::array(
+        { { { "target", "agent-000001" },
+            { "members", json::array({ "agent-000002" }) },
+            { "set", json::object() },
+            { "unset", json::array() } } }
+    );
+    fixture.write("merge.json", merge);
+
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
+    ASSERT_TRUE(result.ok) << issues_text(result);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 1);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM remote_assets"), 2);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM remote_assets "
+            "WHERE entity_id='agent-000001'"
+        ),
+        2
+    );
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM remote_assets "
+            "WHERE remote_key='File:Shared portrait.jpg'"
+        ),
+        1
+    );
+    EXPECT_EQ(
+        fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0
+    );
+}
+
+TEST(ProductInbox, EntityMergeRejectsConflictingRemoteAssetMetadata) {
+    inbox_fixture fixture;
+    json seed = empty_batch("remote-asset-conflict-seed");
+    seed["create"] = {
+        { "agents",
+          json::array(
+              { { { "local_id", "target" }, { "agent_type", "person" } },
+                { { "local_id", "member" }, { "agent_type", "person" } } }
+          ) },
+        { "remote_assets",
+          json::array(
+              { { { "entity_id", "target" },
+                  { "provider", "wikimedia_commons" },
+                  { "remote_key", "File:Conflicting portrait.jpg" },
+                  { "media_kind", "portrait" },
+                  { "rights_status", "licensed" },
+                  { "display_allowed", true } },
+                { { "entity_id", "member" },
+                  { "provider", "wikimedia_commons" },
+                  { "remote_key", "File:Conflicting portrait.jpg" },
+                  { "media_kind", "portrait" },
+                  { "rights_status", "restricted" },
+                  { "display_allowed", false } } }
+          ) },
+    };
+    fixture.write("seed.json", seed);
+    const auto seeded = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
+    ASSERT_TRUE(seeded.ok) << issues_text(seeded);
+
+    json merge = empty_batch("remote-asset-conflict");
+    merge["merge"]["agents"] = json::array(
+        { { { "target", "agent-000001" },
+            { "members", json::array({ "agent-000002" }) },
+            { "set", json::object() },
+            { "unset", json::array() } } }
+    );
+    fixture.write("merge.json", merge);
+
+    const auto result = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
+    ASSERT_FALSE(result.ok);
+    EXPECT_NE(issues_text(result).find("merge_conflict"), std::string::npos);
+    EXPECT_NE(
+        issues_text(result).find("conflicting duplicate remote asset"),
+        std::string::npos
+    );
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM agents"), 2);
+    EXPECT_EQ(fixture.integer("SELECT count(*) FROM remote_assets"), 2);
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT count(*) FROM applied_batches "
+            "WHERE batch_id='remote-asset-conflict'"
+        ),
+        0
     );
     EXPECT_EQ(
         fixture.integer("SELECT count(*) FROM pragma_foreign_key_check"), 0

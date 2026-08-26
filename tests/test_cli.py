@@ -140,6 +140,21 @@ class OperationsCliTests(unittest.TestCase):
                             },
                         ],
                     },
+                    {
+                        "door_id": "wikimedia-commons",
+                        "endpoints": [
+                            {
+                                "endpoint_id": "imageinfo-api",
+                                "protocol": "rest",
+                                "base_url": "https://commons.wikimedia.org/w/api.php",
+                                "allowed_methods": ["POST"],
+                                "authentication": {"mode": "none"},
+                                "bulk_capable": False,
+                                "resumable_download": False,
+                                "write_enabled": False,
+                            }
+                        ],
+                    },
                 ],
             },
             "security": {"submission_max_bytes": 1024 * 1024},
@@ -609,6 +624,131 @@ class OperationsCliTests(unittest.TestCase):
         self.assertNotEqual(stale.returncode, 0)
         self.assertIn("does not match", stale.stderr)
 
+    def test_product_enrichment_commands_preserve_review_only_boundary(self) -> None:
+        control, _, _ = self.product_snapshot()
+        planned = self.run_cli(
+            "product",
+            "enrichment-plan",
+            "--config",
+            str(self.config_path),
+            "--product-snapshot",
+            str(control),
+            "--provider",
+            "wikidata",
+            "--languages",
+            "en,ja",
+            "--plan-id",
+            "wikidata-cli-plan",
+            "--compact",
+        )
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        plan = self.document(planned)
+        self.assertEqual(plan["source"], "wikidata")
+        self.assertEqual(
+            {request["identity_query"]["canonical_entity_ids"][0]
+             for request in plan["requests"]},
+            {"work-000001", "agent-000001", "concept-000001"},
+        )
+
+        search_bundle = self.root / "wikidata-search-bundle.json"
+        search_bundle.write_text(
+            json.dumps(
+                {
+                    "artifact_type": "wikidata_response_bundle_v1",
+                    "format_version": 1,
+                    "snapshot_id": "wikidata-cli-search",
+                    "fetched_at": "2026-08-25T12:00:00Z",
+                    "acquisitions": [],
+                    "responses": [
+                        {
+                            "provenance_ref": "acquisition-search",
+                            "query_id": "identity-work",
+                            "canonical_entity_ids": ["work-000001"],
+                            "body": {
+                                "search": [
+                                    {
+                                        "id": "Q100",
+                                        "label": "Test Work",
+                                        "language": "en",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        follow_up = self.run_cli(
+            "product",
+            "enrichment-follow-up-plan",
+            "--provider",
+            "wikidata",
+            "--provider-input",
+            str(search_bundle),
+            "--languages",
+            "en,ja",
+            "--plan-id",
+            "wikidata-cli-details",
+            "--compact",
+        )
+        self.assertEqual(follow_up.returncode, 0, follow_up.stderr)
+        self.assertEqual(
+            self.document(follow_up)["requests"][0]["entities"], ["Q100"]
+        )
+
+        combined = json.loads(search_bundle.read_text(encoding="utf-8"))
+        combined["acquisitions"] = [
+            {
+                "provenance_ref": "acquisition-search",
+                "request_id": "identity-work",
+                "control": {"contract": "acquired_artifact_v1"},
+            }
+        ]
+        combined["responses"].append(
+            {
+                "provenance_ref": "acquisition-profile",
+                "body": {
+                    "entities": {
+                        "Q100": {
+                            "id": "Q100",
+                            "labels": {
+                                "en": {"language": "en", "value": "Test Work"}
+                            },
+                            "aliases": {},
+                            "descriptions": {},
+                            "claims": {},
+                        }
+                    }
+                },
+            }
+        )
+        search_bundle.write_text(json.dumps(combined), encoding="utf-8")
+        reviewed = self.run_cli(
+            "product",
+            "enrichment",
+            "--config",
+            str(self.config_path),
+            "--product-snapshot",
+            str(control),
+            "--provider",
+            "wikidata",
+            "--provider-input",
+            str(search_bundle),
+            "--compact",
+        )
+        self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+        review = self.document(reviewed)
+        self.assertFalse(review["write_authority"])
+        self.assertEqual(
+            review["identity_candidates"][0]["candidates"][0]["provider_id"],
+            "Q100",
+        )
+        self.assertEqual(
+            review["provider_snapshot"]["acquisitions"][0]["provenance_ref"],
+            "acquisition-search",
+        )
+
     def test_fixed_product_inbox_commands_reject_arguments(self) -> None:
         for command, unexpected in (
             ("check-inbox", ("--database", str(self.root / "other.sqlite"))),
@@ -889,6 +1029,8 @@ class OperationsCliTests(unittest.TestCase):
                             "purpose": "bounded profile enrichment",
                             "entities": [f"Q{index}" for index in range(1, 56)],
                             "fields": ["labels", "gender", "occupation"],
+                            "languages": ["de", "ja", "en"],
+                            "language_fallback": True,
                             "follow_up": True,
                         }
                     ],
@@ -917,19 +1059,171 @@ class OperationsCliTests(unittest.TestCase):
         self.assertEqual(len(bodies), 2)
         first_body = bodies[0].read_text(encoding="utf-8")
         self.assertIn("action=wbgetentities", first_body)
+        self.assertIn("formatversion=2", first_body)
+        self.assertIn("redirects=yes", first_body)
         self.assertIn("props=claims%7Cdescriptions%7Clabels", first_body)
+        self.assertIn("languages=de%7Cja%7Cen", first_body)
+        self.assertIn("languagefallback=1", first_body)
         self.assertEqual(first_body.count("Q"), 50)
         for control in document["controls"]:
             request = control["request"]
             self.assertEqual(request["door_id"], "wikidata")
             self.assertEqual(request["endpoint_id"], "entity-api")
-            self.assertEqual(request["freshness_policy"], "fresh_required")
+            self.assertEqual(request["freshness_policy"], "cache_allowed")
             body_ref = request["body_artifact"]["storage_ref"]
             body_path = self.root / "artifacts" / body_ref
             self.assertEqual(
                 hashlib.sha256(body_path.read_bytes()).hexdigest(),
                 request["body_artifact"]["sha256"],
             )
+
+    def test_fetch_plan_translates_name_and_external_id_identity_queries(self) -> None:
+        plan = self.root / "identity-fetch-plan.json"
+        plan.write_text(
+            json.dumps(
+                {
+                    "contract": "fetch_plan_v1",
+                    "format_version": 1,
+                    "plan_id": "identity-discovery-plan",
+                    "source": "wikidata",
+                    "requests": [
+                        {
+                            "request_id": "identity-name",
+                            "locator": "https://www.wikidata.org/w/api.php",
+                            "purpose": "multilingual identity discovery",
+                            "identity_query": {
+                                "query_id": "identity-name",
+                                "canonical_entity_ids": ["agent-012095"],
+                                "kind": "name",
+                                "value": "深井国",
+                                "language": "ja",
+                            },
+                            "follow_up": True,
+                        },
+                        {
+                            "request_id": "identity-imdb",
+                            "locator": "https://www.wikidata.org/w/api.php",
+                            "purpose": "external identifier identity discovery",
+                            "identity_query": {
+                                "query_id": "identity-imdb",
+                                "canonical_entity_ids": ["agent-012095"],
+                                "kind": "external_id",
+                                "value": "nm0297912",
+                                "scheme": "imdb_name",
+                                "provider_property": "P345",
+                            },
+                            "follow_up": True,
+                        },
+                    ],
+                    "created_at": "2026-08-25T12:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        controls = self.root / "identity-fetch-controls"
+        result = self.run_cli(
+            "fetch",
+            "plan",
+            "--config",
+            str(self.config_path),
+            "--plan",
+            str(plan),
+            "--output-directory",
+            str(controls),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        document = self.document(result)
+        self.assertEqual(document["request_count"], 2)
+        requests = {
+            control["request"]["request_id"]: control["request"]
+            for control in document["controls"]
+        }
+        name = requests["identity-name"]
+        external = requests["identity-imdb"]
+        for request in (name, external):
+            self.assertEqual(request["freshness_policy"], "cache_allowed")
+            self.assertEqual(
+                request["extensions"]["org.ninjaro.arachne.identity_query"][
+                    "canonical_entity_ids"
+                ],
+                ["agent-012095"],
+            )
+        name_body = (
+            self.root / "artifacts" / name["body_artifact"]["storage_ref"]
+        ).read_text(encoding="utf-8")
+        external_body = (
+            self.root / "artifacts" / external["body_artifact"]["storage_ref"]
+        ).read_text(encoding="utf-8")
+        self.assertIn("action=wbsearchentities", name_body)
+        self.assertIn("language=ja", name_body)
+        self.assertIn("action=query", external_body)
+        self.assertIn("haswbstatement%3AP345%3Dnm0297912", external_body)
+
+    def test_fetch_plan_translates_commons_metadata_without_image_download(self) -> None:
+        plan = self.root / "commons-fetch-plan.json"
+        plan.write_text(
+            json.dumps(
+                {
+                    "contract": "fetch_plan_v1",
+                    "format_version": 1,
+                    "plan_id": "commons-metadata-plan",
+                    "source": "wikidata",
+                    "requests": [
+                        {
+                            "request_id": "commons-media-000001",
+                            "locator": "https://commons.wikimedia.org/w/api.php",
+                            "purpose": "Commons rights metadata",
+                            "media_files": [
+                                {
+                                    "remote_key": "File:Example Film.jpg",
+                                    "contexts": [
+                                        {
+                                            "canonical_entity_id": "work-000001",
+                                            "wikidata_qid": "Q100",
+                                            "provider_property": "P18",
+                                            "media_kind": "image",
+                                        }
+                                    ],
+                                }
+                            ],
+                            "follow_up": False,
+                        }
+                    ],
+                    "created_at": "2026-08-25T12:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        controls = self.root / "commons-fetch-controls"
+        result = self.run_cli(
+            "fetch",
+            "plan",
+            "--config",
+            str(self.config_path),
+            "--plan",
+            str(plan),
+            "--output-directory",
+            str(controls),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = self.document(result)["controls"][0]["request"]
+        self.assertEqual(request["door_id"], "wikimedia-commons")
+        self.assertEqual(request["endpoint_id"], "imageinfo-api")
+        self.assertEqual(request["freshness_policy"], "cache_allowed")
+        body = (
+            self.root / "artifacts" / request["body_artifact"]["storage_ref"]
+        ).read_text(encoding="utf-8")
+        self.assertIn("prop=imageinfo", body)
+        self.assertIn("iiprop=url%7Csize%7Cmime%7Cextmetadata", body)
+        self.assertNotIn("iiurlwidth", body)
+        self.assertEqual(
+            request["extensions"]["org.ninjaro.arachne.media_files"][0][
+                "remote_key"
+            ],
+            "File:Example Film.jpg",
+        )
 
     def test_bulk_fetch_translation_preserves_decompression_encoding(self) -> None:
         plan = self.root / "bulk-fetch-plan.json"

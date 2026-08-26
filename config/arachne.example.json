@@ -194,6 +194,34 @@
             }
           }
         ]
+      },
+      {
+        "door_id": "wikimedia-commons",
+        "defaults": {
+          "admission": {
+            "maximum_concurrency": 1,
+            "minimum_interval_ms": 1000
+          }
+        },
+        "endpoints": [
+          {
+            "endpoint_id": "imageinfo-api",
+            "protocol": "rest",
+            "base_url": "https://commons.wikimedia.org/w/api.php",
+            "allowed_methods": [
+              "POST"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": false,
+            "resumable_download": false,
+            "write_enabled": false,
+            "policy": {
+              "maximum_artifact_bytes": 8388608
+            }
+          }
+        ]
       }
     ]
   },

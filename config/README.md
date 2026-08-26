@@ -37,9 +37,11 @@ redirect, and size overrides. Writes remain disabled unless explicitly enabled.
 An endpoint that permits retried writes must also declare its provider-supported
 `idempotency_header`; Pheidippides supplies the per-request key and otherwise
 limits the write to one attempt.
-The included active doors cover provisional GitHub attachments plus Wikidata
-official dumps and bounded entity lookups; wider door-map entries should be
-activated only after their current access and license terms are rechecked.
+The included active doors cover provisional GitHub attachments, Wikidata
+official dumps and bounded entity lookups, plus Commons `imageinfo` metadata.
+The Commons door returns URLs, dimensions, MIME type, and rights text only; it
+does not fetch image bytes. Wider door-map entries should be activated only
+after their current access and license terms are rechecked.
 
 Use `authentication.mode: bearer_env` or `header_env` with an environment-variable
 `secret_name`. Never put the secret value in this file. Unknown fields, insecure

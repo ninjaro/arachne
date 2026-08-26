@@ -1,7 +1,8 @@
 -- Current product graph schema. Canonical entities use compact readable text IDs;
--- internal records use row-local integer keys. Remote assets, source archives,
--- alternate source URLs, and disposable merge-hint state are deliberately
--- absent. Work/concept centrality scale semantics belong to each assignment.
+-- internal records use row-local integer keys. Source archives, alternate
+-- source URLs, and disposable merge-hint state are deliberately absent.
+-- Remote assets contain links and provider/rights metadata only, never blobs.
+-- Work/concept centrality scale semantics belong to each assignment.
 -- `none` marks an assignment whose scale has not been semantically reviewed; it
 -- does not mean binary, irrelevant, zero, or unknown centrality. Consumers may
 -- retain the stored number as a fallback, but that is not evidence that the
@@ -165,6 +166,51 @@ CREATE TABLE external_ids (
     UNIQUE (scheme, value)
 ) STRICT;
 CREATE INDEX external_ids_entity_idx ON external_ids(entity_id);
+
+CREATE TABLE remote_assets (
+    id INTEGER PRIMARY KEY,
+    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (length(provider) > 0),
+    remote_key TEXT CHECK (remote_key IS NULL OR length(remote_key) > 0),
+    media_kind TEXT CHECK (media_kind IS NULL OR media_kind IN
+        ('portrait','poster','logo','image')),
+    direct_url TEXT CHECK (direct_url IS NULL OR length(direct_url) > 0),
+    source_page_url TEXT CHECK
+        (source_page_url IS NULL OR length(source_page_url) > 0),
+    origin_provider TEXT CHECK
+        (origin_provider IS NULL OR length(origin_provider) > 0),
+    origin_entity_id TEXT CHECK
+        (origin_entity_id IS NULL OR length(origin_entity_id) > 0),
+    origin_property TEXT CHECK
+        (origin_property IS NULL OR length(origin_property) > 0),
+    mime_type TEXT CHECK (mime_type IS NULL OR length(mime_type) > 0),
+    width_pixels INTEGER CHECK (width_pixels IS NULL OR width_pixels > 0),
+    height_pixels INTEGER CHECK (height_pixels IS NULL OR height_pixels > 0),
+    license_id TEXT CHECK (license_id IS NULL OR length(license_id) > 0),
+    license_name TEXT CHECK
+        (license_name IS NULL OR length(license_name) > 0),
+    license_url TEXT CHECK
+        (license_url IS NULL OR length(license_url) > 0),
+    attribution_text TEXT CHECK
+        (attribution_text IS NULL OR length(attribution_text) > 0),
+    author_text TEXT CHECK (author_text IS NULL OR length(author_text) > 0),
+    credit_text TEXT CHECK (credit_text IS NULL OR length(credit_text) > 0),
+    rights_status TEXT CHECK (rights_status IS NULL OR rights_status IN
+        ('public_domain','licensed','restricted','unknown')),
+    display_allowed INTEGER CHECK
+        (display_allowed IS NULL OR display_allowed IN (0,1)),
+    rights_note TEXT CHECK (rights_note IS NULL OR length(rights_note) > 0),
+    CHECK (
+        remote_key IS NOT NULL
+        OR direct_url IS NOT NULL
+        OR source_page_url IS NOT NULL
+    )
+) STRICT;
+CREATE INDEX remote_assets_entity_idx ON remote_assets(entity_id);
+CREATE UNIQUE INDEX remote_assets_remote_key_unique
+ON remote_assets(entity_id, provider, remote_key) WHERE remote_key IS NOT NULL;
+CREATE UNIQUE INDEX remote_assets_direct_url_unique
+ON remote_assets(entity_id, direct_url) WHERE direct_url IS NOT NULL;
 
 CREATE TABLE agents (
     entity_id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,

@@ -1,0 +1,443 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/external_enrichment_review_v1.schema.json",
+  "title": "Disposable external enrichment review v1",
+  "type": "object",
+  "required": [
+    "artifact_type",
+    "format_version",
+    "provider",
+    "product_snapshot",
+    "provider_snapshot",
+    "write_authority",
+    "entity_mappings",
+    "identity_candidates",
+    "field_diffs",
+    "relation_diffs",
+    "media_suggestions",
+    "unmapped_observations",
+    "summary"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "external_enrichment_review_v1"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "product_snapshot": {
+      "$ref": "#/$defs/product_snapshot"
+    },
+    "provider_snapshot": {
+      "$ref": "#/$defs/provider_snapshot"
+    },
+    "write_authority": {
+      "const": false
+    },
+    "entity_mappings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity_mapping"
+      }
+    },
+    "identity_candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidate_group"
+      }
+    },
+    "field_diffs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/field_diff"
+      }
+    },
+    "relation_diffs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relation_diff"
+      }
+    },
+    "media_suggestions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/media_suggestion"
+      }
+    },
+    "unmapped_observations": {
+      "type": "array",
+      "description": "Provider values intentionally left raw because no safe product target exists."
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  },
+  "$defs": {
+    "canonical_id": {
+      "type": "string",
+      "pattern": "^(agent|work|concept|manifestation)-[0-9]{6,}$"
+    },
+    "product_snapshot": {
+      "type": "object",
+      "required": [
+        "snapshot_id",
+        "sha256"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider_snapshot": {
+      "type": "object",
+      "required": [
+        "snapshot_id",
+        "fetched_at",
+        "acquisitions"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fetched_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "acquisitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/acquisition"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "acquisition": {
+      "type": "object",
+      "required": [
+        "provenance_ref",
+        "request_id",
+        "control"
+      ],
+      "properties": {
+        "provenance_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "control": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "same",
+        "missing_locally",
+        "conflicting",
+        "identity_suspicion",
+        "missing_canonical_entity",
+        "missing_relation",
+        "conflicting_relation",
+        "unmapped_relation"
+      ]
+    },
+    "signal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "outcome"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_value": {},
+        "provider_value": {},
+        "provider_property": {
+          "type": "string"
+        },
+        "provenance_ref": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "entity_mapping": {
+      "type": "object",
+      "required": [
+        "canonical_entity_id",
+        "canonical_entity_type",
+        "candidate_origin",
+        "requested_provider_id",
+        "provider_id",
+        "provider_state",
+        "redirect_chain",
+        "identity_status",
+        "signals"
+      ],
+      "properties": {
+        "canonical_entity_id": {
+          "$ref": "#/$defs/canonical_id"
+        },
+        "canonical_entity_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_origin": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "requested_provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_state": {
+          "type": "string",
+          "enum": [
+            "present",
+            "redirected",
+            "missing",
+            "deleted",
+            "not_found"
+          ]
+        },
+        "redirect_chain": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "identity_status": {
+          "type": "string",
+          "enum": [
+            "consistent",
+            "suspicious",
+            "insufficient"
+          ]
+        },
+        "signals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/signal"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "provider_id",
+        "score",
+        "query_origins",
+        "signals"
+      ],
+      "properties": {
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "score": {
+          "type": "integer"
+        },
+        "query_origins": {
+          "type": "array"
+        },
+        "signals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/signal"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidate_group": {
+      "type": "object",
+      "required": [
+        "canonical_entity_id",
+        "canonical_entity_type",
+        "identity_status",
+        "candidates"
+      ],
+      "properties": {
+        "canonical_entity_id": {
+          "$ref": "#/$defs/canonical_id"
+        },
+        "canonical_entity_type": {
+          "type": "string"
+        },
+        "identity_status": {
+          "type": "string",
+          "enum": [
+            "candidate",
+            "ambiguous"
+          ]
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "logical_key": {
+          "type": "object"
+        },
+        "column": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "field_diff": {
+      "type": "object",
+      "required": [
+        "canonical_entity_id",
+        "provider_id",
+        "status",
+        "target",
+        "canonical_values",
+        "provider_values"
+      ],
+      "properties": {
+        "canonical_entity_id": {
+          "$ref": "#/$defs/canonical_id"
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "canonical_values": {
+          "type": "array"
+        },
+        "provider_values": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "relation_diff": {
+      "type": "object",
+      "required": [
+        "status",
+        "provider_relation"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "provider_relation": {
+          "type": "object"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "missing_provider_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "canonical_endpoints": {
+          "type": "object"
+        },
+        "canonical_relation_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "media_suggestion": {
+      "type": "object",
+      "required": [
+        "canonical_entity_id",
+        "provider_id",
+        "status",
+        "suggested_record"
+      ],
+      "properties": {
+        "canonical_entity_id": {
+          "$ref": "#/$defs/canonical_id"
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "suggested_record": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

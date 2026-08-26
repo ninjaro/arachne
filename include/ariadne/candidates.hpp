@@ -40,12 +40,6 @@ public:
         const candidate_configuration& configuration, std::string created_at
     );
 
-    [[nodiscard]] static nlohmann::ordered_json enrichment_fetch_plan(
-        const nlohmann::json& candidate_pool,
-        const nlohmann::json& available_profiles,
-        std::string source_name, std::string locator,
-        std::string created_at
-    );
 };
 
 } // namespace arachne::ariadne

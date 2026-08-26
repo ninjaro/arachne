@@ -280,6 +280,24 @@
         "pages"
       ]
     },
+    "media_kind": {
+      "type": "string",
+      "enum": [
+        "portrait",
+        "poster",
+        "logo",
+        "image"
+      ]
+    },
+    "rights_status": {
+      "type": "string",
+      "enum": [
+        "public_domain",
+        "licensed",
+        "restricted",
+        "unknown"
+      ]
+    },
     "source_type": {
       "type": "string",
       "enum": [
@@ -447,6 +465,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/create_external_id"
+          }
+        },
+        "remote_assets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/create_remote_asset"
           }
         },
         "sources": {
@@ -759,6 +783,86 @@
           "$ref": "#/$defs/non_empty_string"
         }
       }
+    },
+    "create_remote_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "provider"
+      ],
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/entity_reference"
+        },
+        "provider": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "remote_key": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "media_kind": {
+          "$ref": "#/$defs/media_kind"
+        },
+        "direct_url": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "source_page_url": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "origin_provider": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "origin_entity_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "origin_property": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "mime_type": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "width_pixels": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height_pixels": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "license_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "license_name": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "license_url": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "attribution_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "author_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "credit_text": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "rights_status": {
+          "$ref": "#/$defs/rights_status"
+        },
+        "display_allowed": {
+          "type": "boolean"
+        },
+        "rights_note": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      },
+      "anyOf": [
+        {"required": ["remote_key"]},
+        {"required": ["direct_url"]},
+        {"required": ["source_page_url"]}
+      ]
     },
     "create_source": {
       "type": "object",
@@ -1601,6 +1705,9 @@
           "$ref": "#/$defs/positive_id_array"
         },
         "external_ids": {
+          "$ref": "#/$defs/positive_id_array"
+        },
+        "remote_assets": {
           "$ref": "#/$defs/positive_id_array"
         },
         "credits": {

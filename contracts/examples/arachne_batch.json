@@ -106,6 +106,28 @@
         "value": "Q123456"
       }
     ],
+    "remote_assets": [
+      {
+        "entity_id": "agent-lumen",
+        "provider": "wikimedia_commons",
+        "remote_key": "File:Example Artist.jpg",
+        "media_kind": "portrait",
+        "direct_url": "https://upload.wikimedia.org/example/Example_Artist.jpg",
+        "source_page_url": "https://commons.wikimedia.org/wiki/File:Example_Artist.jpg",
+        "origin_provider": "wikidata",
+        "origin_entity_id": "Q123456",
+        "origin_property": "P18",
+        "mime_type": "image/jpeg",
+        "width_pixels": 1200,
+        "height_pixels": 1600,
+        "license_id": "CC-BY-SA-4.0",
+        "license_name": "Creative Commons Attribution-ShareAlike 4.0",
+        "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "attribution_text": "Example Photographer / Wikimedia Commons",
+        "rights_status": "licensed",
+        "display_allowed": true
+      }
+    ],
     "sources": [
       {
         "local_id": "source-catalogue",
@@ -238,6 +260,9 @@
     "delete": {
       "names": [
         17
+      ],
+      "remote_assets": [
+        18
       ],
       "work_memberships": [
         27

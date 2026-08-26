@@ -123,6 +123,28 @@ For CLAIX/local HPC, point `--state-root` or
 `ARACHNE_STATE_REPOSITORY` at an existing private state checkout. The tool no
 longer clones or updates a public Arachne checkout as a state surrogate.
 
+## Point-enrichment response bundle
+
+After every translated point request has a delivered `acquired_artifact_v1`
+receipt, correlate the request-control directory with the receipt directory and
+the configured artifact store:
+
+```sh
+python3 scripts/build_wikidata_response_bundle.py \
+  --request-controls /tmp/wikidata-requests \
+  --acquired-controls /tmp/wikidata-receipts \
+  --artifact-root /absolute/path/to/artifact-store \
+  --output /tmp/wikidata-response-bundle.json
+```
+
+The utility requires a one-to-one request/receipt match, verifies each payload
+against its recorded path, size, and SHA-256, and preserves identity-query,
+Commons-media, and acquisition context in `wikidata_response_bundle_v1`.
+Missing, extra, mismatched, or unverifiable acquisitions fail without emitting
+a partial bundle. The bundle and resulting enrichment review are disposable;
+they do not authorize canonical writes. The staged semantics are defined in
+[Candidate graph and transient semantic projections](ARCHITECTURE.md#candidate-graph-and-transient-semantic-projections).
+
 ## Workflow credentials and serialization
 
 | Setting | Kind | Scope |

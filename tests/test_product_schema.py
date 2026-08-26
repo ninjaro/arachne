@@ -73,7 +73,10 @@ class CurrentProductSchemaTests(unittest.TestCase):
                 "SELECT name FROM sqlite_schema WHERE type='table'"
             )
         }
-        self.assertTrue({"work_memberships", "agent_relations", "events"} <= tables)
+        self.assertTrue(
+            {"work_memberships", "agent_relations", "events", "remote_assets"}
+            <= tables
+        )
         self.assertFalse(
             {"holdings", "agent_classifications", "manifestation_facts"} & tables
         )
@@ -92,12 +95,59 @@ class CurrentProductSchemaTests(unittest.TestCase):
                 "events_entity_idx",
                 "events_type_idx",
                 "credits_entity_idx",
+                "remote_assets_entity_idx",
+                "remote_assets_remote_key_unique",
+                "remote_assets_direct_url_unique",
             }
             <= indexes
         )
         self.assertNotIn("credits_work_idx", indexes)
         measurement_columns = set(columns(self.connection, "measurements"))
         self.assertNotIn("copy_count", measurement_columns)
+
+    def test_remote_assets_store_links_and_rights_metadata_without_blobs(self) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO remote_assets(
+                entity_id, provider, remote_key, media_kind, source_page_url,
+                origin_provider, origin_entity_id, origin_property, mime_type,
+                width_pixels, height_pixels, license_id, license_url,
+                attribution_text, rights_status, display_allowed
+            ) VALUES(
+                'agent-000001', 'wikimedia_commons', 'File:Portrait.jpg',
+                'portrait', 'https://commons.wikimedia.org/wiki/File:Portrait.jpg',
+                'wikidata', 'Q42', 'P18', 'image/jpeg', 800, 1200, 'CC-BY-SA-4.0',
+                'https://creativecommons.org/licenses/by-sa/4.0/',
+                'Example Author / Wikimedia Commons', 'licensed', 1
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO remote_assets(
+                entity_id, provider, direct_url, media_kind, rights_status,
+                display_allowed
+            ) VALUES(
+                'work-000001', 'museum_catalogue',
+                'https://example.test/object/1/image', 'image', 'unknown', 0
+            )
+            """
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.connection.execute(
+                """
+                INSERT INTO remote_assets(entity_id, provider)
+                VALUES('work-000001', 'missing-reference')
+                """
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.connection.execute(
+                """
+                INSERT INTO remote_assets(
+                    entity_id, provider, remote_key, width_pixels
+                ) VALUES('work-000001', 'wikimedia_commons', 'File:Bad.jpg', 0)
+                """
+            )
 
     def test_memberships_allow_distinct_structure_but_reject_invalid_rows(self) -> None:
         self.connection.execute(

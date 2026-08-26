@@ -63,6 +63,16 @@ json product() {
               { "scheme", "wikidata" },
               { "value", "Q1" },
               { "canonical_url", "https://www.wikidata.org/wiki/Q1" } } } },
+        { "remote_assets",
+          { { { "id", 1 },
+              { "entity_id", "work-000001" },
+              { "provider", "wikimedia_commons" },
+              { "remote_key", "File:Sparse Work.jpg" },
+              { "media_kind", "poster" },
+              { "source_page_url",
+                "https://commons.wikimedia.org/wiki/File:Sparse_Work.jpg" },
+              { "rights_status", "unknown" },
+              { "display_allowed", nullptr } } } },
         { "credits",
           { { { "id", 1 },
               { "entity_id", "work-000001" },
@@ -528,6 +538,11 @@ TEST(ProductProjection, EntityInspectionJoinsWorkAndAgentContext) {
     );
     EXPECT_EQ(work.at("family"), "work");
     EXPECT_EQ(work.at("names").at(0).at("value"), "Sparse Work");
+    ASSERT_EQ(work.at("remote_assets").size(), 1U);
+    EXPECT_EQ(
+        work.at("remote_assets").at(0).at("remote_key"),
+        "File:Sparse Work.jpg"
+    );
     EXPECT_EQ(work.at("credits").at(0).at("agent_label"), "Example Agent");
     EXPECT_EQ(
         work.at("concepts").at(0).at("concept").at("label"), "Example genre"

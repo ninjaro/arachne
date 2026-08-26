@@ -1,0 +1,101 @@
+{
+  "artifact_type": "external_enrichment_review_v1",
+  "format_version": 1,
+  "provider": "wikidata",
+  "product_snapshot": {
+    "snapshot_id": "product-20260825",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "provider_snapshot": {
+    "snapshot_id": "wikidata-point-20260825",
+    "fetched_at": "2026-08-25T12:00:00Z",
+    "acquisitions": [
+      {
+        "provenance_ref": "acquisition-000001",
+        "request_id": "wikidata-mapped-entities-000001",
+        "control": {
+          "contract": "acquired_artifact_v1",
+          "format_version": 1,
+          "artifact_id": "acquisition-000001",
+          "request_id": "wikidata-mapped-entities-000001",
+          "transport": {
+            "status": "delivered"
+          },
+          "artifact": {
+            "storage_ref": "acquired/wikidata-point-20260825/entities.json",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "byte_length": 1234
+          }
+        }
+      }
+    ]
+  },
+  "write_authority": false,
+  "entity_mappings": [
+    {
+      "canonical_entity_id": "work-000001",
+      "canonical_entity_type": "work",
+      "candidate_origin": [
+        "existing_external_id"
+      ],
+      "requested_provider_id": "Q100",
+      "provider_id": "Q101",
+      "provider_state": "redirected",
+      "redirect_chain": [
+        "Q100",
+        "Q101"
+      ],
+      "identity_status": "consistent",
+      "signals": [
+        {
+          "kind": "name",
+          "outcome": "same",
+          "provider_value": {
+            "language": "en",
+            "value": "Example Work"
+          }
+        }
+      ]
+    }
+  ],
+  "identity_candidates": [],
+  "field_diffs": [
+    {
+      "canonical_entity_id": "work-000001",
+      "provider_id": "Q101",
+      "status": "missing_locally",
+      "target": {
+        "table": "measurements",
+        "logical_key": {
+          "entity_id": "work-000001",
+          "measurement_type": "duration",
+          "unit": "seconds"
+        },
+        "column": "value"
+      },
+      "canonical_values": [],
+      "provider_values": [
+        {
+          "value": 5400,
+          "provider_property": "P2047",
+          "provenance_ref": "acquisition-000001"
+        }
+      ]
+    }
+  ],
+  "relation_diffs": [],
+  "media_suggestions": [],
+  "unmapped_observations": [],
+  "summary": {
+    "canonical_entity_count": 1,
+    "existing_mapping_count": 1,
+    "candidate_entity_count": 0,
+    "field_diff_count": 1,
+    "field_conflict_count": 0,
+    "identity_suspicion_count": 0,
+    "missing_relation_count": 0,
+    "conflicting_relation_count": 0,
+    "media_suggestion_count": 0,
+    "unmapped_observation_count": 0
+  }
+}

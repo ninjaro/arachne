@@ -890,6 +890,12 @@ namespace {
     const std::set<std::string, std::less<>> measurement_units { "seconds",
                                                                  "millimetres",
                                                                  "pages" };
+    const std::set<std::string, std::less<>> media_kinds {
+        "portrait", "poster", "logo", "image"
+    };
+    const std::set<std::string, std::less<>> rights_statuses {
+        "public_domain", "licensed", "restricted", "unknown"
+    };
     const std::set<std::string, std::less<>> concept_relation_types {
         "broader_than", "narrower_than", "derived_from",        "precursor_of",
         "hybrid_of",    "revival_of",    "regional_variant_of", "influenced_by",
@@ -1293,6 +1299,65 @@ namespace {
         require_nonempty_string(batch, value, "value", path);
         if (value.contains("canonical_url")) {
             require_nonempty_string(batch, value, "canonical_url", path);
+        }
+    }
+
+    void validate_create_remote_asset(
+        parsed_batch& batch, const json& value, const std::string& path
+    ) {
+        check_keys(
+            batch, value, path,
+            { "entity_id", "provider", "remote_key", "media_kind",
+              "direct_url", "source_page_url", "origin_provider",
+              "origin_entity_id", "origin_property", "mime_type", "width_pixels",
+              "height_pixels", "license_id", "license_name", "license_url",
+              "attribution_text", "author_text", "credit_text",
+              "rights_status", "display_allowed", "rights_note" },
+            { "entity_id", "provider" }
+        );
+        if (!value.is_object()) {
+            return;
+        }
+        validate_entity_reference_shape(batch, value, "entity_id", path);
+        require_nonempty_string(batch, value, "provider", path);
+        if (value.contains("remote_key")) {
+            require_nonempty_string(batch, value, "remote_key", path);
+        }
+        if (value.contains("media_kind")) {
+            require_enum(batch, value, "media_kind", path, media_kinds);
+        }
+        if (value.contains("rights_status")) {
+            require_enum(
+                batch, value, "rights_status", path, rights_statuses
+            );
+        }
+        if (value.contains("display_allowed")) {
+            require_kind(
+                batch, value, "display_allowed", path, value_kind::boolean
+            );
+        }
+        for (const auto& key :
+             { "direct_url", "source_page_url", "origin_provider",
+               "origin_entity_id", "origin_property", "mime_type", "license_id",
+               "license_name", "license_url", "attribution_text",
+               "author_text", "credit_text", "rights_note" }) {
+            if (value.contains(key)) {
+                require_nonempty_string(batch, value, key, path);
+            }
+        }
+        for (const auto& key : { "width_pixels", "height_pixels" }) {
+            require_integer_range(
+                batch, value, key, path, 1,
+                std::numeric_limits<std::int64_t>::max()
+            );
+        }
+        if (!(value.contains("remote_key") || value.contains("direct_url")
+              || value.contains("source_page_url"))) {
+            add_issue(
+                batch, "remote_asset_identity_required", path,
+                "remote asset needs remote_key, direct_url, or source_page_url",
+                &value
+            );
         }
     }
 
@@ -1937,6 +2002,7 @@ namespace {
         const std::set<std::string, std::less<>> tables {
             "names",
             "external_ids",
+            "remote_assets",
             "credits",
             "work_memberships",
             "agent_relations",
@@ -2221,6 +2287,7 @@ namespace {
             "events",
             "names",
             "external_ids",
+            "remote_assets",
             "sources",
             "evidence",
             "credits",
@@ -2271,6 +2338,10 @@ namespace {
         validate_array(
             batch, create, "external_ids", "/create",
             validate_create_external_id
+        );
+        validate_array(
+            batch, create, "remote_assets", "/create",
+            validate_create_remote_asset
         );
         validate_array(
             batch, create, "sources", "/create",
@@ -2721,6 +2792,9 @@ namespace {
             prevalidate_entity_reference(batch, sql, row, "entity_id", path);
         });
         walk("external_ids", [&](const json& row, const std::string& path) {
+            prevalidate_entity_reference(batch, sql, row, "entity_id", path);
+        });
+        walk("remote_assets", [&](const json& row, const std::string& path) {
             prevalidate_entity_reference(batch, sql, row, "entity_id", path);
         });
         walk("evidence", [&](const json& row, const std::string& path) {
@@ -3545,6 +3619,47 @@ namespace {
                 insert.execute();
             }
         }
+        if (const auto rows = create.find("remote_assets");
+            rows != create.end() && rows->is_array()) {
+            for (std::size_t index = 0; index < rows->size(); ++index) {
+                const auto& row = (*rows)[index];
+                set_application_context(
+                    batch, indexed_path("/create/remote_assets", index), row
+                );
+                statement insert(
+                    sql,
+                    "INSERT INTO remote_assets("
+                    "entity_id,provider,remote_key,media_kind,direct_url,"
+                    "source_page_url,origin_provider,origin_entity_id,"
+                    "origin_property,mime_type,width_pixels,height_pixels,license_id,"
+                    "license_name,license_url,attribution_text,author_text,"
+                    "credit_text,rights_status,display_allowed,rights_note)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                );
+                insert.bind(1, resolve_entity(batch, row.at("entity_id")));
+                insert.bind_json_value(2, row.at("provider"));
+                bind_optional(insert, 3, row, "remote_key");
+                bind_optional(insert, 4, row, "media_kind");
+                bind_optional(insert, 5, row, "direct_url");
+                bind_optional(insert, 6, row, "source_page_url");
+                bind_optional(insert, 7, row, "origin_provider");
+                bind_optional(insert, 8, row, "origin_entity_id");
+                bind_optional(insert, 9, row, "origin_property");
+                bind_optional(insert, 10, row, "mime_type");
+                bind_optional(insert, 11, row, "width_pixels");
+                bind_optional(insert, 12, row, "height_pixels");
+                bind_optional(insert, 13, row, "license_id");
+                bind_optional(insert, 14, row, "license_name");
+                bind_optional(insert, 15, row, "license_url");
+                bind_optional(insert, 16, row, "attribution_text");
+                bind_optional(insert, 17, row, "author_text");
+                bind_optional(insert, 18, row, "credit_text");
+                bind_optional(insert, 19, row, "rights_status");
+                bind_optional(insert, 20, row, "display_allowed");
+                bind_optional(insert, 21, row, "rights_note");
+                insert.execute();
+            }
+        }
     }
 
     void create_sources_and_evidence(parsed_batch& batch, sqlite3* const sql) {
@@ -3994,10 +4109,11 @@ namespace {
         // evidence-link deletes do not look like attempts to orphan an
         // assertion.
         for (const std::string_view table_name :
-             { "names", "external_ids", "credits", "work_memberships",
-               "agent_relations", "events", "measurements", "financial_facts",
-               "work_concepts", "concept_relations", "parent_guide_assertions",
-               "evidence", "ingest_issues" }) {
+             { "names", "external_ids", "remote_assets", "credits",
+               "work_memberships", "agent_relations", "events",
+               "measurements", "financial_facts", "work_concepts",
+               "concept_relations", "parent_guide_assertions", "evidence",
+               "ingest_issues" }) {
             const auto found = deletes->find(table_name);
             if (found == deletes->end()) {
                 continue;
@@ -4216,6 +4332,56 @@ namespace {
         {
             statement rewrite(
                 sql, "UPDATE external_ids SET entity_id=? WHERE entity_id=?"
+            );
+            rewrite.bind(1, target);
+            rewrite.bind(2, member);
+            rewrite.execute();
+        }
+        {
+            constexpr std::string_view equal_metadata
+                = "t.provider=m.provider AND t.remote_key IS m.remote_key "
+                  "AND t.media_kind IS m.media_kind "
+                  "AND t.direct_url IS m.direct_url "
+                  "AND t.source_page_url IS m.source_page_url "
+                  "AND t.origin_provider IS m.origin_provider "
+                  "AND t.origin_entity_id IS m.origin_entity_id "
+                  "AND t.origin_property IS m.origin_property "
+                  "AND t.mime_type IS m.mime_type "
+                  "AND t.width_pixels IS m.width_pixels "
+                  "AND t.height_pixels IS m.height_pixels "
+                  "AND t.license_id IS m.license_id "
+                  "AND t.license_name IS m.license_name "
+                  "AND t.license_url IS m.license_url "
+                  "AND t.attribution_text IS m.attribution_text "
+                  "AND t.author_text IS m.author_text "
+                  "AND t.credit_text IS m.credit_text "
+                  "AND t.rights_status IS m.rights_status "
+                  "AND t.display_allowed IS m.display_allowed "
+                  "AND t.rights_note IS m.rights_note";
+            statement remove(
+                sql,
+                "DELETE FROM remote_assets AS m WHERE m.entity_id=? "
+                "AND EXISTS(SELECT 1 FROM remote_assets AS t "
+                "WHERE t.entity_id=? AND "
+                    + std::string(equal_metadata) + ")"
+            );
+            remove.bind(1, member);
+            remove.bind(2, target);
+            remove.execute();
+            if (query_exists(
+                    sql,
+                    "SELECT 1 FROM remote_assets t JOIN remote_assets m "
+                    "ON t.entity_id=? AND m.entity_id=? AND (("
+                    "m.remote_key IS NOT NULL AND t.provider=m.provider "
+                    "AND t.remote_key=m.remote_key) OR ("
+                    "m.direct_url IS NOT NULL "
+                    "AND t.direct_url=m.direct_url)) LIMIT 1",
+                    target, member
+                )) {
+                throw database_error("conflicting duplicate remote asset");
+            }
+            statement rewrite(
+                sql, "UPDATE remote_assets SET entity_id=? WHERE entity_id=?"
             );
             rewrite.bind(1, target);
             rewrite.bind(2, member);

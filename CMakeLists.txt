@@ -70,6 +70,8 @@ target_compile_features(pheidippides_transport PUBLIC cxx_std_23)
 # Ariadne owns candidate, catalog, research, and taste semantics.
 add_library(ariadne_engine STATIC
     src/ariadne/candidates.cpp
+    src/ariadne/enrichment.cpp
+    src/ariadne/providers/wikidata.cpp
     src/ariadne/merge_hints.cpp
     src/ariadne/structural_hint_calibration.cpp
     src/ariadne/structural_hint_finalizer.cpp
@@ -107,7 +109,10 @@ target_compile_definitions(
 )
 
 # Arachne owns the external API and operational state, not graph internals.
-add_library(arachne_coordinator STATIC src/arachne/coordinator.cpp)
+add_library(arachne_coordinator STATIC
+    src/arachne/coordinator.cpp
+    src/arachne/fetch_translation.cpp
+)
 target_include_directories(arachne_coordinator PUBLIC include)
 target_link_libraries(
     arachne_coordinator
@@ -188,6 +193,7 @@ if(BUILD_TESTS)
         tests/transport_contract_tests.cpp
         tests/coordinator_tests.cpp
         tests/ariadne_tests.cpp
+        tests/enrichment_tests.cpp
         tests/product_projection_tests.cpp
         tests/catalog_tests.cpp
     )
@@ -274,6 +280,11 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_source_refresh -v
     )
     add_test(
+        NAME wikidata_response_bundle_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+            tests.test_build_wikidata_response_bundle -v
+    )
+    add_test(
         NAME operations_cli_tests
         COMMAND ${CMAKE_COMMAND} -E env
             ARACHNE_TEST_BINARY=$<TARGET_FILE:arachne_app>
@@ -284,7 +295,7 @@ if(BUILD_TESTS)
         image_hint_staging_tests
         wikidata_hpc_worker_tests wikidata_hpc_run_tests
         local_product_snapshot_materializer_tests product_schema_tests
-        source_refresh_tests
+        source_refresh_tests wikidata_response_bundle_tests
         operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
@@ -298,6 +309,19 @@ if(BUILD_TESTS)
             legacy_unit_tests PRIVATE arachne_legacy GTest::gtest_main dep_coverage
         )
         gtest_discover_tests(legacy_unit_tests)
+    endif()
+
+    if(ENABLE_NETWORK_TESTS)
+        add_test(
+            NAME wikidata_enrichment_live_tests
+            COMMAND ${Python3_EXECUTABLE} -m unittest
+                tests.test_wikidata_live -v
+        )
+        set_tests_properties(
+            wikidata_enrichment_live_tests PROPERTIES
+            LABELS network
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        )
     endif()
 
     if(ENABLE_NETWORK_TESTS AND BUILD_LEGACY_CLIENT)

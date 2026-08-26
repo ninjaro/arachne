@@ -18,6 +18,14 @@ CURRENT_PRODUCT_COLUMNS: dict[str, set[str]] = {
     "works": {"entity_id", "medium", "date_precision"},
     "manifestations": {"entity_id", "work_id", "manifestation_type"},
     "credits": {"id", "entity_id", "agent_id", "role"},
+    "remote_assets": {
+        "id",
+        "entity_id",
+        "provider",
+        "remote_key",
+        "direct_url",
+        "source_page_url",
+    },
     "work_memberships": {
         "id",
         "child_work_id",

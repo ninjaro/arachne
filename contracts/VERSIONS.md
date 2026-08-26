@@ -90,6 +90,11 @@ members of the C++ `contract_name` enumeration:
   work and agent IDs to Commons filenames found in non-deprecated Wikidata
   media claims. It binds the exact source dump and verified product export,
   carries no image bytes or URLs, and is never canonical product state.
+- `external_enrichment_review_v1` is a disposable, snapshot-bound comparison
+  of canonical entities and relations with one provider's normalized point
+  observations. It preserves redirects, identity signals, field and relation
+  disagreements, media-link suggestions, and raw unmapped values. It has no
+  canonical write authority; accepted changes still use `arachne_batch`.
 - `research_candidate_graph_materialization_v1` is the complete resolved graph
   payload referenced by `research_candidate_graph_plan_v1.plan_artifact`. It
   declares the stable `plan_id`, source snapshot, algorithm/configuration

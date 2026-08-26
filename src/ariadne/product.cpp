@@ -971,6 +971,10 @@ ordered_json product_projection_builder::entity(
           filtered_rows(
               product_export, "external_ids", "entity_id", entity_id
           ) },
+        { "remote_assets",
+          filtered_rows(
+              product_export, "remote_assets", "entity_id", entity_id
+          ) },
         { "credits", std::move(credits) },
         { "concepts", std::move(concepts) },
         { "manifestations",

@@ -856,9 +856,9 @@ namespace {
             create, path,
             { "agents", "works", "concepts", "manifestations",
               "work_memberships", "agent_relations", "events", "names",
-              "external_ids", "sources", "evidence", "credits", "measurements",
-              "financial_facts", "work_concepts", "concept_relations",
-              "parent_guide_assertions" },
+              "external_ids", "remote_assets", "sources", "evidence",
+              "credits", "measurements", "financial_facts", "work_concepts",
+              "concept_relations", "parent_guide_assertions" },
             result
         );
 
@@ -1154,6 +1154,71 @@ namespace {
                 require_string(item, "scheme", item_path, item_result);
                 require_string(item, "value", item_path, item_result);
                 optional_string(item, "canonical_url", item_path, item_result);
+            }
+        );
+
+        validate_optional_object_array(
+            create, "remote_assets", path, result,
+            [](const json& item, const std::string& item_path,
+               validation_result& item_result) {
+                reject_unknown_fields(
+                    item, item_path,
+                    { "entity_id", "provider", "remote_key", "media_kind",
+                      "direct_url", "source_page_url", "origin_provider",
+                      "origin_entity_id", "origin_property", "mime_type", "width_pixels",
+                      "height_pixels", "license_id", "license_name",
+                      "license_url", "attribution_text", "author_text",
+                      "credit_text", "rights_status", "display_allowed",
+                      "rights_note" },
+                    item_result
+                );
+                const json* entity
+                    = field(item, "entity_id", item_path, item_result);
+                if (entity != nullptr) {
+                    validate_stable_reference(
+                        *entity, child_path(item_path, "entity_id"), item_result
+                    );
+                }
+                require_string(item, "provider", item_path, item_result);
+                validate_nonempty_optional_strings(
+                    item, item_path,
+                    { "remote_key", "direct_url", "source_page_url",
+                      "origin_provider", "origin_entity_id", "origin_property",
+                      "mime_type",
+                      "license_id", "license_name", "license_url",
+                      "attribution_text", "author_text", "credit_text",
+                      "rights_note" },
+                    item_result
+                );
+                optional_enum(
+                    item, "media_kind", item_path,
+                    { "portrait", "poster", "logo", "image" }, item_result
+                );
+                optional_enum(
+                    item, "rights_status", item_path,
+                    { "public_domain", "licensed", "restricted", "unknown" },
+                    item_result
+                );
+                optional_integer_range(
+                    item, "width_pixels", item_path, 1,
+                    std::numeric_limits<std::int64_t>::max(), item_result
+                );
+                optional_integer_range(
+                    item, "height_pixels", item_path, 1,
+                    std::numeric_limits<std::int64_t>::max(), item_result
+                );
+                if (item.contains("display_allowed")) {
+                    require_boolean(
+                        item, "display_allowed", item_path, item_result
+                    );
+                }
+                if (!item.contains("remote_key")
+                    && !item.contains("direct_url")
+                    && !item.contains("source_page_url")) {
+                    add(item_result, item_path, "any_of",
+                        "remote asset needs remote_key, direct_url, or "
+                        "source_page_url");
+                }
             }
         );
 
@@ -1854,16 +1919,16 @@ namespace {
             const std::string delete_path = child_path(path, "delete");
             reject_unknown_fields(
                 *deletes, delete_path,
-                { "names", "external_ids", "credits", "work_memberships",
-                  "agent_relations", "events", "measurements",
+                { "names", "external_ids", "remote_assets", "credits",
+                  "work_memberships", "agent_relations", "events", "measurements",
                   "financial_facts", "evidence", "work_concepts",
                   "concept_relations", "parent_guide_assertions",
                   "ingest_issues" },
                 result
             );
             for (const std::string_view key :
-                 { "names", "external_ids", "credits", "work_memberships",
-                   "agent_relations", "events", "measurements",
+                 { "names", "external_ids", "remote_assets", "credits",
+                   "work_memberships", "agent_relations", "events", "measurements",
                    "financial_facts", "evidence", "work_concepts",
                    "concept_relations", "parent_guide_assertions" }) {
                 validate_positive_id_array(*deletes, key, delete_path, result);
@@ -2138,12 +2203,159 @@ namespace {
                 reject_unknown_fields(
                     request, path,
                     { "request_id", "locator", "purpose", "entities", "fields",
-                      "pages", "archives", "follow_up" },
+                      "languages", "language_fallback", "identity_query",
+                      "media_files", "pages", "archives", "follow_up" },
                     result
                 );
                 require_stable_id(request, "request_id", path, result);
                 require_string(request, "locator", path, result);
                 require_string(request, "purpose", path, result);
+                if (request.contains("languages")) {
+                    validate_string_array(
+                        request, "languages", path, true, result
+                    );
+                    if (request["languages"].is_array()) {
+                        validate_unique_items(
+                            request["languages"], child_path(path, "languages"),
+                            result
+                        );
+                    }
+                }
+                if (request.contains("language_fallback")) {
+                    require_boolean(
+                        request, "language_fallback", path, result
+                    );
+                }
+                if (const json* query = optional_object(
+                        request, "identity_query", path, result
+                    )) {
+                    const std::string query_path
+                        = child_path(path, "identity_query");
+                    reject_unknown_fields(
+                        *query, query_path,
+                        { "query_id", "canonical_entity_ids", "kind", "value",
+                          "language", "scheme", "provider_property" },
+                        result
+                    );
+                    require_stable_id(*query, "query_id", query_path, result);
+                    validate_string_array(
+                        *query, "canonical_entity_ids", query_path, true, result
+                    );
+                    if (query->contains("canonical_entity_ids")
+                        && query->at("canonical_entity_ids").is_array()) {
+                        validate_unique_items(
+                            query->at("canonical_entity_ids"),
+                            child_path(query_path, "canonical_entity_ids"),
+                            result
+                        );
+                    }
+                    const json* kind = require_string(
+                        *query, "kind", query_path, result
+                    );
+                    require_string(*query, "value", query_path, result);
+                    if (string_is_one_of(kind, { "name" })) {
+                        require_string(
+                            *query, "language", query_path, result
+                        );
+                        if (query->contains("scheme")
+                            || query->contains("provider_property")) {
+                            add(result, query_path, "selector_conflict",
+                                "name identity query cannot contain external-ID "
+                                "selectors");
+                        }
+                    } else if (string_is_one_of(kind, { "external_id" })) {
+                        static const std::regex property(R"(^P[1-9][0-9]*$)");
+                        require_string(*query, "scheme", query_path, result);
+                        require_pattern(
+                            *query, "provider_property", query_path, property,
+                            result
+                        );
+                        if (query->contains("language")) {
+                            add(result, query_path, "selector_conflict",
+                                "external-ID identity query cannot contain a "
+                                "language selector");
+                        }
+                    } else if (kind != nullptr) {
+                        add(result, child_path(query_path, "kind"), "enum",
+                            "identity query kind is not supported");
+                    }
+                }
+                if (const json* files
+                    = optional_array(request, "media_files", path, result)) {
+                    const std::string files_path
+                        = child_path(path, "media_files");
+                    if (files->empty() || files->size() > 10U) {
+                        add(result, files_path, "item_count",
+                            "media lookup must contain between one and ten files");
+                    }
+                    static const std::regex file_key(R"(^File:.+$)");
+                    static const std::regex canonical(
+                        R"(^(agent|work|concept|manifestation)-[0-9]{6,}$)"
+                    );
+                    static const std::regex wikidata(R"(^Q[1-9][0-9]*$)");
+                    for (std::size_t file_index = 0U;
+                         file_index < files->size(); ++file_index) {
+                        const json& file = files->at(file_index);
+                        const std::string file_path
+                            = files_path + "/" + std::to_string(file_index);
+                        if (!file.is_object()) {
+                            add(result, file_path, "type",
+                                "expected a media-file object");
+                            continue;
+                        }
+                        reject_unknown_fields(
+                            file, file_path, { "remote_key", "contexts" }, result
+                        );
+                        require_pattern(
+                            file, "remote_key", file_path, file_key, result
+                        );
+                        const json* contexts
+                            = require_array(file, "contexts", file_path, result);
+                        if (contexts == nullptr) {
+                            continue;
+                        }
+                        const std::string contexts_path
+                            = child_path(file_path, "contexts");
+                        if (contexts->empty()) {
+                            add(result, contexts_path, "min_items",
+                                "media file needs at least one canonical context");
+                        }
+                        for (std::size_t context_index = 0U;
+                             context_index < contexts->size(); ++context_index) {
+                            const json& context = contexts->at(context_index);
+                            const std::string context_path = contexts_path + "/"
+                                + std::to_string(context_index);
+                            if (!context.is_object()) {
+                                add(result, context_path, "type",
+                                    "expected a media context object");
+                                continue;
+                            }
+                            reject_unknown_fields(
+                                context, context_path,
+                                { "canonical_entity_id", "wikidata_qid",
+                                  "provider_property", "media_kind" },
+                                result
+                            );
+                            require_pattern(
+                                context, "canonical_entity_id", context_path,
+                                canonical, result
+                            );
+                            require_pattern(
+                                context, "wikidata_qid", context_path, wikidata,
+                                result
+                            );
+                            require_enum(
+                                context, "provider_property", context_path,
+                                { "P18", "P154", "P3383" }, result
+                            );
+                            require_enum(
+                                context, "media_kind", context_path,
+                                { "portrait", "poster", "logo", "image" },
+                                result
+                            );
+                        }
+                    }
+                }
             }
         }
         validate_extensions(document, "", result);

@@ -1,9 +1,12 @@
 #include "arachne/contracts.hpp"
 #include "arachne/coordinator.hpp"
 #include "arachne/crypto.hpp"
+#include "arachne/fetch_translation.hpp"
 #include "ariadne/candidates.hpp"
+#include "ariadne/enrichment.hpp"
 #include "ariadne/merge_hints.hpp"
 #include "ariadne/product.hpp"
+#include "ariadne/providers/wikidata.hpp"
 #include "penelope/inbox.hpp"
 #include "penelope/merge_hint_store.hpp"
 #include "penelope/store.hpp"
@@ -18,7 +21,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -32,7 +34,6 @@
 #include <optional>
 #include <ranges>
 #include <set>
-#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1553,6 +1554,95 @@ int command_product_taste_index(const options& arguments) {
     return 0;
 }
 
+[[nodiscard]] std::vector<std::string>
+language_list(const std::string_view value) {
+    std::vector<std::string> result;
+    std::size_t begin = 0U;
+    while (begin <= value.size()) {
+        const std::size_t end = value.find(',', begin);
+        const std::string language(value.substr(
+            begin, end == std::string_view::npos ? value.size() - begin
+                                                 : end - begin
+        ));
+        if (language.empty()) {
+            throw cli_error("--languages contains an empty language code");
+        }
+        result.push_back(language);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1U;
+    }
+    std::set<std::string, std::less<>> unique(result.begin(), result.end());
+    if (unique.size() != result.size()) {
+        throw cli_error("--languages contains a duplicate language code");
+    }
+    return result;
+}
+
+int command_product_enrichment_plan(const options& arguments) {
+    if (arguments.require("--provider") != "wikidata") {
+        throw cli_error("no enrichment planner is registered for provider");
+    }
+    product_projection_input input = load_product_projection_input(arguments);
+    std::optional<json> image_hints;
+    if (const auto path = arguments.optional("--image-hints")) {
+        image_hints = read_json(
+            command_path(*path), maximum_control_bytes,
+            "Wikidata image hints"
+        );
+    }
+    const ordered_json plan
+        = arachne::ariadne::wikidata_enrichment_provider::fetch_plan(
+            input.tables, language_list(arguments.require("--languages")),
+            arguments.require("--plan-id"), utc_now(),
+            image_hints ? &*image_hints : nullptr
+        );
+    write_product_projection(plan, arguments, "external enrichment fetch plan");
+    return 0;
+}
+
+int command_product_enrichment(const options& arguments) {
+    if (arguments.require("--provider") != "wikidata") {
+        throw cli_error("no enrichment adapter is registered for provider");
+    }
+    product_projection_input input = load_product_projection_input(arguments);
+    const json bundle = read_json(
+        command_path(arguments.require("--provider-input")),
+        maximum_export_bytes, "provider response bundle"
+    );
+    const arachne::ariadne::wikidata_enrichment_provider adapter;
+    const ordered_json normalized = adapter.normalize(bundle);
+    const ordered_json review
+        = arachne::ariadne::enrichment_review_builder::build(
+            input.tables, normalized, std::move(input.snapshot_id),
+            std::move(input.product_sha256)
+        );
+    write_product_projection(review, arguments, "external enrichment review");
+    return 0;
+}
+
+int command_product_enrichment_follow_up_plan(const options& arguments) {
+    if (arguments.require("--provider") != "wikidata") {
+        throw cli_error("no enrichment adapter is registered for provider");
+    }
+    const json bundle = read_json(
+        command_path(arguments.require("--provider-input")),
+        maximum_export_bytes, "provider response bundle"
+    );
+    const arachne::ariadne::wikidata_enrichment_provider adapter;
+    const ordered_json normalized = adapter.normalize(bundle);
+    const ordered_json plan
+        = arachne::ariadne::wikidata_enrichment_provider::follow_up_plan(
+            normalized, language_list(arguments.require("--languages")),
+            arguments.require("--plan-id"), utc_now()
+        );
+    write_product_projection(
+        plan, arguments, "external enrichment follow-up fetch plan"
+    );
+    return 0;
+}
+
 int command_candidate_rebuild(const options& arguments) {
     const configuration config
         = load_configuration(arguments.require("--config"));
@@ -1747,240 +1837,6 @@ int command_fetch(const options& arguments) {
     return 0;
 }
 
-[[nodiscard]] std::string form_encode(const std::string_view value) {
-    constexpr std::string_view hexadecimal = "0123456789ABCDEF";
-    std::string result;
-    result.reserve(value.size());
-    for (const char raw_character : value) {
-        const auto character = static_cast<unsigned char>(raw_character);
-        if (std::isalnum(character) != 0 || character == '-' || character == '_'
-            || character == '.' || character == '~') {
-            result.push_back(static_cast<char>(character));
-        } else {
-            result.push_back('%');
-            result.push_back(hexadecimal.at(character >> 4U));
-            result.push_back(hexadecimal.at(character & 0x0fU));
-        }
-    }
-    return result;
-}
-
-[[nodiscard]] bool wikidata_entity_id(const std::string_view value) {
-    return value.size() >= 2U
-        && (value.front() == 'Q' || value.front() == 'P' || value.front() == 'L'
-            || value.front() == 'M')
-        && std::ranges::all_of(value.substr(1U), [](const char character) {
-               return character >= '0' && character <= '9';
-           });
-}
-
-[[nodiscard]] std::string join_strings(
-    const std::span<const std::string> values, const std::string_view separator
-) {
-    std::string result;
-    for (std::size_t index = 0; index < values.size(); ++index) {
-        if (index != 0U) {
-            result += separator;
-        }
-        result += values[index];
-    }
-    return result;
-}
-
-[[nodiscard]] ordered_json wikidata_point_fetch_request(
-    const configuration& config, const json& plan, const json& planned,
-    const std::span<const std::string> entities, const std::string& request_id
-) {
-    static const std::map<std::string, std::string, std::less<>> field_props {
-        { "labels", "labels" },         { "descriptions", "descriptions" },
-        { "aliases", "aliases" },       { "sitelinks", "sitelinks" },
-        { "claims", "claims" },         { "gender", "claims" },
-        { "country", "claims" },        { "field", "claims" },
-        { "occupation", "claims" },     { "movement", "claims" },
-        { "genre", "claims" },          { "language", "claims" },
-        { "activity_dates", "claims" }, { "dates", "claims" },
-    };
-    if (!planned.contains("fields") || !planned.at("fields").is_array()
-        || planned.at("fields").empty()) {
-        throw cli_error(
-            "Wikidata entity fetches require a non-empty fields selector"
-        );
-    }
-    std::set<std::string, std::less<>> props;
-    for (const auto& field : planned.at("fields")) {
-        if (!field.is_string()) {
-            throw cli_error("Wikidata fetch field must be a string");
-        }
-        const auto found
-            = field_props.find(field.get_ref<const std::string&>());
-        if (found == field_props.end()) {
-            throw cli_error(
-                "unsupported Wikidata fetch field: " + field.get<std::string>()
-            );
-        }
-        props.insert(found->second);
-    }
-    // Claim-oriented profile fields still require human-readable context.
-    if (props.contains("claims")) {
-        props.insert("labels");
-        props.insert("descriptions");
-    }
-    const std::vector<std::string> ordered_props(props.begin(), props.end());
-    const std::string body = "action=wbgetentities&format=json&ids="
-        + form_encode(join_strings(entities, "|"))
-        + "&props=" + form_encode(join_strings(ordered_props, "|"))
-        + "&languages=en&languagefallback=1";
-    const fs::path body_path = config.artifact_store / "fetch-bodies"
-        / plan.at("plan_id").get<std::string>() / (request_id + ".form");
-    const fs::path body_relative
-        = body_path.lexically_relative(config.artifact_store);
-    if (!arachne::crypto::is_safe_relative_artifact_ref(
-            body_relative.generic_string()
-        )) {
-        throw cli_error(
-            "generated fetch body has an unsafe artifact reference"
-        );
-    }
-    write_immutable_exact(body_path, body, "fetch request body artifact");
-
-    ordered_json document {
-        { "contract", "fetch_request_v1" },
-        { "format_version", 1 },
-        { "request_id", request_id },
-        { "door_id", "wikidata" },
-        { "endpoint_id", "entity-api" },
-        { "operation", "point_lookup" },
-        { "freshness_policy", "fresh_required" },
-        { "plan_id", plan.at("plan_id") },
-        { "locator", planned.at("locator") },
-        { "method", "POST" },
-        { "headers",
-          { { "Accept", "application/json" },
-            { "Content-Type", "application/x-www-form-urlencoded" },
-            { "User-Agent",
-              "Arachne/2.0 (+https://github.com/ninjaro/arachne)" } } },
-        { "pagination", { { "mode", "none" } } },
-        { "retry",
-          { { "maximum_attempts", 3 },
-            { "initial_delay_ms", 250 },
-            { "maximum_delay_ms", 10000 },
-            { "total_delay_budget_ms", 30000 },
-            { "respect_retry_after", true } } },
-        { "expected",
-          { { "maximum_bytes", 16777216 },
-            { "timeout_ms", 60000 },
-            { "connect_timeout_ms", 10000 },
-            { "read_timeout_ms", 30000 },
-            { "write_timeout_ms", 30000 } } },
-        { "redirect_policy",
-          { { "follow", false },
-            { "maximum_redirects", 0 },
-            { "allow_https_to_http", false },
-            { "allowed_hosts", { "www.wikidata.org" } } } },
-        { "output_ref",
-          "acquired/" + plan.at("plan_id").get<std::string>() + "/" + request_id
-              + ".json" },
-        { "body_artifact",
-          { { "storage_ref", body_relative.generic_string() },
-            { "sha256", arachne::crypto::sha256(body) },
-            { "byte_length", body.size() },
-            { "media_type", "application/x-www-form-urlencoded" } } },
-    };
-    const auto validation = arachnespace::contracts::validate(
-        arachnespace::contracts::contract_name::fetch_request, document
-    );
-    if (!validation) {
-        throw cli_error(
-            validation_details(validation, "translated fetch request")
-        );
-    }
-    return document;
-}
-
-[[nodiscard]] ordered_json wikidata_bulk_fetch_request(
-    const json& plan, const json& planned, std::string request_id,
-    std::string locator
-) {
-    constexpr std::string_view dump_base
-        = "https://dumps.wikimedia.org/wikidatawiki/entities/";
-    if (!locator.starts_with(dump_base)) {
-        throw cli_error(
-            "Wikidata bulk fetch locator must use the official dump endpoint"
-        );
-    }
-    const std::size_t locator_end = locator.find_first_of("?#");
-    if (locator_end != std::string::npos) {
-        throw cli_error(
-            "Wikidata bulk fetch locator cannot contain a query or fragment"
-        );
-    }
-    const std::string_view locator_path(locator);
-    std::string compression_suffix;
-    for (const std::string_view supported : {
-             std::string_view { ".json.bz2" },
-             std::string_view { ".json.gz" },
-             std::string_view { ".json" },
-         }) {
-        if (locator_path.ends_with(supported)) {
-            compression_suffix = supported;
-            break;
-        }
-    }
-    if (compression_suffix.empty()) {
-        throw cli_error(
-            "Wikidata bulk fetch locator has an unsupported dump encoding"
-        );
-    }
-    const std::string output_ref = "bulk/"
-        + plan.at("plan_id").get<std::string>() + "/" + request_id
-        + compression_suffix;
-    ordered_json document {
-        { "contract", "fetch_request_v1" },
-        { "format_version", 1 },
-        { "request_id", request_id },
-        { "door_id", "wikidata" },
-        { "endpoint_id", "official-dumps" },
-        { "operation", "bulk_snapshot" },
-        { "freshness_policy", "fresh_required" },
-        { "plan_id", plan.at("plan_id") },
-        { "locator", std::move(locator) },
-        { "method", "GET" },
-        { "headers",
-          { { "Accept", "application/octet-stream" },
-            { "User-Agent",
-              "Arachne/2.0 (+https://github.com/ninjaro/arachne)" } } },
-        { "pagination", { { "mode", "none" } } },
-        { "retry",
-          { { "maximum_attempts", 5 },
-            { "initial_delay_ms", 1000 },
-            { "maximum_delay_ms", 60000 },
-            { "total_delay_budget_ms", 300000 },
-            { "respect_retry_after", true } } },
-        { "expected",
-          { { "maximum_bytes", 1099511627776ULL },
-            { "timeout_ms", 86400000 },
-            { "connect_timeout_ms", 30000 },
-            { "read_timeout_ms", 900000 },
-            { "write_timeout_ms", 30000 } } },
-        { "redirect_policy",
-          { { "follow", false },
-            { "maximum_redirects", 0 },
-            { "allow_https_to_http", false },
-            { "allowed_hosts", { "dumps.wikimedia.org" } } } },
-        { "output_ref", output_ref },
-    };
-    static_cast<void>(planned);
-    const auto validation = arachnespace::contracts::validate(
-        arachnespace::contracts::contract_name::fetch_request, document
-    );
-    if (!validation) {
-        throw cli_error(
-            validation_details(validation, "translated bulk request")
-        );
-    }
-    return document;
-}
-
 int command_fetch_plan(const options& arguments) {
     const configuration config
         = load_configuration(arguments.require("--config"));
@@ -1998,135 +1854,26 @@ int command_fetch_plan(const options& arguments) {
     if (!validation) {
         throw cli_error(validation_details(validation, "fetch plan"));
     }
-    if (plan.at("source") != "wikidata") {
-        throw cli_error(
-            "no closed fetch-plan adapter is registered for source "
-            + plan.at("source").get<std::string>()
-        );
-    }
 
-    ordered_json generated = ordered_json::array();
-    std::set<std::string, std::less<>> concrete_ids;
-    for (const auto& planned : plan.at("requests")) {
-        const bool has_entities = planned.contains("entities");
-        const bool has_fields = planned.contains("fields");
-        const bool has_pages = planned.contains("pages");
-        const bool has_archives = planned.contains("archives");
-        if (has_pages) {
-            throw cli_error(
-                "Wikidata page selectors are not supported by this adapter"
+    const auto generated
+        = arachne::coordination::translate_fetch_plan(plan);
+    ordered_json controls = ordered_json::array();
+    for (const auto& translated : generated) {
+        const ordered_json& request = translated.request;
+        if (translated.body.has_value()) {
+            const std::string storage_ref = request.at("body_artifact")
+                                                .at("storage_ref")
+                                                .get<std::string>();
+            if (!arachne::crypto::is_safe_relative_artifact_ref(storage_ref)) {
+                throw cli_error(
+                    "translated fetch body has an unsafe artifact reference"
+                );
+            }
+            write_immutable_exact(
+                config.artifact_store / fs::path(storage_ref),
+                *translated.body, translated.body_description
             );
         }
-        if (has_entities || has_fields) {
-            if (!has_entities || !planned.at("entities").is_array()
-                || planned.at("entities").empty() || !has_fields
-                || has_archives) {
-                throw cli_error(
-                    "Wikidata point selectors require non-empty entities and "
-                    "fields only"
-                );
-            }
-            if (planned.at("locator") != "https://www.wikidata.org/w/api.php") {
-                throw cli_error(
-                    "Wikidata entity selector uses an unsupported locator"
-                );
-            }
-            std::vector<std::string> entities;
-            std::set<std::string, std::less<>> unique;
-            for (const auto& entity : planned.at("entities")) {
-                if (!entity.is_string()
-                    || !wikidata_entity_id(
-                        entity.get_ref<const std::string&>()
-                    )) {
-                    throw cli_error(
-                        "Wikidata entity selector contains an invalid ID"
-                    );
-                }
-                if (!unique.emplace(entity.get<std::string>()).second) {
-                    throw cli_error(
-                        "Wikidata entity selector contains a duplicate ID"
-                    );
-                }
-                entities.push_back(entity.get<std::string>());
-            }
-            constexpr std::size_t maximum_entities_per_request = 50U;
-            const std::size_t part_count
-                = (entities.size() - 1U) / maximum_entities_per_request + 1U;
-            for (std::size_t part = 0; part < part_count; ++part) {
-                const std::size_t begin = part * maximum_entities_per_request;
-                const std::size_t count = std::min(
-                    maximum_entities_per_request, entities.size() - begin
-                );
-                std::string request_id
-                    = planned.at("request_id").get<std::string>();
-                if (part_count != 1U) {
-                    request_id += "-part-" + std::to_string(part + 1U);
-                }
-                if (!concrete_ids.emplace(request_id).second) {
-                    throw cli_error(
-                        "fetch plan produces a duplicate request identity"
-                    );
-                }
-                generated.push_back(wikidata_point_fetch_request(
-                    config, plan, planned,
-                    std::span<const std::string>(entities).subspan(
-                        begin, count
-                    ),
-                    request_id
-                ));
-            }
-            continue;
-        }
-        if (has_archives) {
-            if (!planned.at("archives").is_array()
-                || planned.at("archives").empty()) {
-                throw cli_error("Wikidata archives selector must not be empty");
-            }
-            const std::string base = planned.at("locator").get<std::string>();
-            if (!base.ends_with('/')) {
-                throw cli_error(
-                    "Wikidata archive locator must end with a slash"
-                );
-            }
-            std::size_t part = 0;
-            for (const auto& archive : planned.at("archives")) {
-                if (!archive.is_string()
-                    || !arachne::crypto::is_safe_relative_artifact_ref(
-                        archive.get_ref<const std::string&>()
-                    )
-                    || archive.get_ref<const std::string&>().find('/')
-                        != std::string::npos) {
-                    throw cli_error(
-                        "Wikidata archive selector is not a safe filename"
-                    );
-                }
-                std::string request_id
-                    = planned.at("request_id").get<std::string>() + "-archive-"
-                    + std::to_string(++part);
-                if (!concrete_ids.emplace(request_id).second) {
-                    throw cli_error(
-                        "fetch plan produces a duplicate request identity"
-                    );
-                }
-                generated.push_back(wikidata_bulk_fetch_request(
-                    plan, planned, std::move(request_id),
-                    base + archive.get<std::string>()
-                ));
-            }
-            continue;
-        }
-        std::string request_id = planned.at("request_id").get<std::string>();
-        if (!concrete_ids.emplace(request_id).second) {
-            throw cli_error("fetch plan contains a duplicate request identity");
-        }
-        generated.push_back(wikidata_bulk_fetch_request(
-            plan, planned, std::move(request_id),
-            planned.at("locator").get<std::string>()
-        ));
-    }
-
-    ordered_json controls = ordered_json::array();
-    for (const auto& request : generated) {
         const fs::path path = output_directory
             / (request.at("request_id").get<std::string>() + ".json");
         const std::string bytes
@@ -2233,7 +1980,8 @@ int command_candidate_plan(const options& arguments) {
             "inbox-baseline", "inbox-verify", "intake", "product-check-inbox",
             "product-apply-inbox", "product-rebuild-merge-hints",
             "product-export-merge-hints", "product-research", "product-entity",
-            "product-taste-index" } },
+            "product-taste-index", "product-enrichment-plan",
+            "product-enrichment-follow-up-plan", "product-enrichment" } },
     };
 }
 
@@ -2272,6 +2020,10 @@ Inspection and derived artifacts:
   research             Write the snapshot-bound product research report
   entity               Inspect one canonical work or agent as JSON
   taste-index          Build the disposable product taste feature index
+  enrichment-plan      Plan uniform external identity/enrichment acquisition
+  enrichment-follow-up-plan
+                       Fetch full profiles for every discovery candidate
+  enrichment           Compare acquired external data with the product
 
 Fixed repository tasks:
   check-inbox          Validate all pending product batches
@@ -2368,6 +2120,49 @@ Optional options:
 
 Example:
   build/arachne product taste-index --config ../arachne-data/config/arachne.json --product-snapshot /tmp/product-graph/active.json --output /tmp/taste-index.json
+)";
+        return 0;
+    }
+    if (topics.size() == 2U && topics.front() == "product"
+        && topics.back() == "enrichment-plan") {
+        std::cout << R"(Arachne product enrichment-plan
+
+Usage:
+  arachne product enrichment-plan --config CONFIG --product-snapshot CONTROL --provider wikidata --languages LANGS --plan-id ID [options]
+  arachne product enrichment-plan --database SQLITE --product-export JSONL --provider wikidata --languages LANGS --plan-id ID [options]
+
+`LANGS` is a comma-separated ordered fallback list. `--image-hints FILE` may
+reference the existing `wikidata_image_hints_v1` artifact to add bounded
+Commons metadata requests. The plan includes every
+canonical entity: existing QIDs are batched for verification/enrichment and
+entities without a QID produce multilingual name and supported external-ID
+identity queries. The plan has no write authority.
+)";
+        return 0;
+    }
+    if (topics.size() == 2U && topics.front() == "product"
+        && topics.back() == "enrichment") {
+        std::cout << R"(Arachne product enrichment
+
+Usage:
+  arachne product enrichment --config CONFIG --product-snapshot CONTROL --provider wikidata --provider-input BUNDLE [options]
+  arachne product enrichment --database SQLITE --product-export JSONL --provider wikidata --provider-input BUNDLE [options]
+
+The Wikidata response bundle contains already-acquired API JSON. Ariadne
+normalizes it and writes a disposable entity/field/relation/media review. It
+never writes the canonical product.
+)";
+        return 0;
+    }
+    if (topics.size() == 2U && topics.front() == "product"
+        && topics.back() == "enrichment-follow-up-plan") {
+        std::cout << R"(Arachne product enrichment-follow-up-plan
+
+Usage:
+  arachne product enrichment-follow-up-plan --provider wikidata --provider-input BUNDLE --languages LANGS --plan-id ID [options]
+
+Normalize identity-search responses, retain every returned candidate QID, and
+produce one batched detail plan. No candidate is selected or written.
 )";
         return 0;
     }
@@ -2579,6 +2374,49 @@ int dispatch(const std::vector<std::string>& arguments) {
             arguments, 3U,
             { "--config", "--product-snapshot", "--database",
               "--product-export", "--output" },
+            { "--compact" }
+        ));
+    }
+    if (arguments[1] == "product" && arguments.size() >= 3U
+        && arguments[2] == "enrichment-plan") {
+        if (arguments.size() == 4U
+            && (arguments[3] == "--help" || arguments[3] == "-h")) {
+            return command_help({ "product", "enrichment-plan" });
+        }
+        return command_product_enrichment_plan(options(
+            arguments, 3U,
+            { "--config", "--product-snapshot", "--database",
+              "--product-export", "--provider", "--languages", "--plan-id",
+              "--image-hints", "--output" },
+            { "--compact" }
+        ));
+    }
+    if (arguments[1] == "product" && arguments.size() >= 3U
+        && arguments[2] == "enrichment") {
+        if (arguments.size() == 4U
+            && (arguments[3] == "--help" || arguments[3] == "-h")) {
+            return command_help({ "product", "enrichment" });
+        }
+        return command_product_enrichment(options(
+            arguments, 3U,
+            { "--config", "--product-snapshot", "--database",
+              "--product-export", "--provider", "--provider-input",
+              "--output" },
+            { "--compact" }
+        ));
+    }
+    if (arguments[1] == "product" && arguments.size() >= 3U
+        && arguments[2] == "enrichment-follow-up-plan") {
+        if (arguments.size() == 4U
+            && (arguments[3] == "--help" || arguments[3] == "-h")) {
+            return command_help(
+                { "product", "enrichment-follow-up-plan" }
+            );
+        }
+        return command_product_enrichment_follow_up_plan(options(
+            arguments, 3U,
+            { "--provider", "--provider-input", "--languages", "--plan-id",
+              "--output" },
             { "--compact" }
         ));
     }

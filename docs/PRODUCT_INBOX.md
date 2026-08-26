@@ -115,6 +115,7 @@ agent_relations
 events
 names
 external_ids
+remote_assets
 sources
 evidence
 credits
@@ -159,6 +160,15 @@ not require assertion evidence. General metadata is stored on a best-effort
 basis and is not an authoritative factual record. Values may be incomplete,
 stale, or incorrect. External identifiers and links let users consult the
 original databases and sources when authoritative detail is needed.
+
+Remote assets are provider references linked to canonical entities. They may
+store a provider/file key, direct URL, source-page URL, media kind, cheap file
+metadata, and rights/attribution text; they never store media bytes. Rights
+status and `display_allowed` are independent review fields. A reference may be
+kept when inline display is restricted or undecided, and no image is inferred
+to be the entity's primary image. `provider` identifies the media host/catalog;
+`origin_provider`, `origin_entity_id`, and `origin_property` separately retain
+where an external suggestion was discovered (for example Wikidata `Q…`/`P18`).
 
 ## Update and deletion operations
 
@@ -210,6 +220,7 @@ Each array contains positive integer database row IDs:
 ```text
 names
 external_ids
+remote_assets
 credits
 work_memberships
 agent_relations

@@ -212,16 +212,3 @@ TEST(AriadneCandidates, RejectsUnboundedCandidateConfiguration) {
         std::invalid_argument
     );
 }
-
-TEST(AriadneCandidates, EnrichmentPlanningRequestsOnlyMissingProfiles) {
-    const nlohmann::json pool
-        = { { { "id", "Q3" } }, { { "id", "Q1" } }, { { "id", "Q2" } } };
-    const nlohmann::json available = { { "Q2", nlohmann::json::object() } };
-    const auto plan
-        = arachne::ariadne::candidate_planner::enrichment_fetch_plan(
-            pool, available, "wikidata", "https://www.wikidata.org/w/api.php",
-            "2026-07-18T03:00:00Z"
-        );
-    const auto& ids = plan.at("requests").at(0).at("entities");
-    EXPECT_EQ(ids, nlohmann::json({ "Q1", "Q3" }));
-}

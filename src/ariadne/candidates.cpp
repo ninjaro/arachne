@@ -983,46 +983,4 @@ nlohmann::ordered_json candidate_planner::write_plan(
     return contract;
 }
 
-nlohmann::ordered_json candidate_planner::enrichment_fetch_plan(
-    const nlohmann::json& candidate_pool,
-    const nlohmann::json& available_profiles, std::string source_name,
-    std::string locator, std::string created_at
-) {
-    if (!candidate_pool.is_array() || !available_profiles.is_object()
-        || source_name.empty() || locator.empty() || created_at.empty()) {
-        throw std::invalid_argument("invalid enrichment planning input");
-    }
-    std::vector<std::string> missing;
-    for (const auto& candidate : candidate_pool) {
-        const auto id = candidate.contains("external_id")
-            ? required_string(candidate, "external_id", "candidate")
-            : required_string(candidate, "id", "candidate");
-        if (!available_profiles.contains(id)) {
-            missing.push_back(id);
-        }
-    }
-    std::ranges::sort(missing, id_less);
-    nlohmann::ordered_json result {
-        { "contract", "fetch_plan_v1" },
-        { "format_version", 1 },
-        { "plan_id", "" },
-        { "source", std::move(source_name) },
-        { "requests",
-          nlohmann::ordered_json::array(
-              { { { "request_id", "candidate-profile-enrichment" },
-                  { "locator", std::move(locator) },
-                  { "purpose", "candidate profile enrichment" },
-                  { "entities", missing },
-                  { "fields",
-                    { "gender", "country", "field", "occupation", "movement",
-                      "genre", "language", "activity_dates" } },
-                  { "follow_up", true } } }
-          ) },
-        { "created_at", std::move(created_at) },
-    };
-    result["plan_id"]
-        = "fetch_plan_" + crypto::sha256(result.dump()).substr(0, 32);
-    return result;
-}
-
 } // namespace arachne::ariadne

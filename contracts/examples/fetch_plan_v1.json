@@ -16,6 +16,12 @@
         "labels",
         "dates"
       ],
+      "languages": [
+        "en",
+        "de",
+        "ru"
+      ],
+      "language_fallback": true,
       "follow_up": true
     }
   ],
