@@ -269,6 +269,9 @@ class OperationsCliTests(unittest.TestCase):
                 "product-research",
                 "product-entity",
                 "product-taste-index",
+                "product-enrichment-plan",
+                "product-enrichment-follow-up-plan",
+                "product-enrichment",
                 "candidate-plan",
                 "candidate-rebuild",
             },
@@ -1076,6 +1079,126 @@ class OperationsCliTests(unittest.TestCase):
                 hashlib.sha256(body_path.read_bytes()).hexdigest(),
                 request["body_artifact"]["sha256"],
             )
+
+    def test_fetch_plan_translates_only_official_optional_bulk_sources(self) -> None:
+        plan = self.root / "optional-bulk-plan.json"
+        plan.write_text(
+            json.dumps(
+                {
+                    "contract": "fetch_plan_v1",
+                    "format_version": 1,
+                    "plan_id": "optional-imdb-test",
+                    "source": "imdb",
+                    "requests": [
+                        {
+                            "request_id": "imdb-title-basics",
+                            "locator": (
+                                "https://datasets.imdbws.com/"
+                                "title.basics.tsv.gz"
+                            ),
+                            "purpose": "official daily non-commercial dataset",
+                            "follow_up": False,
+                        }
+                    ],
+                    "created_at": "2026-08-27T00:00:00Z",
+                    "extensions": {
+                        "org.ninjaro.arachne.provider_policy": {
+                            "optional": True,
+                            "license_id": "IMDb-NonCommercial",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        controls = self.root / "optional-fetch-controls"
+
+        result = self.run_cli(
+            "fetch",
+            "plan",
+            "--config",
+            str(self.config_path),
+            "--plan",
+            str(plan),
+            "--output-directory",
+            str(controls),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = json.loads(
+            (controls / "imdb-title-basics.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(request["door_id"], "imdb")
+        self.assertEqual(request["operation"], "bulk_snapshot")
+        self.assertEqual(
+            request["extensions"]["org.ninjaro.arachne.bulk_source"][
+                "plan_extensions"
+            ]["org.ninjaro.arachne.provider_policy"]["license_id"],
+            "IMDb-NonCommercial",
+        )
+
+        for source, locator, door in (
+            (
+                "musicbrainz",
+                "https://ftp.musicbrainz.org/pub/musicbrainz/data/"
+                "json-dumps/20260822-001002/artist.tar.xz",
+                "musicbrainz",
+            ),
+            (
+                "open-library",
+                "https://openlibrary.org/data/ol_dump_wikidata_latest.txt.gz",
+                "open-library",
+            ),
+            (
+                "discogs",
+                "https://discogs-data-dumps.s3.us-west-2.amazonaws.com/"
+                "data/2026/discogs_20260801_artists.xml.gz",
+                "discogs",
+            ),
+        ):
+            provider_plan = json.loads(plan.read_text(encoding="utf-8"))
+            provider_plan["plan_id"] = f"optional-{source}-test"
+            provider_plan["source"] = source
+            provider_plan["requests"][0]["request_id"] = f"{source}-sample"
+            provider_plan["requests"][0]["locator"] = locator
+            provider_path = self.root / f"{source}-plan.json"
+            provider_path.write_text(json.dumps(provider_plan), encoding="utf-8")
+            provider_controls = self.root / f"{source}-controls"
+            translated = self.run_cli(
+                "fetch",
+                "plan",
+                "--config",
+                str(self.config_path),
+                "--plan",
+                str(provider_path),
+                "--output-directory",
+                str(provider_controls),
+            )
+            self.assertEqual(translated.returncode, 0, translated.stderr)
+            provider_request = json.loads(
+                (provider_controls / f"{source}-sample.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(provider_request["door_id"], door)
+
+        document = json.loads(plan.read_text(encoding="utf-8"))
+        document["requests"][0]["locator"] = (
+            "https://github.com/example/imdb/title.basics.tsv.gz"
+        )
+        plan.write_text(json.dumps(document), encoding="utf-8")
+        rejected = self.run_cli(
+            "fetch",
+            "plan",
+            "--config",
+            str(self.config_path),
+            "--plan",
+            str(plan),
+            "--output-directory",
+            str(self.root / "rejected-optional-controls"),
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("official non-commercial", rejected.stderr)
 
     def test_fetch_plan_translates_name_and_external_id_identity_queries(self) -> None:
         plan = self.root / "identity-fetch-plan.json"

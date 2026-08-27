@@ -29,6 +29,24 @@
     },
     "lock_stale_seconds": 21600
   },
+  "external_enrichment": {
+    "optional_bulk_providers": {
+      "imdb": {
+        "enabled": false
+      },
+      "musicbrainz": {
+        "enabled": false,
+        "snapshot_id": null
+      },
+      "open-library": {
+        "enabled": false
+      },
+      "discogs": {
+        "enabled": false,
+        "snapshot_date": null
+      }
+    }
+  },
   "transport": {
     "format_version": 1,
     "defaults": {
@@ -220,6 +238,110 @@
             "policy": {
               "maximum_artifact_bytes": 8388608
             }
+          }
+        ]
+      },
+      {
+        "door_id": "imdb",
+        "defaults": {
+          "admission": {
+            "maximum_concurrency": 1,
+            "minimum_interval_ms": 0
+          },
+          "maximum_artifact_bytes": 68719476736
+        },
+        "endpoints": [
+          {
+            "endpoint_id": "official-datasets",
+            "protocol": "http_file",
+            "base_url": "https://datasets.imdbws.com/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": true,
+            "resumable_download": true,
+            "write_enabled": false
+          }
+        ]
+      },
+      {
+        "door_id": "musicbrainz",
+        "defaults": {
+          "admission": {
+            "maximum_concurrency": 1,
+            "minimum_interval_ms": 0
+          },
+          "maximum_artifact_bytes": 68719476736
+        },
+        "endpoints": [
+          {
+            "endpoint_id": "official-json-dumps",
+            "protocol": "http_file",
+            "base_url": "https://ftp.musicbrainz.org/pub/musicbrainz/data/json-dumps/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": true,
+            "resumable_download": true,
+            "write_enabled": false
+          }
+        ]
+      },
+      {
+        "door_id": "open-library",
+        "defaults": {
+          "admission": {
+            "maximum_concurrency": 1,
+            "minimum_interval_ms": 0
+          },
+          "maximum_artifact_bytes": 68719476736
+        },
+        "endpoints": [
+          {
+            "endpoint_id": "official-data-dumps",
+            "protocol": "http_file",
+            "base_url": "https://openlibrary.org/data/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": true,
+            "resumable_download": true,
+            "write_enabled": false
+          }
+        ]
+      },
+      {
+        "door_id": "discogs",
+        "defaults": {
+          "admission": {
+            "maximum_concurrency": 1,
+            "minimum_interval_ms": 0
+          },
+          "maximum_artifact_bytes": 68719476736
+        },
+        "endpoints": [
+          {
+            "endpoint_id": "official-data-dumps",
+            "protocol": "http_file",
+            "base_url": "https://discogs-data-dumps.s3.us-west-2.amazonaws.com/data/",
+            "allowed_methods": [
+              "GET"
+            ],
+            "authentication": {
+              "mode": "none"
+            },
+            "bulk_capable": true,
+            "resumable_download": true,
+            "write_enabled": false
           }
         ]
       }

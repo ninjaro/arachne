@@ -145,6 +145,24 @@ a partial bundle. The bundle and resulting enrichment review are disposable;
 they do not authorize canonical writes. The staged semantics are defined in
 [Candidate graph and transient semantic projections](ARCHITECTURE.md#candidate-graph-and-transient-semantic-projections).
 
+## Optional bulk-provider plans
+
+Optional IMDb, MusicBrainz, Open Library, and Discogs acquisitions are planned
+from explicit `external_enrichment.optional_bulk_providers` configuration:
+
+```sh
+python3 scripts/optional_bulk_provider_plans.py \
+  --config /run/arachne.json \
+  --run-id enrichment-20260827 \
+  --created-at 2026-08-27T00:00:00Z \
+  --output-directory /run/optional-provider-plans
+```
+
+The report records each provider as `planned`, `skipped`, or `unavailable`.
+Planned files are ordinary `fetch_plan_v1` inputs for `arachne fetch plan`; the
+translated controls retain provider license and redistribution policy. An
+optional-provider failure does not change the required Wikidata workflow state.
+
 ## Workflow credentials and serialization
 
 | Setting | Kind | Scope |

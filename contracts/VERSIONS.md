@@ -90,6 +90,11 @@ members of the C++ `contract_name` enumeration:
   work and agent IDs to Commons filenames found in non-deprecated Wikidata
   media claims. It binds the exact source dump and verified product export,
   carries no image bytes or URLs, and is never canonical product state.
+- `wikidata_mapping_review_v1` is the disposable record of cumulative
+  canonical-entity/Wikidata-QID verification for one dump generation. It keeps
+  exact conflicts, no-QID candidates found by normalized names or strong
+  external-ID crosswalks, and budget-deferred rows. Its compact cache and
+  fingerprints remain non-canonical operational state.
 - `external_enrichment_review_v1` is a disposable, snapshot-bound comparison
   of canonical entities and relations with one provider's normalized point
   observations. It preserves redirects, identity signals, field and relation

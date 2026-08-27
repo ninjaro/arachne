@@ -173,9 +173,11 @@ def validate_metadata(document: dict[str, Any]) -> dict[str, Any]:
         "run_directory",
         "result_directory",
         "work_directory",
+        "mapping_database",
         "log_directory",
         "external_graph",
         "image_hints",
+        "mapping_review",
         "report",
         "candidate_plan_artifact",
         "candidate_plan_control",
@@ -183,10 +185,14 @@ def validate_metadata(document: dict[str, Any]) -> dict[str, Any]:
         "steps",
         "slurm",
     }
+    legacy_required = required - {"mapping_database", "mapping_review"}
+    mapping_fields = set(document) & {"mapping_database", "mapping_review"}
     if (
         document.get("artifact_type") != METADATA_TYPE
         or document.get("format_version") != 1
-        or set(document) != required
+        or not legacy_required.issubset(document)
+        or not set(document).issubset(required)
+        or mapping_fields not in (set(), {"mapping_database", "mapping_review"})
         or not isinstance(document.get("steps"), dict)
     ):
         raise RunError("unsupported or incomplete Wikidata run metadata")
@@ -246,6 +252,19 @@ def path_value(metadata: dict[str, Any], key: str) -> Path:
     if not path.is_absolute():
         raise RunError(f"Wikidata run metadata path {key} is not absolute")
     return path
+
+
+def mapping_database_path(metadata: dict[str, Any]) -> Path:
+    if "mapping_database" in metadata:
+        return path_value(metadata, "mapping_database")
+    run_directory = path_value(metadata, "run_directory")
+    return run_directory.parent.parent / "mapping" / "wikidata.sqlite3"
+
+
+def mapping_review_path(metadata: dict[str, Any]) -> Path:
+    if "mapping_review" in metadata:
+        return path_value(metadata, "mapping_review")
+    return path_value(metadata, "result_directory") / "wikidata-mapping-review.json"
 
 
 def set_failure(metadata: dict[str, Any], step: str, error: Exception) -> None:
@@ -580,9 +599,11 @@ def command_prepare(arguments: argparse.Namespace) -> int:
         "run_directory": str(run_directory),
         "result_directory": str(result_directory),
         "work_directory": str(work_directory),
+        "mapping_database": str(base / "mapping" / "wikidata.sqlite3"),
         "log_directory": str(log_directory),
         "external_graph": str(result_directory / "wikidata-external-graph.json"),
         "image_hints": str(result_directory / "wikidata-image-hints.json"),
+        "mapping_review": str(result_directory / "wikidata-mapping-review.json"),
         "report": str(result_directory / "wikidata-hpc-report.json"),
         "candidate_plan_artifact": str(
             Path(artifact_store) / "candidate-plans" / f"{run_id}.json"
@@ -595,7 +616,7 @@ def command_prepare(arguments: argparse.Namespace) -> int:
             "prepare": "complete",
             "acquire": "pending",
             "extract": "pending",
-            "candidates": "not_requested",
+            "candidates": "pending",
             "clean": "pending",
         },
         "slurm": None,
@@ -614,87 +635,6 @@ def command_prepare(arguments: argparse.Namespace) -> int:
     print(f"  cd {REPOSITORY}")
     print("  hpc/wikidata/run acquire")
     return 0
-
-
-def automatic_resume_request(metadata: dict[str, Any]) -> Path:
-    request_path = path_value(metadata, "fetch_request")
-    request = json.loads(request_path.read_text())
-
-    output_ref = request.get("output_ref")
-    if not isinstance(output_ref, str) or not output_ref:
-        return request_path
-
-    relative_output = Path(output_ref)
-    if relative_output.is_absolute() or ".." in relative_output.parts:
-        raise RunError("Wikidata fetch request has an unsafe output_ref")
-
-    artifact_root = path_value(metadata, "state_root") / "artifacts"
-    target = artifact_root / relative_output
-
-    if target.is_file():
-        return request_path
-
-    parent = target.parent
-    if not parent.is_dir():
-        return request_path
-
-    resume_source = target.with_name(target.name + ".resume-source")
-
-    candidates: list[Path] = []
-    if (
-        resume_source.is_file()
-        and not resume_source.is_symlink()
-        and resume_source.stat().st_size > 0
-    ):
-        candidates.append(resume_source)
-
-    for candidate in parent.glob(".arachne-stage-*"):
-        if (
-            candidate.is_file()
-            and not candidate.is_symlink()
-            and candidate.stat().st_size > 0
-        ):
-            candidates.append(candidate)
-
-    if not candidates:
-        return request_path
-
-    candidate = max(candidates, key=lambda path: path.stat().st_size)
-
-    if candidate != resume_source:
-        if resume_source.exists():
-            resume_source.unlink()
-        os.link(candidate, resume_source)
-
-    byte_length = resume_source.stat().st_size
-    digest = sha256_file(resume_source)
-
-    resume_ref = resume_source.relative_to(artifact_root).as_posix()
-
-    resume_request = dict(request)
-    resume_request["operation"] = "resume_download"
-    resume_request["resume_artifact"] = {
-        "storage_ref": resume_ref,
-        "sha256": digest,
-        "byte_length": byte_length,
-    }
-
-    resume_request_path = request_path.with_name(
-        request_path.stem + ".resume.json"
-    )
-    temporary = resume_request_path.with_suffix(
-        resume_request_path.suffix + ".tmp"
-    )
-    temporary.write_text(
-        json.dumps(resume_request, separators=(",", ":")) + "\n"
-    )
-    os.replace(temporary, resume_request_path)
-
-    print(
-        f"Resuming Wikidata acquisition from {byte_length:,} bytes "
-        f"({resume_source.name})"
-    )
-    return resume_request_path
 
 
 def process_is_alive(pid: int) -> bool:
@@ -719,8 +659,14 @@ def automatic_resume_request(metadata: dict[str, Any]) -> Path:
     if not isinstance(output_ref, str) or not output_ref:
         return request_path
 
+    relative_output = Path(output_ref)
+    if relative_output.is_absolute() or ".." in relative_output.parts:
+        raise RunError("Wikidata fetch request has an unsafe output_ref")
+
     artifact_root = path_value(metadata, "state_root") / "artifacts"
-    target = artifact_root / output_ref
+    target = artifact_root / relative_output
+    if target.is_file():
+        return request_path
     parent = target.parent
 
     if not parent.is_dir():
@@ -774,9 +720,11 @@ def automatic_resume_request(metadata: dict[str, Any]) -> Path:
         if request_path.name.endswith(".resume.json")
         else request_path.with_name(request_path.stem + ".resume.json")
     )
-    resume_path.write_text(
+    temporary = resume_path.with_suffix(resume_path.suffix + ".tmp")
+    temporary.write_text(
         json.dumps(request, separators=(",", ":")) + "\n"
     )
+    os.replace(temporary, resume_path)
 
     print(f"Resuming Wikidata dump from {byte_length:,} bytes")
     return resume_path
@@ -861,6 +809,88 @@ def command_acquire(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def confirm_previous_submission_inactive(
+    metadata: dict[str, Any], arguments: argparse.Namespace
+) -> str:
+    slurm = metadata.get("slurm")
+    if not isinstance(slurm, dict):
+        raise RunError("Wikidata run has no prior Slurm submission to resume")
+    job_id = slurm.get("job_id")
+    if not isinstance(job_id, str) or not SLURM_JOB_ID.fullmatch(job_id):
+        raise RunError("Wikidata run has an invalid prior Slurm job ID")
+
+    state = scheduler_state(
+        job_id,
+        getattr(arguments, "sacct", None),
+        getattr(arguments, "squeue", None),
+    )
+    if state in SLURM_ACTIVE_STATES:
+        raise RunError(
+            f"this run was already submitted; Slurm job {job_id} is still {state}"
+        )
+    if state not in {*SLURM_FAILURE_STATES, "COMPLETED"}:
+        raise RunError(
+            "this run was already submitted; cannot confirm that Slurm job "
+            f"{job_id} is inactive"
+        )
+
+    for key in ("compute_process", "extract_process", "candidate_process"):
+        owner = metadata["steps"].get(key)
+        if not isinstance(owner, dict):
+            continue
+        pid = owner.get("pid")
+        hostname = owner.get("hostname")
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and hostname == socket.gethostname()
+        ):
+            if process_is_alive(pid):
+                raise RunError(
+                    f"this run still has an active {key.removesuffix('_process')} "
+                    f"process ({pid})"
+                )
+            continue
+        if owner.get("slurm_job_id") == job_id:
+            continue
+        raise RunError(
+            f"cannot confirm that the recorded {key.removesuffix('_process')} "
+            "process is inactive"
+        )
+    return state
+
+
+def reset_for_resubmission(metadata: dict[str, Any], prior_state: str) -> None:
+    if metadata["steps"].get("clean") in {"running", "complete"}:
+        raise RunError("a cleaned or cleaning run cannot be resubmitted")
+    if (
+        metadata["steps"].get("extract") == "complete"
+        and metadata["steps"].get("candidates") == "complete"
+    ):
+        raise RunError("this run already completed candidate publication")
+
+    if metadata["steps"].get("extract") != "complete":
+        metadata["steps"]["extract"] = "pending"
+    if metadata["steps"].get("candidates") != "complete":
+        metadata["steps"]["candidates"] = "pending"
+    for key in (
+        "slurm",
+        "failed_step",
+        "failure",
+        "compute_process",
+        "extract_process",
+        "candidate_process",
+    ):
+        metadata["steps"].pop(key, None)
+    metadata["steps"]["resumed_after_slurm_state"] = prior_state
+    metadata["status"] = (
+        "extracted"
+        if metadata["steps"].get("extract") == "complete"
+        else "acquired"
+    )
+    metadata["slurm"] = None
+
+
 def command_submit(arguments: argparse.Namespace) -> int:
     if is_copy_node():
         raise RunError("return to the normal CLAIX environment before submit")
@@ -876,20 +906,8 @@ def command_submit(arguments: argparse.Namespace) -> int:
         ):
             raise RunError("the Wikidata dump has not been acquired; run acquire first")
         if metadata.get("slurm") is not None:
-            if (
-                metadata.get("status") == "failed"
-                and metadata["steps"].get("failed_step") == "slurm"
-            ):
-                metadata["slurm"] = None
-                metadata["steps"].pop("slurm", None)
-                metadata["steps"].pop("failed_step", None)
-                metadata["steps"].pop("failure", None)
-                metadata["status"] = "acquired"
-            else:
-                raise RunError(
-                    "this run was already submitted; prepare a new run instead of "
-                    "sharing its work paths between jobs"
-                )
+            prior_state = confirm_previous_submission_inactive(metadata, arguments)
+            reset_for_resubmission(metadata, prior_state)
         log_directory = path_value(metadata, "log_directory")
         stdout_pattern = log_directory / "arachne-wikidata-%j.out"
         stderr_pattern = log_directory / "arachne-wikidata-%j.err"
@@ -937,63 +955,95 @@ def command_compute(arguments: argparse.Namespace) -> int:
     if not slurm_job_id:
         raise RunError("Wikidata extraction must be launched by Slurm")
     metadata_file = metadata_path(arguments)
+    run_extraction = False
     with edit_metadata(metadata_file) as metadata:
         slurm = metadata.get("slurm")
         if not isinstance(slurm, dict) or slurm.get("job_id") != slurm_job_id:
             raise RunError("Slurm job does not match the prepared submission")
-        if metadata["steps"].get("extract") == "complete":
-            return 0
-        if metadata["steps"].get("extract") == "running":
-            raise RunError("Wikidata extraction is already running")
-        metadata["steps"]["extract"] = "running"
+        if metadata["steps"].get("clean") in {"running", "complete"}:
+            raise RunError("a cleaned or cleaning run cannot continue")
+        if metadata["steps"].get("extract") != "complete":
+            if metadata["steps"].get("extract") == "running":
+                raise RunError("Wikidata extraction is already running")
+            metadata["steps"]["extract"] = "running"
+            metadata["steps"]["extract_process"] = {
+                "pid": os.getpid(),
+                "hostname": socket.gethostname(),
+                "slurm_job_id": slurm_job_id,
+                "started_at": utc_now(),
+            }
+            metadata["steps"]["extraction_started_at"] = utc_now()
+            run_extraction = True
+        metadata["steps"]["compute_process"] = {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "slurm_job_id": slurm_job_id,
+            "started_at": utc_now(),
+        }
         metadata["status"] = "running"
-        metadata["steps"]["extraction_started_at"] = utc_now()
     try:
-        run_command(
-            [
-                sys.executable,
-                REPOSITORY / "hpc" / "wikidata" / "build_external_graph.py",
-                "--config",
-                path_value(metadata, "operations_config"),
-                "--source-control",
-                path_value(metadata, "source_control"),
-                "--product-snapshot-control",
-                path_value(metadata, "product_snapshot_control"),
-                "--output-directory",
-                path_value(metadata, "result_directory"),
-                "--work-directory",
-                path_value(metadata, "work_directory"),
-                "--wikidata-config",
-                REPOSITORY / "hpc" / "wikidata" / "config.json",
-                "--decompress-threads",
-                str(arguments.threads),
-                "--keep-work-db",
-            ],
-            "Wikidata extraction",
-        )
-        for key in ("external_graph", "image_hints", "report"):
-            if not path_value(metadata, key).is_file():
-                raise RunError(f"Wikidata extraction did not create {key}")
-        report = safe_json(
-            path_value(metadata, "report"),
-            "Wikidata run report",
-            MAX_RESULT_BYTES,
-        )
-        if report.get("status") != "succeeded":
-            raise RunError("Wikidata extraction report is not successful")
+        if run_extraction:
+            run_command(
+                [
+                    sys.executable,
+                    REPOSITORY / "hpc" / "wikidata" / "build_external_graph.py",
+                    "--config",
+                    path_value(metadata, "operations_config"),
+                    "--source-control",
+                    path_value(metadata, "source_control"),
+                    "--product-snapshot-control",
+                    path_value(metadata, "product_snapshot_control"),
+                    "--output-directory",
+                    path_value(metadata, "result_directory"),
+                    "--work-directory",
+                    path_value(metadata, "work_directory"),
+                    "--mapping-database",
+                    mapping_database_path(metadata),
+                    "--wikidata-config",
+                    REPOSITORY / "hpc" / "wikidata" / "config.json",
+                    "--decompress-threads",
+                    str(arguments.threads),
+                    "--keep-work-db",
+                ],
+                "Wikidata extraction",
+            )
+            required_results = ["external_graph", "image_hints", "report"]
+            if "mapping_review" in metadata:
+                required_results.append("mapping_review")
+            for key in required_results:
+                if not path_value(metadata, key).is_file():
+                    raise RunError(f"Wikidata extraction did not create {key}")
+            report = safe_json(
+                path_value(metadata, "report"),
+                "Wikidata run report",
+                MAX_RESULT_BYTES,
+            )
+            if report.get("status") != "succeeded":
+                raise RunError("Wikidata extraction report is not successful")
     except Exception as error:
         with edit_metadata(metadata_file) as current:
             set_failure(current, "extract", error)
+            current["steps"].pop("extract_process", None)
+            current["steps"].pop("compute_process", None)
+        raise
+    if run_extraction:
+        with edit_metadata(metadata_file) as current:
+            current["steps"]["extract"] = "complete"
+            current["steps"]["extracted_at"] = utc_now()
+            current["steps"].pop("extract_process", None)
+            current["status"] = "extracted"
+    try:
+        rebuild_candidates(metadata_file)
+    except Exception:
+        with edit_metadata(metadata_file) as current:
+            current["steps"].pop("compute_process", None)
         raise
     with edit_metadata(metadata_file) as current:
-        current["steps"]["extract"] = "complete"
-        current["steps"]["extracted_at"] = utc_now()
-        current["status"] = "extracted"
+        current["steps"].pop("compute_process", None)
     return 0
 
 
-def command_rebuild_candidates(arguments: argparse.Namespace) -> int:
-    metadata_file = metadata_path(arguments)
+def rebuild_candidates(metadata_file: Path) -> bool:
     with edit_metadata(metadata_file) as metadata:
         if metadata["steps"].get("extract") != "complete":
             raise RunError("Wikidata extraction is not complete")
@@ -1006,34 +1056,45 @@ def command_rebuild_candidates(arguments: argparse.Namespace) -> int:
                 "before clean"
             )
         if metadata["steps"].get("candidates") == "complete":
-            print("Candidate snapshot already rebuilt for this run")
-            return 0
+            return False
         if metadata["steps"].get("candidates") == "running":
             raise RunError("candidate rebuild is already running")
         metadata["steps"]["candidates"] = "running"
+        metadata["steps"]["candidate_process"] = {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            **(
+                {"slurm_job_id": os.environ["SLURM_JOB_ID"]}
+                if os.environ.get("SLURM_JOB_ID")
+                else {}
+            ),
+            "started_at": utc_now(),
+        }
         metadata["status"] = "rebuilding_candidates"
     artifact = path_value(metadata, "candidate_plan_artifact")
+    control = path_value(metadata, "candidate_plan_control")
     artifact.parent.mkdir(parents=True, exist_ok=True)
     try:
         binary = ensure_executable(path_value(metadata, "binary"), "Arachne binary")
-        run_command(
-            [
-                binary,
-                "candidate",
-                "plan",
-                "--config",
-                path_value(metadata, "operations_config"),
-                "--external-graph",
-                path_value(metadata, "external_graph"),
-                "--product-snapshot",
-                path_value(metadata, "product_snapshot_control"),
-                "--output-artifact",
-                artifact,
-                "--output-control",
-                path_value(metadata, "candidate_plan_control"),
-            ],
-            "candidate planning",
-        )
+        if not control.is_file():
+            run_command(
+                [
+                    binary,
+                    "candidate",
+                    "plan",
+                    "--config",
+                    path_value(metadata, "operations_config"),
+                    "--external-graph",
+                    path_value(metadata, "external_graph"),
+                    "--product-snapshot",
+                    path_value(metadata, "product_snapshot_control"),
+                    "--output-artifact",
+                    artifact,
+                    "--output-control",
+                    control,
+                ],
+                "candidate planning",
+            )
         run_command(
             [
                 binary,
@@ -1042,7 +1103,7 @@ def command_rebuild_candidates(arguments: argparse.Namespace) -> int:
                 "--config",
                 path_value(metadata, "operations_config"),
                 "--plan-control",
-                path_value(metadata, "candidate_plan_control"),
+                control,
                 "--product-snapshot",
                 path_value(metadata, "product_snapshot_control"),
                 "--run-id",
@@ -1053,11 +1114,23 @@ def command_rebuild_candidates(arguments: argparse.Namespace) -> int:
     except Exception as error:
         with edit_metadata(metadata_file) as current:
             set_failure(current, "candidates", error)
+            current["steps"].pop("candidate_process", None)
         raise
     with edit_metadata(metadata_file) as current:
         current["steps"]["candidates"] = "complete"
         current["steps"]["candidates_rebuilt_at"] = utc_now()
+        current["steps"].pop("candidate_process", None)
         current["status"] = "complete"
+    return True
+
+
+def command_rebuild_candidates(arguments: argparse.Namespace) -> int:
+    metadata_file = metadata_path(arguments)
+    rebuilt = rebuild_candidates(metadata_file)
+    if not rebuilt:
+        print("Candidate snapshot already rebuilt for this run")
+        return 0
+    _, metadata = load_metadata(arguments)
     print("Rebuilt Wikidata candidates")
     print()
     print(f"Plan: {metadata['candidate_plan_control']}")
@@ -1201,13 +1274,16 @@ def command_result(arguments: argparse.Namespace) -> int:
         failure_value = metadata["steps"].get("failure")
         failure = str(failure_value) if failure_value is not None else None
     elif metadata["steps"].get("extract") == "complete":
+        result_paths = [
+            ("external graph", "external_graph"),
+            ("image hints", "image_hints"),
+            ("run report", "report"),
+        ]
+        if "mapping_review" in metadata:
+            result_paths.insert(2, ("mapping review", "mapping_review"))
         missing = [
             label
-            for label, key in (
-                ("external graph", "external_graph"),
-                ("image hints", "image_hints"),
-                ("run report", "report"),
-            )
+            for label, key in result_paths
             if not path_value(metadata, key).is_file()
         ]
         if report_error is not None:
@@ -1236,6 +1312,13 @@ def command_result(arguments: argparse.Namespace) -> int:
                     path_value(metadata, "image_hints"),
                     "wikidata_image_hints_v1",
                 )
+                if "mapping_review" in metadata:
+                    verify_report_artifact(
+                        report,
+                        "mapping_review_output",
+                        mapping_review_path(metadata),
+                        "wikidata_mapping_review_v1",
+                    )
             except RunError as error:
                 status = "failed"
                 failed_step = "result_validation"
@@ -1245,6 +1328,8 @@ def command_result(arguments: argparse.Namespace) -> int:
                     status = "cleaning"
                 elif metadata["steps"].get("candidates") == "running":
                     status = "rebuilding_candidates"
+                elif metadata["steps"].get("candidates") != "complete":
+                    status = "awaiting_candidates"
                 else:
                     status = "complete"
 
@@ -1260,6 +1345,13 @@ def command_result(arguments: argparse.Namespace) -> int:
     )
     source = "ready" if path_value(metadata, "external_graph").is_file() else "pending"
     hints = "ready" if path_value(metadata, "image_hints").is_file() else "pending"
+    mappings = (
+        "ready"
+        if "mapping_review" in metadata and mapping_review_path(metadata).is_file()
+        else "not recorded"
+        if "mapping_review" not in metadata
+        else "pending"
+    )
     candidate_step = metadata["steps"].get("candidates")
     candidates = "rebuilt" if candidate_step == "complete" else str(candidate_step)
 
@@ -1272,6 +1364,7 @@ def command_result(arguments: argparse.Namespace) -> int:
     print(f"Dump:         {dump}")
     print(f"Source graph: {source}")
     print(f"Image hints:  {hints}")
+    print(f"Mappings:     {mappings}")
     print(f"Candidates:   {candidates}")
 
     try:
@@ -1290,6 +1383,8 @@ def command_result(arguments: argparse.Namespace) -> int:
     print("Results:")
     print(f"  External graph: {metadata['external_graph']}")
     print(f"  Image hints:    {metadata['image_hints']}")
+    if "mapping_review" in metadata:
+        print(f"  Mapping review: {metadata['mapping_review']}")
     print(f"  Run report:     {metadata['report']}")
 
     if status == "failed":
@@ -1327,6 +1422,13 @@ def command_clean(arguments: argparse.Namespace) -> int:
         path_value(metadata, "image_hints"),
         "wikidata_image_hints_v1",
     )
+    if "mapping_review" in metadata:
+        verify_report_artifact(
+            report,
+            "mapping_review_output",
+            mapping_review_path(metadata),
+            "wikidata_mapping_review_v1",
+        )
 
     work_path = path_value(metadata, "work_directory")
     if work_path.is_symlink():
@@ -1380,6 +1482,8 @@ def command_clean(arguments: argparse.Namespace) -> int:
     print("Kept:")
     print(f"  {metadata['external_graph']}")
     print(f"  {metadata['image_hints']}")
+    if "mapping_review" in metadata:
+        print(f"  {metadata['mapping_review']}")
     print(f"  {metadata['report']}")
     return 0
 
@@ -1458,6 +1562,8 @@ def argument_parser() -> argparse.ArgumentParser:
     submit = commands.add_parser("submit", help="submit extraction to Slurm")
     add_locator(submit)
     submit.add_argument("--sbatch", type=Path, help=argparse.SUPPRESS)
+    submit.add_argument("--sacct", type=Path, help=argparse.SUPPRESS)
+    submit.add_argument("--squeue", type=Path, help=argparse.SUPPRESS)
     submit.add_argument(
         "sbatch_options",
         nargs=argparse.REMAINDER,

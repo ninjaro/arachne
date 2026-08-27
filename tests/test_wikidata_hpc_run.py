@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -211,6 +212,20 @@ print("12345678;claix")
             + "\n",
             encoding="utf-8",
         )
+        mapping_review = Path(metadata["mapping_review"])
+        mapping_review.write_text(
+            json.dumps(
+                {
+                    "artifact_type": "wikidata_mapping_review_v1",
+                    "format_version": 1,
+                    "provider": "wikidata",
+                    "mappings": [],
+                    "candidates": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         def custody(path: Path, artifact_type: str) -> dict[str, object]:
             return {
                 "artifact_type": artifact_type,
@@ -228,6 +243,9 @@ print("12345678;claix")
                     ),
                     "image_hints_output": custody(
                         hints, "wikidata_image_hints_v1"
+                    ),
+                    "mapping_review_output": custody(
+                        mapping_review, "wikidata_mapping_review_v1"
                     ),
                 }
             )
@@ -287,7 +305,7 @@ print("12345678;claix")
         self.product_control.unlink()
         database = self.state / "database" / "art-islands.sqlite"
         database.parent.mkdir(parents=True)
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection:
             connection.executescript(
                 (ROOT / "schema" / "product.sql").read_text(encoding="utf-8")
             )
@@ -385,6 +403,54 @@ print("12345678;claix")
         self.assertEqual(repeated.returncode, 2)
         self.assertIn("already submitted", repeated.stderr)
 
+    def test_resubmit_requires_a_confirmed_inactive_slurm_job(self) -> None:
+        self.assertEqual(self.prepare().returncode, 0)
+        self.assertEqual(self.acquire().returncode, 0)
+        self.assertEqual(
+            self.invoke(
+                "submit",
+                "--run-root",
+                self.run_root,
+                "--sbatch",
+                self.sbatch,
+            ).returncode,
+            0,
+        )
+        running = self.root / "running-sacct"
+        running.write_text("#!/bin/sh\nprintf 'RUNNING|0:0\\n'\n")
+        running.chmod(0o755)
+
+        blocked = self.invoke(
+            "submit",
+            "--run-root",
+            self.run_root,
+            "--sbatch",
+            self.sbatch,
+            "--sacct",
+            running,
+        )
+
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn("still RUNNING", blocked.stderr)
+        terminal = self.root / "terminal-sacct"
+        terminal.write_text("#!/bin/sh\nprintf 'TIMEOUT|0:1\\n'\n")
+        terminal.chmod(0o755)
+
+        resumed = self.invoke(
+            "submit",
+            "--run-root",
+            self.run_root,
+            "--sbatch",
+            self.sbatch,
+            "--sacct",
+            terminal,
+        )
+
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        metadata = self.metadata()
+        self.assertEqual(metadata["steps"]["resumed_after_slurm_state"], "TIMEOUT")
+        self.assertEqual(metadata["steps"]["extract"], "pending")
+
     def test_submit_and_fast_compute_metadata_updates_do_not_clobber(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)
         self.assertEqual(self.acquire().returncode, 0)
@@ -450,6 +516,24 @@ print("87654321;claix")
         self.assertEqual(result.returncode, 2)
         self.assertIn("must be launched by Slurm", result.stderr)
 
+    def test_compute_continues_through_candidate_publication(self) -> None:
+        self.assertEqual(self.prepare().returncode, 0)
+        metadata = self.finish_extraction()
+        metadata["slurm"] = {"job_id": "12345678"}
+        self.write_metadata(metadata)
+        self.environment["SLURM_JOB_ID"] = "12345678"
+
+        result = self.invoke(
+            "_compute", "--metadata", self.metadata_path(), "--threads", "16"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.commands()[-2][:2], ["candidate", "plan"])
+        self.assertEqual(self.commands()[-1][:2], ["candidate", "rebuild"])
+        metadata = self.metadata()
+        self.assertEqual(metadata["steps"]["candidates"], "complete")
+        self.assertEqual(metadata["status"], "complete")
+
     def test_result_reports_fixed_paths_and_compact_counts(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)
         metadata = self.finish_extraction()
@@ -457,7 +541,7 @@ print("87654321;claix")
         result = self.invoke("result", "--run-root", self.run_root)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Status:   complete", result.stdout)
+        self.assertIn("Status:   awaiting_candidates", result.stdout)
         self.assertIn("works:      1", result.stdout)
         self.assertIn("agents:     1", result.stdout)
         self.assertIn("images:     3", result.stdout)
@@ -553,7 +637,7 @@ print("COMPLETED|0:0")
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Status:   complete", result.stdout)
+        self.assertIn("Status:   awaiting_candidates", result.stdout)
         self.assertNotIn("Failed step", result.stdout)
         self.assertEqual(self.metadata()["status"], "extracted")
 
@@ -593,6 +677,21 @@ print("COMPLETED|0:0")
         metadata = self.metadata()
         self.assertEqual(metadata["steps"]["candidates"], "complete")
         self.assertTrue(Path(metadata["candidate_plan_control"]).is_file())
+
+    def test_existing_pre_mapping_run_can_finish_candidate_publication(self) -> None:
+        self.assertEqual(self.prepare().returncode, 0)
+        metadata = self.finish_extraction()
+        metadata.pop("mapping_database")
+        metadata.pop("mapping_review")
+        metadata["steps"]["candidates"] = "not_requested"
+        self.write_metadata(metadata)
+
+        result = self.invoke(
+            "rebuild-candidates", "--run-root", self.run_root
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.metadata()["steps"]["candidates"], "complete")
 
     def test_clean_verifies_dump_and_keeps_results(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)

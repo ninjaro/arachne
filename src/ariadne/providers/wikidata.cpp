@@ -520,7 +520,12 @@ nlohmann::ordered_json wikidata_enrichment_provider::fetch_plan(
             || value.empty()) {
             continue;
         }
-        const std::string language = row.value("language_code", languages[0]);
+        const auto language_value = row.find("language_code");
+        const std::string language
+            = language_value != row.end() && language_value->is_string()
+                && !language_value->get_ref<const std::string&>().empty()
+            ? language_value->get<std::string>()
+            : languages.front();
         auto& target = queries[{ "name", language, value }];
         target.kind = "name";
         target.value = value;

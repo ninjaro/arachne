@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import bz2
+import contextlib
+import fcntl
 import hashlib
 import json
 import sqlite3
@@ -35,6 +37,16 @@ def time_claim(value: str) -> dict[str, object]:
         "mainsnak": {
             "snaktype": "value",
             "datavalue": {"value": {"time": value}},
+        },
+    }
+
+
+def string_claim(value: str) -> dict[str, object]:
+    return {
+        "rank": "normal",
+        "mainsnak": {
+            "snaktype": "value",
+            "datavalue": {"value": value, "type": "string"},
         },
     }
 
@@ -134,6 +146,14 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                 "labels": {"en": {"value": "Frontier creator"}},
                 "claims": {"P27": [item_claim("Q30")]},
             },
+            {
+                "id": "Q12",
+                "labels": {"en": {"value": "Candidate creator"}},
+                "aliases": {
+                    "de": [{"value": "Kandidierende Person"}]
+                },
+                "claims": {"P345": [string_claim("nm1234567")]},
+            },
         ]
         dump_bytes = b"[\n" + b",\n".join(
             json.dumps(entity, separators=(",", ":")).encode("utf-8")
@@ -189,6 +209,22 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                 {"table": "works", "row": {"entity_id": "product-work-1"}},
                 {"table": "agents", "row": {"entity_id": "product-agent-1"}},
                 {"table": "agents", "row": {"entity_id": "product-agent-2"}},
+                {"table": "agents", "row": {"entity_id": "product-agent-3"}},
+                {
+                    "table": "names",
+                    "row": {
+                        "entity_id": "product-agent-3",
+                        "value": "  Candidate  Creator ",
+                    },
+                },
+                {
+                    "table": "external_ids",
+                    "row": {
+                        "entity_id": "product-agent-3",
+                        "scheme": "imdb_name",
+                        "value": "nm1234567",
+                    },
+                },
                 {
                     "table": "external_ids",
                     "row": {
@@ -368,6 +404,25 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         )
         self.assertEqual(report["image_hints_output"]["entity_count"], 2)
         self.assertEqual(report["image_hints_output"]["image_count"], 5)
+        mapping_review = json.loads(
+            (self.results / "wikidata-mapping-review.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(mapping_review["summary"]["candidates"], 1)
+        candidate = mapping_review["candidates"][0]
+        self.assertEqual(
+            {
+                "canonical_entity_id": candidate["canonical_entity_id"],
+                "provider_id": candidate["provider_id"],
+                "evidence": candidate["evidence"],
+            },
+            {
+                "canonical_entity_id": "product-agent-3",
+                "provider_id": "Q12",
+                "evidence": ["name", "external_id"],
+            },
+        )
         self.assertEqual(list(self.work.iterdir()), [])
 
     def test_emits_bounded_ranked_work_and_agent_commons_hints(self) -> None:
@@ -456,7 +511,7 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         databases = list(self.work.glob("*.sqlite3"))
         self.assertEqual(len(databases), 1)
-        with sqlite3.connect(databases[0]) as connection:
+        with contextlib.closing(sqlite3.connect(databases[0])) as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT id FROM covered_qids ORDER BY id"
@@ -485,7 +540,7 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         self.assertTrue(self.image_hints_output.is_file())
         databases = list(self.work.glob("*.sqlite3"))
         self.assertEqual(len(databases), 1)
-        with sqlite3.connect(databases[0]) as connection:
+        with contextlib.closing(sqlite3.connect(databases[0])) as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT id FROM covered_qids ORDER BY id"
@@ -510,11 +565,104 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         )
         databases = list(self.work.glob("*.sqlite3"))
         self.assertEqual(len(databases), 1)
-        with sqlite3.connect(databases[0]) as connection:
+        with contextlib.closing(sqlite3.connect(databases[0])) as connection:
             self.assertEqual(
                 connection.execute("PRAGMA integrity_check").fetchone()[0],
                 "ok",
             )
+
+    def test_resumes_from_completed_whole_dump_passes(self) -> None:
+        first = self.run_worker("--keep-work-db")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        database = next(self.work.glob("*.sqlite3"))
+        with contextlib.closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "DELETE FROM stage_checkpoints WHERE stage IN ('pass3','publication')"
+            )
+            connection.commit()
+        for path in (self.output, self.image_hints_output, self.report):
+            path.unlink()
+
+        resumed = self.run_worker("--keep-work-db")
+
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn("stage=pass1-scan-merge status=reused", resumed.stdout)
+        self.assertIn("stage=pass2-scan-compact status=reused", resumed.stdout)
+        self.assertIn("stage=pass3-scan-merge status=start", resumed.stdout)
+        self.assertLessEqual(resumed.stdout.count("wikidata_stage stage="), 12)
+
+    def test_refuses_recovery_while_another_worker_owns_the_checkpoint(self) -> None:
+        first = self.run_worker("--keep-work-db")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        database = next(self.work.glob("*.sqlite3"))
+        lock_path = database.with_suffix(".lock")
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            blocked = self.run_worker("--keep-work-db")
+
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("another Wikidata worker still owns", blocked.stderr)
+
+    def test_mapping_generation_reuses_unchanged_crosswalks_without_rewrite(
+        self,
+    ) -> None:
+        first = self.run_worker("--keep-work-db")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        database = next(self.work.glob("*.sqlite3"))
+        mapping_database = self.root / "wikidata-provider-mappings.sqlite3"
+        with contextlib.closing(sqlite3.connect(database)) as connection:
+            connection.execute("CREATE TABLE mapping_budget_padding(value BLOB)")
+            connection.execute(
+                "INSERT INTO mapping_budget_padding VALUES(zeroblob(1048576))"
+            )
+            connection.execute(
+                "DELETE FROM stage_checkpoints WHERE stage='mapping'"
+            )
+            connection.commit()
+        self.report.unlink()
+
+        promoted = self.run_worker("--keep-work-db")
+        self.assertEqual(promoted.returncode, 0, promoted.stderr)
+        review = json.loads(
+            (self.results / "wikidata-mapping-review.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(review["summary"]["promoted"], 3)
+        self.assertEqual(review["summary"]["candidate_promoted"], 1)
+        before = digest(mapping_database)
+        with contextlib.closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "DELETE FROM stage_checkpoints WHERE stage='mapping'"
+            )
+            connection.commit()
+        self.report.unlink()
+
+        verified = self.run_worker("--keep-work-db")
+
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertEqual(digest(mapping_database), before)
+        review = json.loads(
+            (self.results / "wikidata-mapping-review.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(review["summary"]["unchanged"], 3)
+        self.assertEqual(review["summary"]["candidate_unchanged"], 1)
+        self.assertEqual(
+            review["budgets"]["mapping_cap"],
+            review["budgets"]["graph_db_bytes"] // 3,
+        )
+
+    def test_creates_configured_cross_run_mapping_directory(self) -> None:
+        mapping = self.root / "persistent" / "mapping" / "wikidata.sqlite3"
+
+        result = self.run_worker("--mapping-database", str(mapping))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(mapping.is_file())
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(Path(report["mapping"]["database"]), mapping)
 
     def test_tampered_source_fails_before_algorithm_or_output(self) -> None:
         control = json.loads(self.source_control.read_text(encoding="utf-8"))

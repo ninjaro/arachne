@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <map>
+#include <ranges>
 #include <set>
 #include <string>
 #include <utility>
@@ -269,6 +270,30 @@ TEST(WikidataEnrichment, PlansAllMappedAndUnmappedEntitiesWithoutRanking) {
     EXPECT_EQ(media_requests, 1U);
 }
 
+TEST(WikidataEnrichment, UsesConfiguredFallbackForNullableNameLanguage) {
+    json canonical = product();
+    canonical["names"].at(2)["language_code"] = nullptr;
+
+    const auto plan
+        = arachne::ariadne::wikidata_enrichment_provider::fetch_plan(
+            canonical, { "de", "en" }, "wikidata-null-language-test",
+            "2026-08-25T12:00:00Z"
+        );
+    ASSERT_TRUE(arachnespace::contracts::validate(
+        arachnespace::contracts::contract_name::fetch_plan, plan
+    ));
+
+    const auto request = std::ranges::find_if(
+        plan.at("requests"), [](const json& candidate) {
+            return candidate.contains("identity_query")
+                && candidate.at("identity_query").value("value", "")
+                == "深井国";
+        }
+    );
+    ASSERT_NE(request, plan.at("requests").end());
+    EXPECT_EQ(request->at("identity_query").at("language"), "de");
+}
+
 TEST(WikidataEnrichment, NormalizesAndComparesFieldsRelationsMediaAndCandidates) {
     const arachne::ariadne::wikidata_enrichment_provider provider;
     const auto normalized = provider.normalize(bundle());
@@ -280,7 +305,7 @@ TEST(WikidataEnrichment, NormalizesAndComparesFieldsRelationsMediaAndCandidates)
     );
     EXPECT_FALSE(review.at("write_authority").get<bool>());
     EXPECT_EQ(review.at("entity_mappings").size(), 3U);
-    EXPECT_EQ(review.at("summary").at("identity_suspicion_count"), 2U);
+    EXPECT_EQ(review.at("summary").at("identity_suspicion_count"), 3U);
     EXPECT_EQ(review.at("identity_candidates").size(), 1U);
     EXPECT_EQ(
         review.at("identity_candidates").at(0).at("identity_status"),
@@ -302,6 +327,9 @@ TEST(WikidataEnrichment, NormalizesAndComparesFieldsRelationsMediaAndCandidates)
         EXPECT_TRUE(mapping.at("requested_provider_id")
                         .get<std::string>()
                         .starts_with('Q'));
+        if (mapping.at("canonical_entity_id") == "work-000001") {
+            EXPECT_EQ(mapping.at("identity_status"), "suspicious");
+        }
     }
     ASSERT_EQ(review.at("relation_diffs").size(), 1U);
     EXPECT_EQ(
@@ -329,6 +357,41 @@ TEST(WikidataEnrichment, NormalizesAndComparesFieldsRelationsMediaAndCandidates)
     }
     EXPECT_TRUE(found_suspicion);
     EXPECT_TRUE(found_same_duration);
+}
+
+TEST(WikidataEnrichment, CandidateExternalIdConflictsAreNegativeSignals) {
+    json provider_bundle = bundle();
+    json& entities = provider_bundle["responses"][0]["body"]["entities"];
+    entities["Q301"] = entities["Q300"];
+    entities["Q301"]["id"] = "Q301";
+    entities["Q301"]["claims"]["P345"] = {
+        string_claim("nm-conflicting")
+    };
+    provider_bundle["responses"][1]["body"]["search"].push_back(
+        { { "id", "Q301" }, { "label", "深井国" }, { "language", "ja" } }
+    );
+
+    const arachne::ariadne::wikidata_enrichment_provider provider;
+    const auto normalized = provider.normalize(provider_bundle);
+    const auto review = arachne::ariadne::enrichment_review_builder::build(
+        product(), normalized, "product-candidates", std::string(64U, 'c')
+    );
+    const auto& candidates
+        = review.at("identity_candidates").at(0).at("candidates");
+    const auto conflicting = std::ranges::find_if(
+        candidates, [](const json& candidate) {
+            return candidate.value("provider_id", "") == "Q301";
+        }
+    );
+    ASSERT_NE(conflicting, candidates.end());
+    EXPECT_EQ(conflicting->at("score"), -25);
+    EXPECT_TRUE(std::ranges::any_of(
+        conflicting->at("signals"), [](const json& signal) {
+            return signal.value("kind", "") == "external_id"
+                && signal.value("outcome", "") == "conflicting"
+                && signal.value("weight", 0) == -100;
+        }
+    ));
 }
 
 TEST(WikidataEnrichment, ComparesOnlyTypeCompatibleCanonicalRelations) {

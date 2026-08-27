@@ -14,6 +14,7 @@ import argparse
 import bz2
 import contextlib
 import datetime as dt
+import fcntl
 import gzip
 import hashlib
 import json
@@ -25,6 +26,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
@@ -40,9 +42,12 @@ MAX_EXTERNAL_GRAPH_BYTES = 1024 * 1024 * 1024
 MAX_IMAGE_HINTS_BYTES = 64 * 1024 * 1024
 MAX_WORK_CLASSES = 10_000_000
 MAX_PRODUCT_IMAGE_TARGETS = 2_000_000
+MAX_MAPPING_CANDIDATES = 2_000_000
 MAX_IMAGE_CLAIMS_PER_PROPERTY = 16
 MAX_IMAGE_HINTS_PER_ENTITY = 3
 MAX_DECOMPRESS_THREADS = 1024
+CHECKPOINT_FORMAT_VERSION = 1
+GIB = 1024 * 1024 * 1024
 STABLE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 EXTENSION_KEY = re.compile(
@@ -72,6 +77,57 @@ IMAGE_PROPERTIES = {
     "agent": {"P18": "agent_portrait", "P154": "agent_logo"},
 }
 IMAGE_CLAIM_PROPERTIES = ("P18", "P154", "P3383")
+MAPPING_SIGNAL_PROPERTIES = (
+    "P31",
+    *PROFILE_TIME_PROPERTIES,
+    "P345",
+    "P214",
+    "P213",
+    "P227",
+    "P268",
+    "P244",
+    "P245",
+    "P434",
+    "P436",
+    "P1953",
+    "P1954",
+    "P4947",
+    "P4985",
+    "P356",
+    "P50",
+    "P57",
+    "P58",
+    "P86",
+    "P161",
+    "P162",
+    "P175",
+    "P272",
+    "P655",
+    "P110",
+    "P361",
+    "P463",
+    "P749",
+)
+EXTERNAL_SCHEME_PROPERTIES = {
+    "imdb": "P345",
+    "imdb_title": "P345",
+    "imdb_name": "P345",
+    "viaf": "P214",
+    "isni": "P213",
+    "gnd": "P227",
+    "bnf": "P268",
+    "lcnaf": "P244",
+    "ulan": "P245",
+    "musicbrainz_artist": "P434",
+    "musicbrainz_release_group": "P436",
+    "discogs_artist": "P1953",
+    "discogs_master": "P1954",
+    "tmdb_movie": "P4947",
+    "tmdb_person": "P4985",
+    "doi": "P356",
+}
+MAPPING_MATCH_NAME = 1
+MAPPING_MATCH_EXTERNAL_ID = 2
 
 
 class WorkerError(RuntimeError):
@@ -102,6 +158,11 @@ def parser() -> argparse.ArgumentParser:
         help="Wikidata extraction policy (default: adjacent config.json)",
     )
     result.add_argument("--decompress-threads", type=int, default=1)
+    result.add_argument(
+        "--mapping-database",
+        type=Path,
+        help="persistent cross-run Wikidata identity mapping store",
+    )
     result.add_argument("--keep-work-db", action="store_true")
     return result
 
@@ -627,6 +688,45 @@ def claim_qids(entity: Mapping[str, Any], property_id: str) -> set[str]:
     return result
 
 
+def provider_identity_names(entity: Mapping[str, Any]) -> set[str]:
+    result: set[str] = set()
+    for field in ("labels", "aliases"):
+        values = entity.get(field)
+        if not isinstance(values, Mapping):
+            continue
+        for records in values.values():
+            records = records if isinstance(records, list) else [records]
+            for record in records:
+                text = record.get("value") if isinstance(record, Mapping) else None
+                if isinstance(text, str) and (
+                    normalized := normalized_identity_text(text)
+                ):
+                    result.add(normalized)
+    return result
+
+
+def claim_strings(entity: Mapping[str, Any], property_id: str) -> set[str]:
+    claims = entity.get("claims")
+    statements = claims.get(property_id) if isinstance(claims, Mapping) else None
+    if not isinstance(statements, list):
+        return set()
+    result: set[str] = set()
+    for statement in statements:
+        if (
+            not isinstance(statement, Mapping)
+            or statement.get("rank") == "deprecated"
+        ):
+            continue
+        mainsnak = statement.get("mainsnak")
+        datavalue = (
+            mainsnak.get("datavalue") if isinstance(mainsnak, Mapping) else None
+        )
+        value = datavalue.get("value") if isinstance(datavalue, Mapping) else None
+        if isinstance(value, str) and (normalized := normalized_identity_text(value)):
+            result.add(normalized)
+    return result
+
+
 def valid_commons_filename(value: object) -> bool:
     if (
         not isinstance(value, str)
@@ -735,6 +835,63 @@ def claim_years(entity: Mapping[str, Any], property_id: str) -> list[int]:
     return sorted(values)
 
 
+def mapping_signal_fingerprint(entity: Mapping[str, Any]) -> str:
+    """Hash only identity evidence; never use this digest as a record ID."""
+    signals: dict[str, Any] = {"labels": {}, "aliases": {}, "claims": {}}
+    for field in ("labels", "aliases"):
+        values = entity.get(field)
+        if not isinstance(values, Mapping):
+            continue
+        normalized: dict[str, list[str]] = {}
+        for language, records in values.items():
+            records = records if isinstance(records, list) else [records]
+            texts = sorted(
+                {
+                    " ".join(record["value"].split())
+                    for record in records
+                    if isinstance(record, Mapping)
+                    and isinstance(record.get("value"), str)
+                    and record["value"].strip()
+                }
+            )
+            if isinstance(language, str) and texts:
+                normalized[language] = texts
+        signals[field] = normalized
+    claims = entity.get("claims")
+    if isinstance(claims, Mapping):
+        for property_id in MAPPING_SIGNAL_PROPERTIES:
+            statements = claims.get(property_id)
+            if not isinstance(statements, list):
+                continue
+            values: list[str] = []
+            for statement in statements:
+                if (
+                    not isinstance(statement, Mapping)
+                    or statement.get("rank") == "deprecated"
+                ):
+                    continue
+                mainsnak = statement.get("mainsnak")
+                datavalue = (
+                    mainsnak.get("datavalue")
+                    if isinstance(mainsnak, Mapping)
+                    else None
+                )
+                if isinstance(datavalue, Mapping) and "value" in datavalue:
+                    values.append(
+                        json.dumps(
+                            datavalue["value"],
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+            if values:
+                signals["claims"][property_id] = sorted(set(values))
+    encoded = json.dumps(
+        signals, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def profile(entity: Mapping[str, Any]) -> dict[str, Any]:
     output: dict[str, Any] = {}
     for property_id, field in PROFILE_ITEM_PROPERTIES.items():
@@ -767,9 +924,19 @@ def create_database(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     connection.executescript(
         """
-        PRAGMA journal_mode=OFF;
-        PRAGMA synchronous=OFF;
+        PRAGMA journal_mode=DELETE;
+        PRAGMA synchronous=FULL;
         PRAGMA temp_store=FILE;
+        CREATE TABLE checkpoint_identity(
+          singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+          format_version INTEGER NOT NULL,
+          identity_json TEXT NOT NULL
+        );
+        CREATE TABLE stage_checkpoints(
+          stage TEXT PRIMARY KEY,
+          completed_at TEXT NOT NULL,
+          counters_json TEXT NOT NULL
+        ) WITHOUT ROWID;
         CREATE TABLE class_edges(parent_id TEXT NOT NULL, child_id TEXT NOT NULL,
           PRIMARY KEY(parent_id, child_id)) WITHOUT ROWID;
         CREATE TABLE work_classes(id TEXT PRIMARY KEY) WITHOUT ROWID;
@@ -783,6 +950,17 @@ def create_database(path: Path) -> sqlite3.Connection:
         CREATE TABLE product_agent_entities(id TEXT PRIMARY KEY) WITHOUT ROWID;
         CREATE TABLE product_external(entity_id TEXT NOT NULL, qid TEXT NOT NULL,
           PRIMARY KEY(entity_id, qid)) WITHOUT ROWID;
+        CREATE TABLE product_names(
+          normalized_name TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          PRIMARY KEY(normalized_name, entity_id)
+        ) WITHOUT ROWID;
+        CREATE TABLE product_crosswalks(
+          property_id TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          PRIMARY KEY(property_id, normalized_value, entity_id)
+        ) WITHOUT ROWID;
         CREATE TABLE covered_qids(id TEXT PRIMARY KEY) WITHOUT ROWID;
         CREATE TABLE product_image_targets(
           entity_id TEXT NOT NULL,
@@ -799,15 +977,180 @@ def create_database(path: Path) -> sqlite3.Connection:
           rank_priority INTEGER NOT NULL CHECK(rank_priority IN (0,1)),
           PRIMARY KEY(qid, property_id, filename)
         ) WITHOUT ROWID;
+        CREATE TABLE mapping_observations(
+          provider_id TEXT PRIMARY KEY,
+          fingerprint TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE mapping_candidates(
+          canonical_entity_id TEXT NOT NULL,
+          provider_id TEXT NOT NULL,
+          evidence_flags INTEGER NOT NULL,
+          fingerprint TEXT NOT NULL,
+          PRIMARY KEY(canonical_entity_id, provider_id)
+        ) WITHOUT ROWID;
         """
     )
     return connection
+
+
+def open_database(path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("PRAGMA temp_store=FILE")
+    return connection
+
+
+def checkpoint_identity(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def initialize_database(
+    path: Path,
+    product_export: Path,
+    identity: Mapping[str, Any],
+) -> int:
+    staging = path.with_name(f".{path.name}.initializing")
+    staging.unlink(missing_ok=True)
+    try:
+        connection = create_database(staging)
+        try:
+            covered = load_product_coverage(connection, product_export)
+            connection.execute(
+                "INSERT INTO checkpoint_identity VALUES(1,?,?)",
+                (CHECKPOINT_FORMAT_VERSION, checkpoint_identity(identity)),
+            )
+            connection.execute(
+                "INSERT INTO stage_checkpoints VALUES('prepared',?,?)",
+                (
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                    json.dumps(
+                        {"covered_product_qids": covered},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        os.replace(staging, path)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    return covered
+
+
+@contextlib.contextmanager
+def exclusive_worker_lock(path: Path) -> Iterator[None]:
+    """Prove no prior worker still owns this checkpoint before recovery."""
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise WorkerError(
+                "another Wikidata worker still owns this checkpoint"
+            ) from error
+        os.ftruncate(descriptor, 0)
+        os.write(
+            descriptor,
+            f"pid={os.getpid()} started={dt.datetime.now(dt.timezone.utc).isoformat()}\n".encode(),
+        )
+        os.fsync(descriptor)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def validate_checkpoint(path: Path, identity: Mapping[str, Any]) -> dict[str, Any]:
+    connection = open_database(path)
+    try:
+        if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise WorkerError("Wikidata checkpoint database is corrupt")
+        row = connection.execute(
+            "SELECT format_version,identity_json FROM checkpoint_identity "
+            "WHERE singleton=1"
+        ).fetchone()
+        if row != (CHECKPOINT_FORMAT_VERSION, checkpoint_identity(identity)):
+            raise WorkerError(
+                "Wikidata checkpoint belongs to different source, product, or policy inputs"
+            )
+        return {
+            stage: json.loads(counters)
+            for stage, counters in connection.execute(
+                "SELECT stage,counters_json FROM stage_checkpoints"
+            )
+        }
+    except (sqlite3.DatabaseError, json.JSONDecodeError) as error:
+        raise WorkerError(f"invalid Wikidata checkpoint database: {error}") from error
+    finally:
+        connection.close()
+
+
+def record_checkpoint(
+    connection: sqlite3.Connection,
+    stage: str,
+    counters: Mapping[str, int | str],
+) -> None:
+    connection.execute(
+        "INSERT OR REPLACE INTO stage_checkpoints VALUES(?,?,?)",
+        (
+            stage,
+            dt.datetime.now(dt.timezone.utc).isoformat(),
+            json.dumps(counters, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+
+
+def stage_start(stage: str) -> float:
+    print(f"wikidata_stage stage={stage} status=start", flush=True)
+    return time.monotonic()
+
+
+def stage_end(
+    stage: str, started: float, counters: Mapping[str, int | str]
+) -> None:
+    useful = " ".join(
+        f"{key}={value}"
+        for key, value in [
+            item for item in sorted(counters.items()) if "sha256" not in item[0]
+        ][:6]
+    )
+    print(
+        f"wikidata_stage stage={stage} status=complete "
+        f"elapsed={time.monotonic() - started:.1f}s {useful}".rstrip(),
+        flush=True,
+    )
+
+
+def stage_reused(stage: str, counters: Mapping[str, int | str]) -> None:
+    useful = " ".join(
+        f"{key}={value}"
+        for key, value in [
+            item for item in sorted(counters.items()) if "sha256" not in item[0]
+        ][:6]
+    )
+    print(
+        f"wikidata_stage stage={stage} status=reused {useful}".rstrip(),
+        flush=True,
+    )
+
+
+def normalized_identity_text(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
 
 
 def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
     works: list[tuple[str]] = []
     agents: list[tuple[str]] = []
     identifiers: list[tuple[str, str]] = []
+    names: list[tuple[str, str]] = []
+    crosswalks: list[tuple[str, str, str]] = []
     with export.open("rb") as stream:
         for line_number, raw in iter_bounded_lines(
             stream, MAX_PRODUCT_LINE_BYTES, "product JSONL"
@@ -841,6 +1184,28 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
                 and valid_qid(row["value"])
             ):
                 identifiers.append((row["entity_id"], row["value"]))
+            if (
+                item.get("table") == "names"
+                and isinstance(row.get("entity_id"), str)
+                and STABLE_ID.fullmatch(row["entity_id"])
+                and isinstance(row.get("value"), str)
+                and (normalized := normalized_identity_text(row["value"]))
+            ):
+                names.append((normalized, row["entity_id"]))
+            elif (
+                item.get("table") == "external_ids"
+                and isinstance(row.get("entity_id"), str)
+                and STABLE_ID.fullmatch(row["entity_id"])
+                and isinstance(row.get("scheme"), str)
+                and isinstance(row.get("value"), str)
+                and (
+                    property_id := EXTERNAL_SCHEME_PROPERTIES.get(
+                        row["scheme"].casefold()
+                    )
+                )
+                and (normalized := normalized_identity_text(row["value"]))
+            ):
+                crosswalks.append((property_id, normalized, row["entity_id"]))
             if len(works) >= BATCH_SIZE:
                 connection.executemany(
                     "INSERT OR IGNORE INTO product_work_entities VALUES(?)", works
@@ -857,6 +1222,17 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
                     "INSERT OR IGNORE INTO product_external VALUES(?,?)", identifiers
                 )
                 identifiers.clear()
+            if len(names) >= BATCH_SIZE:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO product_names VALUES(?,?)", names
+                )
+                names.clear()
+            if len(crosswalks) >= BATCH_SIZE:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO product_crosswalks VALUES(?,?,?)",
+                    crosswalks,
+                )
+                crosswalks.clear()
     connection.executemany(
         "INSERT OR IGNORE INTO product_work_entities VALUES(?)", works
     )
@@ -865,6 +1241,12 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
     )
     connection.executemany(
         "INSERT OR IGNORE INTO product_external VALUES(?,?)", identifiers
+    )
+    connection.executemany(
+        "INSERT OR IGNORE INTO product_names VALUES(?,?)", names
+    )
+    connection.executemany(
+        "INSERT OR IGNORE INTO product_crosswalks VALUES(?,?,?)", crosswalks
     )
     connection.execute(
         "INSERT OR IGNORE INTO covered_qids "
@@ -900,13 +1282,9 @@ def load_product_coverage(connection: sqlite3.Connection, export: Path) -> int:
     return int(connection.execute("SELECT COUNT(*) FROM covered_qids").fetchone()[0])
 
 
-def build_graph(
-    connection: sqlite3.Connection,
-    dump: Path,
+def graph_configuration(
     config: Mapping[str, Any],
-    ranking_policy: Mapping[str, int],
-    threads: int,
-) -> dict[str, int]:
+) -> tuple[list[str], list[str], list[str]]:
     roots = config.get("work_root_qids")
     properties = config.get("agent_properties")
     languages = config.get("languages", ["en"])
@@ -942,130 +1320,973 @@ def build_graph(
         or len(set(languages)) != len(languages)
     ):
         raise WorkerError("Wikidata worker configuration is invalid")
+    return roots, properties, languages
 
-    image_target_qids = {
-        row[0]
-        for row in connection.execute(
-            "SELECT DISTINCT qid FROM product_image_targets"
+
+def create_delta(path: Path, schema: str) -> sqlite3.Connection:
+    path.unlink(missing_ok=True)
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE;"
+        + schema
+    )
+    return connection
+
+
+def attach_delta(connection: sqlite3.Connection, path: Path) -> None:
+    connection.execute("ATTACH DATABASE ? AS delta", (str(path),))
+
+
+def merge_first_pass(
+    checkpoint: Path,
+    delta: Path,
+    roots: Sequence[str],
+    counters: dict[str, int],
+) -> dict[str, int]:
+    connection = open_database(checkpoint)
+    attach_delta(connection, delta)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM class_edges")
+        connection.execute("DELETE FROM product_image_claims")
+        connection.execute("DELETE FROM mapping_observations")
+        connection.execute("DELETE FROM mapping_candidates")
+        connection.execute("DELETE FROM work_classes")
+        connection.execute(
+            "INSERT INTO class_edges SELECT parent_id,child_id FROM delta.class_edges"
         )
-    }
+        connection.execute(
+            "INSERT INTO product_image_claims "
+            "SELECT qid,property_id,filename,rank_priority "
+            "FROM delta.product_image_claims"
+        )
+        connection.execute(
+            "INSERT INTO mapping_observations "
+            "SELECT provider_id,fingerprint FROM delta.mapping_observations"
+        )
+        connection.execute(
+            "INSERT INTO mapping_candidates "
+            "SELECT canonical_entity_id,provider_id,evidence_flags,fingerprint "
+            "FROM delta.mapping_candidates"
+        )
+        connection.executemany(
+            "INSERT OR IGNORE INTO work_classes VALUES(?)",
+            ((value,) for value in roots),
+        )
+        connection.execute(
+            "WITH RECURSIVE descendants(id) AS ("
+            " SELECT id FROM work_classes UNION "
+            " SELECT e.child_id FROM class_edges e "
+            " JOIN descendants d ON e.parent_id=d.id"
+            ") INSERT OR IGNORE INTO work_classes SELECT id FROM descendants"
+        )
+        counters["work_classes"] = int(
+            connection.execute("SELECT COUNT(*) FROM work_classes").fetchone()[0]
+        )
+        if counters["work_classes"] > MAX_WORK_CLASSES:
+            raise WorkerError("creative-work class closure exceeds its safe bound")
+        counters["wikidata_image_claims"] = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM product_image_claims"
+            ).fetchone()[0]
+        )
+        counters["mapped_provider_entities_observed"] = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM mapping_observations"
+            ).fetchone()[0]
+        )
+        counters["mapping_candidate_pairs"] = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM mapping_candidates"
+            ).fetchone()[0]
+        )
+        if counters["mapping_candidate_pairs"] > MAX_MAPPING_CANDIDATES:
+            raise WorkerError("Wikidata mapping candidates exceed their safe bound")
+        record_checkpoint(connection, "pass1", counters)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("DETACH DATABASE delta")
+        connection.close()
+    return counters
+
+
+def scan_first_pass(
+    checkpoint: Path,
+    delta: Path,
+    dump: Path,
+    threads: int,
+) -> dict[str, int]:
+    main = open_database(checkpoint)
+    try:
+        image_target_qids = {
+            row[0]
+            for row in main.execute("SELECT DISTINCT qid FROM product_image_targets")
+        }
+        mapped_provider_ids = {
+            row[0] for row in main.execute("SELECT DISTINCT qid FROM product_external")
+        }
+        canonical_by_name: dict[str, list[str]] = {}
+        for normalized_name, canonical_id in main.execute(
+            "SELECT n.normalized_name,n.entity_id FROM product_names n "
+            "WHERE NOT EXISTS(SELECT 1 FROM product_external p "
+            "WHERE p.entity_id=n.entity_id)"
+        ):
+            canonical_by_name.setdefault(normalized_name, []).append(canonical_id)
+        canonical_by_external: dict[tuple[str, str], list[str]] = {}
+        for property_id, normalized_value, canonical_id in main.execute(
+            "SELECT x.property_id,x.normalized_value,x.entity_id "
+            "FROM product_crosswalks x "
+            "WHERE NOT EXISTS(SELECT 1 FROM product_external p "
+            "WHERE p.entity_id=x.entity_id)"
+        ):
+            canonical_by_external.setdefault(
+                (property_id, normalized_value), []
+            ).append(canonical_id)
+        candidate_external_properties = sorted(
+            {property_id for property_id, _value in canonical_by_external}
+        )
+    finally:
+        main.close()
+
+    connection = create_delta(
+        delta,
+        """
+        CREATE TABLE class_edges(parent_id TEXT NOT NULL, child_id TEXT NOT NULL,
+          PRIMARY KEY(parent_id, child_id)) WITHOUT ROWID;
+        CREATE TABLE product_image_claims(
+          qid TEXT NOT NULL, property_id TEXT NOT NULL, filename TEXT NOT NULL,
+          rank_priority INTEGER NOT NULL,
+          PRIMARY KEY(qid, property_id, filename)) WITHOUT ROWID;
+        CREATE TABLE mapping_observations(
+          provider_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE mapping_candidates(
+          canonical_entity_id TEXT NOT NULL,
+          provider_id TEXT NOT NULL,
+          evidence_flags INTEGER NOT NULL,
+          fingerprint TEXT NOT NULL,
+          PRIMARY KEY(canonical_entity_id, provider_id)
+        ) WITHOUT ROWID;
+        """,
+    )
     class_edges: list[tuple[str, str]] = []
     image_claims: list[tuple[str, str, str, int]] = []
+    mapping_candidates: list[tuple[str, str, int, str]] = []
     first_pass = 0
-    for entity in iter_entities(dump, threads):
-        first_pass += 1
-        entity_id = entity.get("id")
-        if not isinstance(entity_id, str) or not valid_qid(entity_id):
-            continue
-        class_edges.extend((parent, entity_id) for parent in claim_qids(entity, "P279"))
-        if entity_id in image_target_qids:
-            for property_id in IMAGE_CLAIM_PROPERTIES:
-                image_claims.extend(
-                    (entity_id, property_id, filename, rank_priority)
-                    for rank_priority, filename in commons_media_claims(
-                        entity, property_id
-                    )
-                )
-        if len(class_edges) >= BATCH_SIZE:
-            connection.executemany(
-                "INSERT OR IGNORE INTO class_edges VALUES(?,?)", class_edges
+    try:
+        for entity in iter_entities(dump, threads):
+            first_pass += 1
+            entity_id = entity.get("id")
+            if not isinstance(entity_id, str) or not valid_qid(entity_id):
+                continue
+            class_edges.extend(
+                (parent, entity_id) for parent in claim_qids(entity, "P279")
             )
-            class_edges.clear()
-        if len(image_claims) >= BATCH_SIZE:
-            flush_image_claims(connection, image_claims)
-    connection.executemany(
-        "INSERT OR IGNORE INTO class_edges VALUES(?,?)", class_edges
-    )
-    flush_image_claims(connection, image_claims)
-    connection.executemany(
-        "INSERT OR IGNORE INTO work_classes VALUES(?)", ((value,) for value in roots)
-    )
-    connection.execute(
-        "WITH RECURSIVE descendants(id) AS ("
-        " SELECT id FROM work_classes UNION "
-        " SELECT e.child_id FROM class_edges e JOIN descendants d ON e.parent_id=d.id"
-        ") INSERT OR IGNORE INTO work_classes SELECT id FROM descendants"
-    )
-    connection.commit()
-    work_class_count = int(
-        connection.execute("SELECT COUNT(*) FROM work_classes").fetchone()[0]
-    )
-    if work_class_count > MAX_WORK_CLASSES:
-        raise WorkerError("creative-work class closure exceeds its safe bound")
-    work_classes = {
-        row[0] for row in connection.execute("SELECT id FROM work_classes")
+            if entity_id in image_target_qids:
+                for property_id in IMAGE_CLAIM_PROPERTIES:
+                    image_claims.extend(
+                        (entity_id, property_id, filename, rank_priority)
+                        for rank_priority, filename in commons_media_claims(
+                            entity, property_id
+                        )
+                    )
+            candidate_flags: dict[str, int] = {}
+            if canonical_by_name:
+                for normalized_name in provider_identity_names(entity):
+                    for canonical_id in canonical_by_name.get(normalized_name, ()):
+                        candidate_flags[canonical_id] = (
+                            candidate_flags.get(canonical_id, 0)
+                            | MAPPING_MATCH_NAME
+                        )
+            for property_id in candidate_external_properties:
+                for normalized_value in claim_strings(entity, property_id):
+                    for canonical_id in canonical_by_external.get(
+                        (property_id, normalized_value), ()
+                    ):
+                        candidate_flags[canonical_id] = (
+                            candidate_flags.get(canonical_id, 0)
+                            | MAPPING_MATCH_EXTERNAL_ID
+                        )
+            fingerprint = (
+                mapping_signal_fingerprint(entity)
+                if entity_id in mapped_provider_ids or candidate_flags
+                else None
+            )
+            if entity_id in mapped_provider_ids and fingerprint is not None:
+                connection.execute(
+                    "INSERT OR REPLACE INTO mapping_observations VALUES(?,?)",
+                    (entity_id, fingerprint),
+                )
+            if fingerprint is not None:
+                mapping_candidates.extend(
+                    (canonical_id, entity_id, flags, fingerprint)
+                    for canonical_id, flags in candidate_flags.items()
+                )
+            if len(class_edges) >= BATCH_SIZE:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO class_edges VALUES(?,?)", class_edges
+                )
+                class_edges.clear()
+            if len(image_claims) >= BATCH_SIZE:
+                flush_image_claims(connection, image_claims)
+            if len(mapping_candidates) >= BATCH_SIZE:
+                flush_mapping_candidates(connection, mapping_candidates)
+        connection.executemany(
+            "INSERT OR IGNORE INTO class_edges VALUES(?,?)", class_edges
+        )
+        flush_image_claims(connection, image_claims)
+        flush_mapping_candidates(connection, mapping_candidates)
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "first_pass_entities": first_pass,
+        "product_image_target_qids": len(image_target_qids),
     }
 
+
+def scan_second_pass(
+    checkpoint: Path,
+    delta: Path,
+    dump: Path,
+    properties: Sequence[str],
+    languages: Sequence[str],
+    threads: int,
+) -> dict[str, int]:
+    main = open_database(checkpoint)
+    try:
+        work_classes = {
+            row[0] for row in main.execute("SELECT id FROM work_classes")
+        }
+    finally:
+        main.close()
+    connection = create_delta(
+        delta,
+        """
+        CREATE TABLE works(id TEXT PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE agents(id TEXT PRIMARY KEY, label TEXT NOT NULL,
+          profile_json TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE edges(work_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+          PRIMARY KEY(work_id, agent_id)) WITHOUT ROWID;
+        """,
+    )
     works: list[tuple[str, str]] = []
     agents: list[tuple[str, str, str]] = []
     edges: list[tuple[str, str]] = []
     second_pass = 0
-    for entity in iter_entities(dump, threads):
-        second_pass += 1
-        entity_id = entity.get("id")
-        if (
-            not isinstance(entity_id, str)
-            or not valid_qid(entity_id)
-            or not (claim_qids(entity, "P31") & work_classes)
-        ):
-            continue
-        works.append((entity_id, best_label(entity, languages, entity_id)))
-        for property_id in properties:
-            for agent_id in claim_qids(entity, property_id):
-                agents.append((agent_id, agent_id, "{}"))
-                edges.append((entity_id, agent_id))
-        if len(works) + len(agents) + len(edges) >= BATCH_SIZE:
-            flush_graph_rows(connection, works, agents, edges)
-    flush_graph_rows(connection, works, agents, edges)
-    connection.commit()
+    try:
+        for entity in iter_entities(dump, threads):
+            second_pass += 1
+            entity_id = entity.get("id")
+            if (
+                not isinstance(entity_id, str)
+                or not valid_qid(entity_id)
+                or not (claim_qids(entity, "P31") & work_classes)
+            ):
+                continue
+            works.append((entity_id, best_label(entity, languages, entity_id)))
+            for property_id in properties:
+                for agent_id in claim_qids(entity, property_id):
+                    agents.append((agent_id, agent_id, "{}"))
+                    edges.append((entity_id, agent_id))
+            if len(works) + len(agents) + len(edges) >= BATCH_SIZE:
+                flush_graph_rows(connection, works, agents, edges)
+        flush_graph_rows(connection, works, agents, edges)
+        connection.commit()
+    finally:
+        connection.close()
+    return {"second_pass_entities": second_pass}
 
-    ranked_agents = compact_to_ranked_pool(connection, ranking_policy)
-    agent_ids = {row[0] for row in connection.execute("SELECT id FROM agents")}
+
+def merge_second_pass(
+    checkpoint: Path,
+    delta: Path,
+    ranking_policy: Mapping[str, int],
+    counters: dict[str, int],
+) -> dict[str, int]:
+    connection = open_database(checkpoint)
+    attach_delta(connection, delta)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM edges")
+        connection.execute("DELETE FROM agents")
+        connection.execute("DELETE FROM works")
+        connection.execute("INSERT INTO works SELECT id,label FROM delta.works")
+        connection.execute(
+            "INSERT INTO agents SELECT id,label,profile_json FROM delta.agents"
+        )
+        connection.execute(
+            "INSERT INTO edges SELECT work_id,agent_id FROM delta.edges"
+        )
+        counters["ranked_pool_agents"] = compact_to_ranked_pool(
+            connection, ranking_policy
+        )
+        counters["works"] = int(
+            connection.execute("SELECT COUNT(*) FROM works").fetchone()[0]
+        )
+        counters["agents"] = int(
+            connection.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+        )
+        counters["edges"] = int(
+            connection.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        )
+        record_checkpoint(connection, "pass2", counters)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("DETACH DATABASE delta")
+        connection.close()
+    return counters
+
+
+def scan_third_pass(
+    checkpoint: Path,
+    delta: Path,
+    dump: Path,
+    languages: Sequence[str],
+    threads: int,
+) -> dict[str, int]:
+    main = open_database(checkpoint)
+    try:
+        agent_ids = {row[0] for row in main.execute("SELECT id FROM agents")}
+    finally:
+        main.close()
+    connection = create_delta(
+        delta,
+        """
+        CREATE TABLE agent_updates(
+          id TEXT PRIMARY KEY, label TEXT NOT NULL, profile_json TEXT NOT NULL
+        ) WITHOUT ROWID;
+        """,
+    )
     third_pass = 0
     updated = 0
     updates: list[tuple[str, str, str]] = []
-    for entity in iter_entities(dump, threads):
-        third_pass += 1
-        entity_id = entity.get("id")
-        if not isinstance(entity_id, str) or entity_id not in agent_ids:
-            continue
-        updates.append(
-            (
-                best_label(entity, languages, entity_id),
-                json.dumps(profile(entity), sort_keys=True, separators=(",", ":")),
-                entity_id,
+    try:
+        for entity in iter_entities(dump, threads):
+            third_pass += 1
+            entity_id = entity.get("id")
+            if not isinstance(entity_id, str) or entity_id not in agent_ids:
+                continue
+            updates.append(
+                (
+                    entity_id,
+                    best_label(entity, languages, entity_id),
+                    json.dumps(
+                        profile(entity), sort_keys=True, separators=(",", ":")
+                    ),
+                )
             )
+            updated += 1
+            if len(updates) >= BATCH_SIZE:
+                connection.executemany(
+                    "INSERT OR REPLACE INTO agent_updates VALUES(?,?,?)", updates
+                )
+                updates.clear()
+        connection.executemany(
+            "INSERT OR REPLACE INTO agent_updates VALUES(?,?,?)", updates
         )
-        updated += 1
-        if len(updates) >= BATCH_SIZE:
-            connection.executemany(
-                "UPDATE agents SET label=?, profile_json=? WHERE id=?", updates
-            )
-            updates.clear()
-    connection.executemany(
-        "UPDATE agents SET label=?, profile_json=? WHERE id=?", updates
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "third_pass_entities": third_pass,
+        "agent_profiles_resolved": updated,
+    }
+
+
+def merge_third_pass(
+    checkpoint: Path, delta: Path, counters: dict[str, int]
+) -> dict[str, int]:
+    connection = open_database(checkpoint)
+    attach_delta(connection, delta)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE agents SET "
+            "label=(SELECT label FROM delta.agent_updates WHERE id=agents.id),"
+            "profile_json=(SELECT profile_json FROM delta.agent_updates "
+            "WHERE id=agents.id) "
+            "WHERE id IN (SELECT id FROM delta.agent_updates)"
+        )
+        record_checkpoint(connection, "pass3", counters)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("DETACH DATABASE delta")
+        connection.close()
+    return counters
+
+
+def mapping_store(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise WorkerError("provider mapping database must not be a symbolic link")
+    existed = path.exists()
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=DELETE")
+    connection.execute("PRAGMA synchronous=FULL")
+    if not existed:
+        connection.executescript(
+            """
+            CREATE TABLE mapping_store_identity(
+              singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+              format_version INTEGER NOT NULL,
+              provider TEXT NOT NULL
+            );
+            INSERT INTO mapping_store_identity VALUES(1,1,'wikidata');
+            CREATE TABLE provider_mappings(
+              canonical_entity_id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL UNIQUE,
+              canonical_family TEXT NOT NULL,
+              fingerprint TEXT,
+              changed_in_snapshot TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE mapping_candidates(
+              canonical_entity_id TEXT NOT NULL,
+              provider_id TEXT NOT NULL,
+              evidence_flags INTEGER NOT NULL,
+              fingerprint TEXT NOT NULL,
+              observed_in_snapshot TEXT NOT NULL,
+              PRIMARY KEY(canonical_entity_id, provider_id)
+            ) WITHOUT ROWID;
+            """
+        )
+        connection.commit()
+    try:
+        identity = connection.execute(
+            "SELECT format_version,provider FROM mapping_store_identity "
+            "WHERE singleton=1"
+        ).fetchone()
+    except sqlite3.DatabaseError as error:
+        connection.close()
+        raise WorkerError(f"invalid provider mapping database: {error}") from error
+    if identity != (1, "wikidata"):
+        connection.close()
+        raise WorkerError("unsupported provider mapping database")
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS mapping_candidates("
+        "canonical_entity_id TEXT NOT NULL,provider_id TEXT NOT NULL,"
+        "evidence_flags INTEGER NOT NULL,fingerprint TEXT NOT NULL,"
+        "observed_in_snapshot TEXT NOT NULL,"
+        "PRIMARY KEY(canonical_entity_id,provider_id)) WITHOUT ROWID"
     )
     connection.commit()
-    return {
-        "first_pass_entities": first_pass,
-        "second_pass_entities": second_pass,
-        "third_pass_entities": third_pass,
-        "work_classes": work_class_count,
-        "ranked_pool_agents": ranked_agents,
-        "works": int(connection.execute("SELECT COUNT(*) FROM works").fetchone()[0]),
-        "agents": int(connection.execute("SELECT COUNT(*) FROM agents").fetchone()[0]),
-        "edges": int(connection.execute("SELECT COUNT(*) FROM edges").fetchone()[0]),
-        "agent_profiles_resolved": updated,
-        "product_image_targets": int(
+    return connection
+
+
+def mapping_inputs(
+    checkpoint: Path,
+) -> tuple[
+    list[tuple[str, str, str]],
+    dict[str, str],
+    list[tuple[str, str, int, str]],
+]:
+    connection = open_database(checkpoint)
+    try:
+        associations = [
+            (canonical_id, provider_id, family)
+            for canonical_id, provider_id, family in connection.execute(
+                "SELECT p.entity_id,p.qid,"
+                "CASE WHEN w.id IS NOT NULL THEN 'work' "
+                "WHEN a.id IS NOT NULL THEN 'agent' ELSE 'entity' END "
+                "FROM product_external p "
+                "LEFT JOIN product_work_entities w ON w.id=p.entity_id "
+                "LEFT JOIN product_agent_entities a ON a.id=p.entity_id "
+                "ORDER BY p.entity_id,p.qid"
+            )
+        ]
+        observations = dict(
+            connection.execute(
+                "SELECT provider_id,fingerprint FROM mapping_observations"
+            )
+        )
+        candidates = list(
+            connection.execute(
+                "SELECT canonical_entity_id,provider_id,evidence_flags,fingerprint "
+                "FROM mapping_candidates ORDER BY canonical_entity_id,provider_id"
+            )
+        )
+    finally:
+        connection.close()
+    return associations, observations, candidates
+
+
+def write_mapping_review(path: Path, document: Mapping[str, Any]) -> tuple[str, int]:
+    write_report(path, document)
+    return sha256_file(path), path.stat().st_size
+
+
+def update_provider_mappings(
+    checkpoint: Path,
+    mapping_database: Path,
+    review_output: Path,
+    source_snapshot: Mapping[str, str | int],
+    checkpoints: Mapping[str, Any],
+) -> dict[str, int | str]:
+    previous = checkpoints.get("mapping")
+    if (
+        isinstance(previous, dict)
+        and "candidates" in previous
+        and "candidate_not_persisted" in previous
+        and review_output.is_file()
+        and review_output.stat().st_size == previous.get("review_bytes")
+        and sha256_file(review_output) == previous.get("review_sha256")
+    ):
+        stage_reused("mapping-merge", previous)
+        return previous
+
+    started = stage_start("mapping-merge")
+    graph_bytes = checkpoint.stat().st_size
+    mapping_bytes_before = mapping_database.stat().st_size if mapping_database.exists() else 0
+    mapping_cap = graph_bytes // 3
+    run_growth_cap = max(
+        0,
+        min(
+            GIB,
+            graph_bytes // 10,
+            mapping_cap - mapping_bytes_before,
+        ),
+    )
+    associations, observations, candidates = mapping_inputs(checkpoint)
+    canonical_counts: dict[str, int] = {}
+    provider_counts: dict[str, int] = {}
+    for canonical_id, provider_id, _family in associations:
+        canonical_counts[canonical_id] = canonical_counts.get(canonical_id, 0) + 1
+        provider_counts[provider_id] = provider_counts.get(provider_id, 0) + 1
+
+    mapping_database.parent.mkdir(parents=True, exist_ok=True)
+    lock = mapping_database.with_suffix(mapping_database.suffix + ".lock")
+    review_rows: list[dict[str, Any]] = []
+    candidate_review_rows: list[dict[str, Any]] = []
+    promoted = changed = unchanged = conflicts = missing = deferred = 0
+    candidate_promoted = 0
+    candidate_changed = 0
+    candidate_unchanged = 0
+    candidate_deferred = 0
+    with exclusive_worker_lock(lock):
+        connection = mapping_store(mapping_database)
+        try:
+            existing_by_canonical = {
+                canonical_id: (provider_id, fingerprint)
+                for canonical_id, provider_id, fingerprint in connection.execute(
+                    "SELECT canonical_entity_id,provider_id,fingerprint "
+                    "FROM provider_mappings"
+                )
+            }
+            existing_by_provider = {
+                provider_id: canonical_id
+                for canonical_id, provider_id in connection.execute(
+                    "SELECT canonical_entity_id,provider_id FROM provider_mappings"
+                )
+            }
+            existing_candidates = {
+                (canonical_id, provider_id): (evidence_flags, fingerprint)
+                for canonical_id, provider_id, evidence_flags, fingerprint
+                in connection.execute(
+                    "SELECT canonical_entity_id,provider_id,evidence_flags,fingerprint "
+                    "FROM mapping_candidates"
+                )
+            }
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            current_pages = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            byte_limit = min(
+                mapping_cap,
+                mapping_bytes_before + run_growth_cap,
+            )
+            maximum_pages = max(current_pages, byte_limit // page_size)
+            connection.execute(f"PRAGMA max_page_count={maximum_pages}")
+            current_mapping_bytes = mapping_database.stat().st_size
+            budget_available = (
+                run_growth_cap > 0
+                and current_mapping_bytes <= mapping_cap
+                and current_mapping_bytes - mapping_bytes_before < run_growth_cap
+            )
+
+            pending: list[
+                tuple[
+                    dict[str, Any],
+                    tuple[str, str | None] | None,
+                    str,
+                    str,
+                    str,
+                    str | None,
+                ]
+            ] = []
+            for canonical_id, provider_id, family in associations:
+                fingerprint = observations.get(provider_id)
+                row: dict[str, Any] = {
+                    "canonical_entity_id": canonical_id,
+                    "provider_id": provider_id,
+                    "canonical_family": family,
+                    "fingerprint": fingerprint,
+                }
+                if fingerprint is None:
+                    missing += 1
+                    row["provider_observation"] = "missing"
+                if canonical_counts[canonical_id] != 1 or provider_counts[provider_id] != 1:
+                    row["status"] = "conflict"
+                    row["reason"] = "current canonical crosswalk is not one-to-one"
+                    conflicts += 1
+                    review_rows.append(row)
+                    continue
+                prior = existing_by_canonical.get(canonical_id)
+                prior_owner = existing_by_provider.get(provider_id)
+                if prior is not None and prior[0] != provider_id:
+                    row["status"] = "conflict"
+                    row["reason"] = "canonical entity has a different persisted provider ID"
+                    row["persisted_provider_id"] = prior[0]
+                    conflicts += 1
+                    review_rows.append(row)
+                    continue
+                if prior_owner is not None and prior_owner != canonical_id:
+                    row["status"] = "conflict"
+                    row["reason"] = "provider ID belongs to a different canonical entity"
+                    row["persisted_canonical_entity_id"] = prior_owner
+                    conflicts += 1
+                    review_rows.append(row)
+                    continue
+                if prior is not None and (fingerprint is None or prior[1] == fingerprint):
+                    row["status"] = "unchanged"
+                    unchanged += 1
+                    review_rows.append(row)
+                    continue
+                if prior is None and not budget_available:
+                    row["status"] = "not_persisted"
+                    row["reason"] = "mapping persistence budget exhausted"
+                    deferred += 1
+                    review_rows.append(row)
+                    continue
+                row["status"] = "pending"
+                review_rows.append(row)
+                pending.append(
+                    (
+                        row,
+                        prior,
+                        canonical_id,
+                        provider_id,
+                        family,
+                        fingerprint,
+                    )
+                )
+
+            pending.sort(key=lambda operation: operation[1] is None)
+            for offset in range(0, len(pending), 256):
+                batch = pending[offset : offset + 256]
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    for (
+                        _row,
+                        prior,
+                        canonical_id,
+                        provider_id,
+                        family,
+                        fingerprint,
+                    ) in batch:
+                        if prior is None:
+                            connection.execute(
+                                "INSERT INTO provider_mappings VALUES(?,?,?,?,?)",
+                                (
+                                    canonical_id,
+                                    provider_id,
+                                    family,
+                                    fingerprint,
+                                    source_snapshot["sha256"],
+                                ),
+                            )
+                        else:
+                            connection.execute(
+                                "UPDATE provider_mappings SET canonical_family=?,"
+                                "fingerprint=?,changed_in_snapshot=? "
+                                "WHERE canonical_entity_id=?",
+                                (
+                                    family,
+                                    fingerprint,
+                                    source_snapshot["sha256"],
+                                    canonical_id,
+                                ),
+                            )
+                    connection.commit()
+                except sqlite3.OperationalError as error:
+                    connection.rollback()
+                    if "full" not in str(error).casefold():
+                        raise
+                    for deferred_operation in pending[offset:]:
+                        row = deferred_operation[0]
+                        row["status"] = "not_persisted"
+                        row["reason"] = "mapping persistence budget exhausted"
+                        deferred += 1
+                    budget_available = False
+                    break
+                for row, prior, *_rest in batch:
+                    row["status"] = "promoted" if prior is None else "refreshed"
+                    if prior is None:
+                        promoted += 1
+                    else:
+                        changed += 1
+
+            candidate_pending: list[
+                tuple[
+                    dict[str, Any],
+                    tuple[int, str] | None,
+                    str,
+                    str,
+                    int,
+                    str,
+                ]
+            ] = []
+            for canonical_id, provider_id, evidence_flags, fingerprint in candidates:
+                if evidence_flags <= 0 or evidence_flags & ~(
+                    MAPPING_MATCH_NAME | MAPPING_MATCH_EXTERNAL_ID
+                ):
+                    raise WorkerError("invalid mapping candidate evidence")
+                evidence = []
+                if evidence_flags & MAPPING_MATCH_NAME:
+                    evidence.append("name")
+                if evidence_flags & MAPPING_MATCH_EXTERNAL_ID:
+                    evidence.append("external_id")
+                row = {
+                    "canonical_entity_id": canonical_id,
+                    "provider_id": provider_id,
+                    "evidence": evidence,
+                    "fingerprint": fingerprint,
+                }
+                prior = existing_candidates.get((canonical_id, provider_id))
+                if prior == (evidence_flags, fingerprint):
+                    row["status"] = "unchanged"
+                    candidate_unchanged += 1
+                    candidate_review_rows.append(row)
+                    continue
+                if prior is None and not budget_available:
+                    row["status"] = "not_persisted"
+                    row["reason"] = "mapping persistence budget exhausted"
+                    candidate_deferred += 1
+                    candidate_review_rows.append(row)
+                    continue
+                row["status"] = "pending"
+                candidate_review_rows.append(row)
+                candidate_pending.append(
+                    (
+                        row,
+                        prior,
+                        canonical_id,
+                        provider_id,
+                        evidence_flags,
+                        fingerprint,
+                    )
+                )
+
+            candidate_pending.sort(key=lambda operation: operation[1] is None)
+            for offset in range(0, len(candidate_pending), 256):
+                batch = candidate_pending[offset : offset + 256]
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    for (
+                        _row,
+                        prior,
+                        canonical_id,
+                        provider_id,
+                        evidence_flags,
+                        fingerprint,
+                    ) in batch:
+                        if prior is None:
+                            connection.execute(
+                                "INSERT INTO mapping_candidates VALUES(?,?,?,?,?)",
+                                (
+                                    canonical_id,
+                                    provider_id,
+                                    evidence_flags,
+                                    fingerprint,
+                                    source_snapshot["sha256"],
+                                ),
+                            )
+                        else:
+                            connection.execute(
+                                "UPDATE mapping_candidates SET evidence_flags=?,"
+                                "fingerprint=?,observed_in_snapshot=? "
+                                "WHERE canonical_entity_id=? AND provider_id=?",
+                                (
+                                    evidence_flags,
+                                    fingerprint,
+                                    source_snapshot["sha256"],
+                                    canonical_id,
+                                    provider_id,
+                                ),
+                            )
+                    connection.commit()
+                except sqlite3.OperationalError as error:
+                    connection.rollback()
+                    if "full" not in str(error).casefold():
+                        raise
+                    for deferred_operation in candidate_pending[offset:]:
+                        row = deferred_operation[0]
+                        row["status"] = "not_persisted"
+                        row["reason"] = "mapping persistence budget exhausted"
+                        candidate_deferred += 1
+                    break
+                for row, prior, *_rest in batch:
+                    row["status"] = "promoted" if prior is None else "refreshed"
+                    if prior is None:
+                        candidate_promoted += 1
+                    else:
+                        candidate_changed += 1
+        finally:
+            connection.close()
+
+    mapping_bytes_after = mapping_database.stat().st_size
+    review = {
+        "artifact_type": "wikidata_mapping_review_v1",
+        "format_version": 1,
+        "provider": "wikidata",
+        "provider_snapshot_sha256": source_snapshot["sha256"],
+        "write_authority": False,
+        "budgets": {
+            "graph_db_bytes": graph_bytes,
+            "mapping_db_bytes_before": mapping_bytes_before,
+            "mapping_db_bytes_after": mapping_bytes_after,
+            "mapping_cap": mapping_cap,
+            "run_growth_cap": run_growth_cap,
+        },
+        "summary": {
+            "associations": len(associations),
+            "observed": len(observations),
+            "unchanged": unchanged,
+            "promoted": promoted,
+            "refreshed": changed,
+            "conflicts": conflicts,
+            "provider_entities_missing": missing,
+            "not_persisted": deferred,
+            "candidates": len(candidates),
+            "candidate_unchanged": candidate_unchanged,
+            "candidate_promoted": candidate_promoted,
+            "candidate_refreshed": candidate_changed,
+            "candidate_not_persisted": candidate_deferred,
+        },
+        "mappings": review_rows,
+        "candidates": candidate_review_rows,
+    }
+    review_hash, review_bytes = write_mapping_review(review_output, review)
+    counters: dict[str, int | str] = {
+        "associations": len(associations),
+        "observed": len(observations),
+        "unchanged": unchanged,
+        "promoted": promoted,
+        "refreshed": changed,
+        "conflicts": conflicts,
+        "provider_entities_missing": missing,
+        "not_persisted": deferred,
+        "candidates": len(candidates),
+        "candidate_unchanged": candidate_unchanged,
+        "candidate_promoted": candidate_promoted,
+        "candidate_refreshed": candidate_changed,
+        "candidate_not_persisted": candidate_deferred,
+        "graph_db_bytes": graph_bytes,
+        "mapping_cap": mapping_cap,
+        "run_growth_cap": run_growth_cap,
+        "mapping_db_bytes": mapping_bytes_after,
+        "verified_snapshot_sha256": source_snapshot["sha256"],
+        "review_sha256": review_hash,
+        "review_bytes": review_bytes,
+    }
+    connection = open_database(checkpoint)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        record_checkpoint(connection, "mapping", counters)
+        connection.commit()
+    finally:
+        connection.close()
+    stage_end("mapping-merge", started, counters)
+    return counters
+
+
+def build_graph(
+    checkpoint: Path,
+    dump: Path,
+    config: Mapping[str, Any],
+    ranking_policy: Mapping[str, int],
+    threads: int,
+    checkpoints: dict[str, Any],
+    mapping_database: Path,
+    mapping_review_output: Path,
+    source_snapshot: Mapping[str, str | int],
+) -> dict[str, int]:
+    roots, properties, languages = graph_configuration(config)
+    pass1_delta = checkpoint.with_suffix(".pass1.delta")
+    pass2_delta = checkpoint.with_suffix(".pass2.delta")
+    pass3_delta = checkpoint.with_suffix(".pass3.delta")
+
+    if (
+        "pass1" in checkpoints
+        and "mapping_candidate_pairs" in checkpoints["pass1"]
+    ):
+        pass1 = checkpoints["pass1"]
+        stage_reused("pass1-scan-merge", pass1)
+    else:
+        started = stage_start("pass1-scan-merge")
+        pass1 = scan_first_pass(checkpoint, pass1_delta, dump, threads)
+        pass1 = merge_first_pass(checkpoint, pass1_delta, roots, pass1)
+        pass1_delta.unlink(missing_ok=True)
+        stage_end("pass1-scan-merge", started, pass1)
+
+    if "pass2" in checkpoints:
+        pass2 = checkpoints["pass2"]
+        stage_reused("pass2-scan-compact", pass2)
+    else:
+        started = stage_start("pass2-scan-compact")
+        pass2 = scan_second_pass(
+            checkpoint, pass2_delta, dump, properties, languages, threads
+        )
+        pass2 = merge_second_pass(checkpoint, pass2_delta, ranking_policy, pass2)
+        pass2_delta.unlink(missing_ok=True)
+        stage_end("pass2-scan-compact", started, pass2)
+
+    mapping = update_provider_mappings(
+        checkpoint,
+        mapping_database,
+        mapping_review_output,
+        source_snapshot,
+        checkpoints,
+    )
+
+    if "pass3" in checkpoints:
+        pass3 = checkpoints["pass3"]
+        stage_reused("pass3-scan-merge", pass3)
+    else:
+        started = stage_start("pass3-scan-merge")
+        pass3 = scan_third_pass(
+            checkpoint, pass3_delta, dump, languages, threads
+        )
+        pass3 = merge_third_pass(checkpoint, pass3_delta, pass3)
+        pass3_delta.unlink(missing_ok=True)
+        stage_end("pass3-scan-merge", started, pass3)
+
+    connection = open_database(checkpoint)
+    try:
+        product_image_targets = int(
             connection.execute(
                 "SELECT COUNT(*) FROM product_image_targets"
             ).fetchone()[0]
-        ),
-        "product_image_target_qids": len(image_target_qids),
-        "wikidata_image_claims": int(
-            connection.execute(
-                "SELECT COUNT(*) FROM product_image_claims"
-            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+    return {
+        **pass1,
+        **pass2,
+        **pass3,
+        "product_image_targets": product_image_targets,
+        "mapping_associations": int(mapping["associations"]),
+        "mapping_conflicts": int(mapping["conflicts"]),
+        "mapping_not_persisted": int(mapping["not_persisted"]),
+        "mapping_candidates": int(mapping["candidates"]),
+        "mapping_candidates_not_persisted": int(
+            mapping["candidate_not_persisted"]
         ),
     }
 
@@ -1097,6 +2318,20 @@ def flush_image_claims(
     claims.clear()
 
 
+def flush_mapping_candidates(
+    connection: sqlite3.Connection,
+    candidates: list[tuple[str, str, int, str]],
+) -> None:
+    connection.executemany(
+        "INSERT INTO mapping_candidates VALUES(?,?,?,?) "
+        "ON CONFLICT(canonical_entity_id,provider_id) DO UPDATE SET "
+        "evidence_flags=mapping_candidates.evidence_flags|excluded.evidence_flags,"
+        "fingerprint=excluded.fingerprint",
+        candidates,
+    )
+    candidates.clear()
+
+
 def candidate_policy(configuration: Mapping[str, Any]) -> dict[str, int]:
     try:
         source = configuration["candidate_rebuild"]["sources"]["wikidata"]
@@ -1124,13 +2359,19 @@ def compact_to_ranked_pool(
 ) -> int:
     """Run Ariadne's exact first pass in SQLite and retain only its top pool."""
     gray_bonus = policy["gray_bonus_basis_points"]
-    connection.executescript(
-        """
-        CREATE TABLE ranked_agents(
+    connection.execute(
+        """CREATE TABLE ranked_agents(
           id TEXT PRIMARY KEY, rank INTEGER NOT NULL UNIQUE) WITHOUT ROWID;
-        CREATE TABLE claimed_works(id TEXT PRIMARY KEY) WITHOUT ROWID;
-        CREATE TEMP TABLE new_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;
-        CREATE TABLE agent_stats(
+        """
+    )
+    connection.execute(
+        "CREATE TABLE claimed_works(id TEXT PRIMARY KEY) WITHOUT ROWID"
+    )
+    connection.execute(
+        "CREATE TEMP TABLE new_claims(id TEXT PRIMARY KEY) WITHOUT ROWID"
+    )
+    connection.execute(
+        """CREATE TABLE agent_stats(
           id TEXT PRIMARY KEY,
           total INTEGER NOT NULL,
           parsed INTEGER NOT NULL,
@@ -1141,8 +2382,10 @@ def compact_to_ranked_pool(
           qid_digits TEXT NOT NULL,
           selected INTEGER NOT NULL,
           rank INTEGER
-        ) WITHOUT ROWID;
-        INSERT INTO agent_stats
+        ) WITHOUT ROWID"""
+    )
+    connection.execute(
+        """INSERT INTO agent_stats
         WITH counts AS (
           SELECT a.id AS id,
                  COUNT(e.work_id) AS total,
@@ -1155,11 +2398,11 @@ def compact_to_ranked_pool(
         SELECT id,total,parsed,0,total-parsed,
                (parsed * 10000) / total,
                LENGTH(id)-1,SUBSTR(id,2),0,NULL
-        FROM counts;
-        CREATE INDEX agent_stats_choice
-          ON agent_stats(
-            selected,score DESC,unclaimed,qid_length,qid_digits,id);
-        """
+        FROM counts"""
+    )
+    connection.execute(
+        "CREATE INDEX agent_stats_choice ON agent_stats("
+        "selected,score DESC,unclaimed,qid_length,qid_digits,id)"
     )
     selected = 0
     while selected < policy["pool_size"]:
@@ -1216,17 +2459,15 @@ def compact_to_ranked_pool(
             " WHERE e.agent_id=agent_stats.id)",
             (gray_bonus,),
         )
-    connection.executescript(
-        """
-        DELETE FROM edges
-          WHERE agent_id NOT IN (SELECT id FROM ranked_agents);
-        DELETE FROM agents
-          WHERE id NOT IN (SELECT id FROM ranked_agents);
-        DELETE FROM works
-          WHERE id NOT IN (SELECT work_id FROM edges);
-        """
+    connection.execute(
+        "DELETE FROM edges WHERE agent_id NOT IN (SELECT id FROM ranked_agents)"
     )
-    connection.commit()
+    connection.execute(
+        "DELETE FROM agents WHERE id NOT IN (SELECT id FROM ranked_agents)"
+    )
+    connection.execute(
+        "DELETE FROM works WHERE id NOT IN (SELECT work_id FROM edges)"
+    )
     return selected
 
 
@@ -1471,6 +2712,70 @@ def write_report(path: Path, report: Mapping[str, Any]) -> None:
     os.replace(staging, path)
 
 
+def publish_outputs(
+    checkpoint: Path,
+    output: Path,
+    image_hints_output: Path,
+    source_snapshot: Mapping[str, str | int],
+    product_snapshot: Mapping[str, str],
+    checkpoints: Mapping[str, Any],
+) -> dict[str, int | str]:
+    prior = checkpoints.get("publication")
+    if (
+        isinstance(prior, dict)
+        and output.is_file()
+        and image_hints_output.is_file()
+        and output.stat().st_size == prior.get("graph_bytes")
+        and image_hints_output.stat().st_size == prior.get("image_hints_bytes")
+        and sha256_file(output) == prior.get("graph_sha256")
+        and sha256_file(image_hints_output) == prior.get("image_hints_sha256")
+    ):
+        stage_reused("publication", prior)
+        return prior
+
+    started = stage_start("publication")
+    output.unlink(missing_ok=True)
+    image_hints_output.unlink(missing_ok=True)
+    connection = open_database(checkpoint)
+    image_output_emitted = False
+    try:
+        try:
+            (
+                image_hash,
+                image_bytes,
+                image_entity_count,
+                image_count,
+            ) = emit_image_hints(
+                connection,
+                image_hints_output,
+                source_snapshot,
+                product_snapshot,
+            )
+            image_output_emitted = True
+            graph_hash, graph_bytes = emit_graph(
+                connection, output, source_snapshot
+            )
+        except BaseException:
+            if image_output_emitted:
+                image_hints_output.unlink(missing_ok=True)
+            raise
+        counters: dict[str, int | str] = {
+            "graph_sha256": graph_hash,
+            "graph_bytes": graph_bytes,
+            "image_hints_sha256": image_hash,
+            "image_hints_bytes": image_bytes,
+            "image_entities": image_entity_count,
+            "images": image_count,
+        }
+        connection.execute("BEGIN IMMEDIATE")
+        record_checkpoint(connection, "publication", counters)
+        connection.commit()
+    finally:
+        connection.close()
+    stage_end("publication", started, counters)
+    return counters
+
+
 def run(
     arguments: argparse.Namespace, progress: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1497,6 +2802,9 @@ def run(
     image_hints_output = (
         arguments.output_directory / "wikidata-image-hints.json"
     )
+    mapping_review_output = (
+        arguments.output_directory / "wikidata-mapping-review.json"
+    )
     progress["phase"] = "transport"
     source_path, source_snapshot = verify_source(
         arguments.source_control, artifact_store
@@ -1512,52 +2820,49 @@ def run(
         arguments.wikidata_config, "Wikidata worker configuration"
     )
     configuration_hash = sha256_file(arguments.wikidata_config)
-    if output.exists():
-        raise WorkerError(f"output already exists: {output}")
-    if image_hints_output.exists():
-        raise WorkerError(
-            f"image hints output already exists: {image_hints_output}"
-        )
     arguments.work_directory.mkdir(parents=True, exist_ok=True)
     work_database = arguments.work_directory / (
         f"wikidata-external-graph-{source_snapshot['sha256'][:16]}.sqlite3"
     )
-    if work_database.exists():
-        raise WorkerError(f"work database already exists: {work_database}")
+    work_lock = work_database.with_suffix(".lock")
+    mapping_database = arguments.mapping_database or (
+        arguments.work_directory.parent / "wikidata-provider-mappings.sqlite3"
+    )
     progress["work_database"] = work_database
-    connection = create_database(work_database)
-    try:
-        covered = load_product_coverage(connection, product_path)
+    progress["work_lock"] = work_lock
+    identity = {
+        "source": source_snapshot,
+        "product": product_snapshot,
+        "worker_configuration_sha256": configuration_hash,
+        "candidate_policy_configuration_sha256": policy_configuration_hash,
+        "candidate_policy": ranking_policy,
+    }
+    with exclusive_worker_lock(work_lock):
+        if not work_database.exists():
+            covered = initialize_database(work_database, product_path, identity)
+        checkpoints = validate_checkpoint(work_database, identity)
+        covered = int(checkpoints["prepared"]["covered_product_qids"])
         statistics = build_graph(
-            connection,
+            work_database,
             source_path,
             configuration,
             ranking_policy,
             arguments.decompress_threads,
+            checkpoints,
+            mapping_database,
+            mapping_review_output,
+            source_snapshot,
         )
-        image_output_emitted = False
-        try:
-            (
-                image_output_hash,
-                image_output_bytes,
-                image_entity_count,
-                image_count,
-            ) = emit_image_hints(
-                connection,
-                image_hints_output,
-                source_snapshot,
-                product_snapshot,
-            )
-            image_output_emitted = True
-            output_hash, output_bytes = emit_graph(
-                connection, output, source_snapshot
-            )
-        except BaseException:
-            if image_output_emitted:
-                image_hints_output.unlink(missing_ok=True)
-            raise
-    finally:
-        connection.close()
+        checkpoints = validate_checkpoint(work_database, identity)
+        mapping_checkpoint = checkpoints["mapping"]
+        publication = publish_outputs(
+            work_database,
+            output,
+            image_hints_output,
+            source_snapshot,
+            product_snapshot,
+            checkpoints,
+        )
     return {
         "status": "succeeded",
         "transport": {
@@ -1577,16 +2882,32 @@ def run(
         "output": {
             "artifact_type": "external_candidate_source_graph_v1",
             "path": str(output),
-            "sha256": output_hash,
-            "byte_length": output_bytes,
+            "sha256": publication["graph_sha256"],
+            "byte_length": publication["graph_bytes"],
         },
         "image_hints_output": {
             "artifact_type": "wikidata_image_hints_v1",
             "path": str(image_hints_output),
-            "sha256": image_output_hash,
-            "byte_length": image_output_bytes,
-            "entity_count": image_entity_count,
-            "image_count": image_count,
+            "sha256": publication["image_hints_sha256"],
+            "byte_length": publication["image_hints_bytes"],
+            "entity_count": publication["image_entities"],
+            "image_count": publication["images"],
+        },
+        "mapping_review_output": {
+            "artifact_type": "wikidata_mapping_review_v1",
+            "path": str(mapping_review_output),
+            "sha256": mapping_checkpoint["review_sha256"],
+            "byte_length": mapping_checkpoint["review_bytes"],
+        },
+        "mapping": {
+            "provider": "wikidata",
+            "database": str(mapping_database),
+            "verified_snapshot_sha256": mapping_checkpoint[
+                "verified_snapshot_sha256"
+            ],
+            "mapping_cap": mapping_checkpoint["mapping_cap"],
+            "run_growth_cap": mapping_checkpoint["run_growth_cap"],
+            "mapping_db_bytes": mapping_checkpoint["mapping_db_bytes"],
         },
         "elapsed_seconds": round(time.time() - started, 3),
     }
@@ -1624,6 +2945,13 @@ def main() -> int:
         work_database = progress.get("work_database")
         if isinstance(work_database, Path):
             work_database.unlink(missing_ok=True)
+            for delta in work_database.parent.glob(
+                f"{work_database.stem}.pass*.delta"
+            ):
+                delta.unlink(missing_ok=True)
+        work_lock = progress.get("work_lock")
+        if isinstance(work_lock, Path):
+            work_lock.unlink(missing_ok=True)
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0
 

@@ -1,0 +1,39 @@
+{
+  "artifact_type": "wikidata_mapping_review_v1",
+  "format_version": 1,
+  "provider": "wikidata",
+  "provider_snapshot_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "write_authority": false,
+  "budgets": {
+    "graph_db_bytes": 9663676416,
+    "mapping_db_bytes_before": 1073741824,
+    "mapping_db_bytes_after": 1073745920,
+    "mapping_cap": 3221225472,
+    "run_growth_cap": 966367641
+  },
+  "summary": {
+    "associations": 1,
+    "observed": 1,
+    "unchanged": 1,
+    "promoted": 0,
+    "refreshed": 0,
+    "conflicts": 0,
+    "provider_entities_missing": 0,
+    "not_persisted": 0,
+    "candidates": 0,
+    "candidate_unchanged": 0,
+    "candidate_promoted": 0,
+    "candidate_refreshed": 0,
+    "candidate_not_persisted": 0
+  },
+  "mappings": [
+    {
+      "canonical_entity_id": "work-000321",
+      "provider_id": "Q123",
+      "canonical_family": "work",
+      "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "status": "unchanged"
+    }
+  ],
+  "candidates": []
+}

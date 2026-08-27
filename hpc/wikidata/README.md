@@ -58,9 +58,10 @@ Normal `sbatch` resource overrides follow `--`, for example:
 hpc/wikidata/run submit -- --time=36:00:00 --mem=96G
 ```
 
-A prepared run can be submitted only once because all jobs would otherwise
-share its output and scratch paths. Prepare a new run after a failed job rather
-than launching a concurrent resubmission.
+A failed run may be submitted again against its durable whole-pass checkpoints.
+`submit` first requires `sacct`/`squeue` to report the prior job in a terminal
+state and refuses while either a recorded local process or the worker's advisory
+lock is active. It never treats lock deletion as recovery.
 
 After the job completes:
 
@@ -73,6 +74,7 @@ The fixed result paths are:
 ```text
 results/wikidata-external-graph.json
 results/wikidata-image-hints.json
+results/wikidata-mapping-review.json
 results/wikidata-hpc-report.json
 ```
 
@@ -82,16 +84,16 @@ extraction is outstanding it reconciles metadata with `sacct`, falling back to
 `squeue`, so cancellation, timeout, out-of-memory, and other scheduler failures
 identify the failed step and error log.
 
-Candidate planning and activation are optional. Run them only when the external
-candidate snapshot is wanted:
+Candidate planning and activation are the final Slurm operation after extraction.
+If that operation alone needs to be retried, it remains directly callable:
 
 ```bash
 hpc/wikidata/run rebuild-candidates
 ```
 
 This calls `build/arachne candidate plan` and then
-`build/arachne candidate rebuild`. A run intended only to refresh Wikidata image
-hints may stop after extraction.
+`build/arachne candidate rebuild`, reusing an already published valid plan
+control when present.
 
 Once the graph, image hints, and successful report are safely present, remove
 the verified raw dump and disposable worker state with:
@@ -100,9 +102,8 @@ the verified raw dump and disposable worker state with:
 hpc/wikidata/run clean
 ```
 
-Run the optional candidate rebuild before cleanup when it is wanted; candidate
-planning deliberately re-verifies the source snapshot and cannot be started
-after its raw bytes have been removed.
+An explicit cleanup after a failed candidate operation is terminal for that run;
+retry the candidate operation before cleaning when publication is still wanted.
 
 Cleanup delegates raw-custody verification to the existing
 `discard_acquired_artifact.py` implementation. Before that deletion it verifies
@@ -161,16 +162,26 @@ verified acquired Wikidata dump
 build_external_graph.py (offline, bounded streaming)
         │
         ├── external_candidate_source_graph_v1
-        └── wikidata_image_hints_v1
+        ├── wikidata_image_hints_v1
+        └── wikidata_mapping_review_v1
 ```
 
 The worker derives artifact and graph custody from the materialized operations
 configuration. `hpc/wikidata/config.json` remains separate because it contains
-Wikidata-specific extraction policy. Source receipt verification, product
-snapshot/export verification, bounded multi-pass streaming, Ariadne candidate
-ranking, and image-hint generation remain in the existing worker.
+Wikidata-specific extraction policy. Each full dump scan writes a disposable
+pass delta and closes it before a short durable merge. Completed whole-pass
+checkpoints survive an interrupted later pass. Stage start/end lines provide
+elapsed time and compact counters without per-helper checkpoint noise.
 
-The Slurm path retains its disposable SQLite database until the explicit
+The shared `mapping/wikidata.sqlite3` stores the compact canonical-entity/QID
+crosswalk across monthly runs. Existing mappings are revalidated during the
+first scan; canonical entities without a QID also produce review candidates from
+normalized names and strong external-ID crosswalks. Unchanged fingerprints are
+not rewritten, and the dynamic storage budget affects cache promotion only.
+Exact conflicts and unpersisted rows remain in `wikidata-mapping-review.json`;
+neither artifact has canonical write authority.
+
+The Slurm path retains its checkpoint SQLite database until the explicit
 `clean` command. Metadata changes are file-locked, including the interval in
 which `sbatch` returns a job ID, so a fast-starting compute job cannot overwrite
 the submission record.

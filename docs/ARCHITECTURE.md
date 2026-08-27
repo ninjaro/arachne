@@ -239,11 +239,26 @@ and large HPC intermediate graphs may be deleted after a successful queue build.
 Periodic Wikidata processing is bulk-first. Ariadne declares the official entity
 dump in `fetch_plan_v1`; Arachne translates that need into a concrete door request;
 Pheidippides delivers an opaque archive; and `hpc/wikidata/` performs the baseline
-three-pass class/work/agent scan in bounded memory with disposable SQLite. The
-worker hash-verifies the source receipt and product export, derives coverage, and
-emits `external_candidate_source_graph_v1`. Its first existing dump pass also
-derives the separate, bounded `wikidata_image_hints_v1` Commons-filename cache
-for product works and agents. Image targets never enter work-only coverage and
+three-pass class/work/agent scan in bounded memory. Each full-dump pass writes a
+disposable SQLite delta; only a completed pass is transactionally merged into a
+durable checkpoint database. A later Slurm job may reuse whole-pass checkpoints
+only after the scheduler and worker locks show that the prior job is inactive.
+The main checkpoint is not held open during dump scans.
+
+The first pass also revalidates existing canonical-entity/Wikidata-QID
+associations and finds no-QID candidates from normalized canonical names and
+strong external-ID crosswalks. A small cross-run mapping database stores the
+association or candidate pair and its evidence fingerprint; unchanged evidence
+is not rewritten, and candidates are never promoted to canonical identifiers
+automatically. Persistence is capped independently of semantic processing:
+`mapping_cap = graph_db_bytes / 3` and per-run growth is the minimum of 1 GiB,
+`graph_db_bytes / 10`, and remaining cap. Exhaustion is recorded in the
+disposable mapping review and never removes entities from processing. Mapping,
+candidate, and review artifacts have no canonical write authority.
+
+The worker hash-verifies the source receipt and product export, derives coverage,
+and emits `external_candidate_source_graph_v1`, `wikidata_image_hints_v1`, and
+`wikidata_mapping_review_v1`. Image targets never enter work-only coverage and
 disposable image suggestions never become product data automatically. After
 human review, a normal product batch may store a provider reference, URL, and
 rights metadata in `remote_assets`; media bytes are never canonical. Point
@@ -273,6 +288,15 @@ across the eligible product rather than ranked by popularity:
 The adapter performs no transport and writes no Penelope state. Both the bundle
 and review are mining inputs only. Any accepted identifier, metadata, relation,
 or remote-asset link still arrives through a human-reviewed `arachne_batch`.
+
+Optional secondary bulk sources use the same fetch-plan, closed-door, and
+acquired-artifact boundary. IMDb official daily TSV files are non-commercial
+and non-redistributable; MusicBrainz core snapshots, Open Library catalog dumps,
+and Discogs catalog dumps are optional CC0 observations. Disabled, unconfigured,
+or unavailable providers are reported and do not fail Wikidata processing.
+MusicBrainz precedes Discogs for music cross-checking. Crossref and OpenAlex are
+outside this provider set because their snapshot cost is a separate operational
+class. No optional provider payload becomes canonical state directly.
 
 Ariadne owns product catalog, research, and taste projection semantics.
 The native CLI can write a physical report, inspect a work or agent, or produce

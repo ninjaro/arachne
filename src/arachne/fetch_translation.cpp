@@ -4,12 +4,16 @@
 #include "arachne/crypto.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -441,14 +445,266 @@ void validate_request(
     return { std::move(document), std::nullopt, {} };
 }
 
+struct optional_bulk_endpoint final {
+    std::string_view source;
+    std::string_view door_id;
+    std::string_view endpoint_id;
+    std::string_view host;
+    std::string_view output_suffix;
+};
+
+[[nodiscard]] bool decimal_digits(const std::string_view value) {
+    return !value.empty()
+        && std::ranges::all_of(value, [](const char character) {
+               return character >= '0' && character <= '9';
+           });
+}
+
+template<std::size_t Size>
+[[nodiscard]] bool one_of(
+    const std::string_view value,
+    const std::array<std::string_view, Size>& supported
+) {
+    return std::ranges::find(supported, value) != supported.end();
+}
+
+[[nodiscard]] optional_bulk_endpoint optional_bulk_locator(
+    const std::string_view source, const std::string_view locator
+) {
+    if (locator.find_first_of("?#") != std::string_view::npos) {
+        throw std::invalid_argument(
+            "optional bulk fetch locator cannot contain a query or fragment"
+        );
+    }
+
+    if (source == "imdb") {
+        constexpr std::string_view base = "https://datasets.imdbws.com/";
+        constexpr std::array files {
+            std::string_view { "title.basics.tsv.gz" },
+            std::string_view { "title.akas.tsv.gz" },
+            std::string_view { "title.crew.tsv.gz" },
+            std::string_view { "title.principals.tsv.gz" },
+            std::string_view { "title.episode.tsv.gz" },
+            std::string_view { "title.ratings.tsv.gz" },
+            std::string_view { "name.basics.tsv.gz" },
+        };
+        if (!locator.starts_with(base)
+            || !one_of(locator.substr(base.size()), files)) {
+            throw std::invalid_argument(
+                "IMDb bulk fetch must use an official non-commercial dataset"
+            );
+        }
+        return { source, "imdb", "official-datasets", "datasets.imdbws.com",
+                 ".tsv.gz" };
+    }
+
+    if (source == "musicbrainz") {
+        constexpr std::string_view base
+            = "https://ftp.musicbrainz.org/pub/musicbrainz/data/json-dumps/";
+        constexpr std::array files {
+            std::string_view { "artist.tar.xz" },
+            std::string_view { "release.tar.xz" },
+            std::string_view { "release-group.tar.xz" },
+            std::string_view { "recording.tar.xz" },
+            std::string_view { "work.tar.xz" },
+            std::string_view { "label.tar.xz" },
+        };
+        if (!locator.starts_with(base)) {
+            throw std::invalid_argument(
+                "MusicBrainz bulk fetch must use the official JSON dump endpoint"
+            );
+        }
+        const std::string_view relative = locator.substr(base.size());
+        const std::size_t separator = relative.find('/');
+        const std::string_view snapshot = relative.substr(0U, separator);
+        const bool snapshot_valid = snapshot.size() == 15U
+            && snapshot[8] == '-' && decimal_digits(snapshot.substr(0U, 8U))
+            && decimal_digits(snapshot.substr(9U));
+        if (separator == std::string_view::npos || !snapshot_valid
+            || relative.find('/', separator + 1U) != std::string_view::npos
+            || !one_of(relative.substr(separator + 1U), files)) {
+            throw std::invalid_argument(
+                "MusicBrainz bulk fetch must name a dated official core JSON dump"
+            );
+        }
+        return { source, "musicbrainz", "official-json-dumps",
+                 "ftp.musicbrainz.org", ".tar.xz" };
+    }
+
+    if (source == "open-library") {
+        constexpr std::string_view base = "https://openlibrary.org/data/";
+        constexpr std::array files {
+            std::string_view { "ol_dump_works_latest.txt.gz" },
+            std::string_view { "ol_dump_editions_latest.txt.gz" },
+            std::string_view { "ol_dump_authors_latest.txt.gz" },
+            std::string_view { "ol_dump_wikidata_latest.txt.gz" },
+        };
+        if (!locator.starts_with(base)
+            || !one_of(locator.substr(base.size()), files)) {
+            throw std::invalid_argument(
+                "Open Library bulk fetch must use an official monthly catalog dump"
+            );
+        }
+        return { source, "open-library", "official-data-dumps",
+                 "openlibrary.org", ".txt.gz" };
+    }
+
+    if (source == "discogs") {
+        constexpr std::string_view base
+            = "https://discogs-data-dumps.s3.us-west-2.amazonaws.com/data/";
+        constexpr std::array kinds {
+            std::string_view { "artists" },
+            std::string_view { "labels" },
+            std::string_view { "masters" },
+            std::string_view { "releases" },
+        };
+        if (!locator.starts_with(base)) {
+            throw std::invalid_argument(
+                "Discogs bulk fetch must use the official data-dump bucket"
+            );
+        }
+        const std::string_view relative = locator.substr(base.size());
+        const std::size_t separator = relative.find('/');
+        if (separator != 4U || !decimal_digits(relative.substr(0U, 4U))
+            || relative.find('/', separator + 1U) != std::string_view::npos) {
+            throw std::invalid_argument(
+                "Discogs bulk fetch must name one dated monthly dump"
+            );
+        }
+        const std::string_view filename = relative.substr(separator + 1U);
+        constexpr std::string_view prefix = "discogs_";
+        constexpr std::string_view suffix = ".xml.gz";
+        if (!filename.starts_with(prefix) || !filename.ends_with(suffix)) {
+            throw std::invalid_argument(
+                "Discogs bulk fetch has an unsupported dump filename"
+            );
+        }
+        const std::string_view stem = filename.substr(
+            prefix.size(), filename.size() - prefix.size() - suffix.size()
+        );
+        const std::size_t kind_separator = stem.find('_');
+        const std::string_view date = stem.substr(0U, kind_separator);
+        if (kind_separator != 8U || !decimal_digits(date)
+            || !date.starts_with(relative.substr(0U, 4U))
+            || !one_of(stem.substr(kind_separator + 1U), kinds)) {
+            throw std::invalid_argument(
+                "Discogs bulk fetch must name artists, labels, masters, or releases"
+            );
+        }
+        return { source, "discogs", "official-data-dumps",
+                 "discogs-data-dumps.s3.us-west-2.amazonaws.com", ".xml.gz" };
+    }
+
+    throw std::invalid_argument(
+        "no closed fetch-plan adapter is registered for source "
+        + std::string(source)
+    );
+}
+
+[[nodiscard]] translated_fetch_request optional_bulk_fetch_request(
+    const json& plan, const json& planned
+) {
+    static constexpr std::array selectors {
+        std::string_view { "entities" },
+        std::string_view { "fields" },
+        std::string_view { "languages" },
+        std::string_view { "language_fallback" },
+        std::string_view { "identity_query" },
+        std::string_view { "media_files" },
+        std::string_view { "pages" },
+        std::string_view { "archives" },
+    };
+    if (std::ranges::any_of(
+            selectors, [&](const std::string_view key) {
+                return planned.contains(key);
+            }
+        )
+        || planned.value("follow_up", false)) {
+        throw std::invalid_argument(
+            "optional bulk provider requests cannot contain point, archive, "
+            "or follow-up selectors"
+        );
+    }
+
+    const std::string request_id
+        = planned.at("request_id").get<std::string>();
+    const std::string locator = planned.at("locator").get<std::string>();
+    const optional_bulk_endpoint endpoint = optional_bulk_locator(
+        plan.at("source").get_ref<const std::string&>(), locator
+    );
+    ordered_json context {
+        { "source", endpoint.source },
+        { "purpose", planned.at("purpose") },
+        { "optional", true },
+    };
+    if (plan.contains("extensions")) {
+        context["plan_extensions"] = plan.at("extensions");
+    }
+    ordered_json document {
+        { "contract", "fetch_request_v1" },
+        { "format_version", 1 },
+        { "request_id", request_id },
+        { "door_id", endpoint.door_id },
+        { "endpoint_id", endpoint.endpoint_id },
+        { "operation", "bulk_snapshot" },
+        { "freshness_policy", "fresh_required" },
+        { "plan_id", plan.at("plan_id") },
+        { "locator", locator },
+        { "method", "GET" },
+        { "headers",
+          { { "Accept", "application/octet-stream" },
+            { "User-Agent",
+              "Arachne/2.0 (+https://github.com/ninjaro/arachne)" } } },
+        { "pagination", { { "mode", "none" } } },
+        { "retry",
+          { { "maximum_attempts", 5 },
+            { "initial_delay_ms", 1000 },
+            { "maximum_delay_ms", 60000 },
+            { "total_delay_budget_ms", 300000 },
+            { "respect_retry_after", true } } },
+        { "expected",
+          { { "maximum_bytes", 68719476736ULL },
+            { "timeout_ms", 86400000 },
+            { "connect_timeout_ms", 30000 },
+            { "read_timeout_ms", 900000 },
+            { "write_timeout_ms", 30000 } } },
+        { "redirect_policy",
+          { { "follow", false },
+            { "maximum_redirects", 0 },
+            { "allow_https_to_http", false },
+            { "allowed_hosts", { endpoint.host } } } },
+        { "output_ref",
+          "bulk/" + plan.at("plan_id").get<std::string>() + "/" + request_id
+              + std::string(endpoint.output_suffix) },
+        { "extensions",
+          { { "org.ninjaro.arachne.bulk_source", std::move(context) } } },
+    };
+    validate_request(document, "translated optional bulk request");
+    return { std::move(document), std::nullopt, {} };
+}
+
+[[nodiscard]] std::vector<translated_fetch_request>
+translate_optional_bulk_plan(const json& plan) {
+    std::vector<translated_fetch_request> generated;
+    std::set<std::string, std::less<>> request_ids;
+    for (const auto& planned : plan.at("requests")) {
+        const std::string request_id
+            = planned.at("request_id").get<std::string>();
+        if (!request_ids.emplace(request_id).second) {
+            throw std::invalid_argument(
+                "fetch plan contains a duplicate request identity"
+            );
+        }
+        generated.push_back(optional_bulk_fetch_request(plan, planned));
+    }
+    return generated;
+}
+
 } // namespace
 
 std::vector<translated_fetch_request> translate_fetch_plan(const json& plan) {
     if (plan.at("source") != "wikidata") {
-        throw std::invalid_argument(
-            "no closed fetch-plan adapter is registered for source "
-            + plan.at("source").get<std::string>()
-        );
+        return translate_optional_bulk_plan(plan);
     }
 
     std::vector<translated_fetch_request> generated;

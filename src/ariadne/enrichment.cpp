@@ -881,7 +881,7 @@ nlohmann::ordered_json enrichment_review_builder::build(
             );
         }
 
-        mapping["identity_status"] = contradiction && !name_match
+        mapping["identity_status"] = contradiction
             ? "suspicious"
             : name_match || !has_provider_names ? "consistent" : "insufficient";
         if (mapping.at("identity_status") == "suspicious") {
@@ -1002,15 +1002,24 @@ nlohmann::ordered_json enrichment_review_builder::build(
                 const std::string value
                     = folded(identifier.value("value", ""));
                 const auto ids = product.identifiers.find(entity);
-                if (ids != product.identifiers.end()
-                    && ids->second.contains(scheme)
-                    && ids->second.at(scheme).contains(value)) {
+                const bool has_scheme = ids != product.identifiers.end()
+                    && ids->second.contains(scheme);
+                if (has_scheme && ids->second.at(scheme).contains(value)) {
                     score += 100;
                     signals.push_back(
                         { { "kind", "external_id" },
                           { "outcome", "same" },
                           { "provider_value", identifier },
                           { "weight", 100 } }
+                    );
+                } else if (has_scheme) {
+                    score -= 100;
+                    signals.push_back(
+                        { { "kind", "external_id" },
+                          { "outcome", "conflicting" },
+                          { "canonical_value", ids->second.at(scheme) },
+                          { "provider_value", identifier },
+                          { "weight", -100 } }
                     );
                 }
             }

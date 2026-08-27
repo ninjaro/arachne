@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/wikidata_mapping_review_v1.schema.json",
+  "title": "Wikidata mapping review v1",
+  "description": "Disposable review of cumulative canonical-entity/Wikidata-QID crosswalk verification and no-QID discovery candidates.",
+  "type": "object",
+  "required": ["artifact_type", "format_version", "provider", "provider_snapshot_sha256", "write_authority", "budgets", "summary", "mappings", "candidates"],
+  "properties": {
+    "artifact_type": {"const": "wikidata_mapping_review_v1"},
+    "format_version": {"const": 1},
+    "provider": {"const": "wikidata"},
+    "provider_snapshot_sha256": {"$ref": "../schemas/common_v1.schema.json#/$defs/sha256"},
+    "write_authority": {"const": false},
+    "budgets": {
+      "type": "object",
+      "required": ["graph_db_bytes", "mapping_db_bytes_before", "mapping_db_bytes_after", "mapping_cap", "run_growth_cap"],
+      "properties": {
+        "graph_db_bytes": {"type": "integer", "minimum": 0},
+        "mapping_db_bytes_before": {"type": "integer", "minimum": 0},
+        "mapping_db_bytes_after": {"type": "integer", "minimum": 0},
+        "mapping_cap": {"type": "integer", "minimum": 0},
+        "run_growth_cap": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "object",
+      "required": ["associations", "observed", "unchanged", "promoted", "refreshed", "conflicts", "provider_entities_missing", "not_persisted", "candidates", "candidate_unchanged", "candidate_promoted", "candidate_refreshed", "candidate_not_persisted"],
+      "properties": {
+        "associations": {"type": "integer", "minimum": 0},
+        "observed": {"type": "integer", "minimum": 0},
+        "unchanged": {"type": "integer", "minimum": 0},
+        "promoted": {"type": "integer", "minimum": 0},
+        "refreshed": {"type": "integer", "minimum": 0},
+        "conflicts": {"type": "integer", "minimum": 0},
+        "provider_entities_missing": {"type": "integer", "minimum": 0},
+        "not_persisted": {"type": "integer", "minimum": 0},
+        "candidates": {"type": "integer", "minimum": 0},
+        "candidate_unchanged": {"type": "integer", "minimum": 0},
+        "candidate_promoted": {"type": "integer", "minimum": 0},
+        "candidate_refreshed": {"type": "integer", "minimum": 0},
+        "candidate_not_persisted": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "mappings": {
+      "type": "array",
+      "maxItems": 2000000,
+      "items": {"$ref": "#/$defs/mapping"}
+    },
+    "candidates": {
+      "type": "array",
+      "maxItems": 2000000,
+      "items": {"$ref": "#/$defs/candidate"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "mapping": {
+      "type": "object",
+      "required": ["canonical_entity_id", "provider_id", "canonical_family", "fingerprint", "status"],
+      "properties": {
+        "canonical_entity_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "provider_id": {"type": "string", "pattern": "^Q[1-9][0-9]{0,19}$"},
+        "canonical_family": {"enum": ["work", "agent", "entity"]},
+        "fingerprint": {
+          "anyOf": [
+            {"$ref": "../schemas/common_v1.schema.json#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "provider_observation": {"const": "missing"},
+        "status": {"enum": ["conflict", "unchanged", "not_persisted", "promoted", "refreshed"]},
+        "reason": {"type": "string", "minLength": 1},
+        "persisted_provider_id": {"type": "string", "pattern": "^Q[1-9][0-9]{0,19}$"},
+        "persisted_canonical_entity_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"}
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["canonical_entity_id", "provider_id", "evidence", "fingerprint", "status"],
+      "properties": {
+        "canonical_entity_id": {"$ref": "../schemas/common_v1.schema.json#/$defs/stable_id"},
+        "provider_id": {"type": "string", "pattern": "^Q[1-9][0-9]{0,19}$"},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"enum": ["name", "external_id"]}
+        },
+        "fingerprint": {"$ref": "../schemas/common_v1.schema.json#/$defs/sha256"},
+        "status": {"enum": ["unchanged", "not_persisted", "promoted", "refreshed"]},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  }
+}
