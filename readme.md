@@ -109,7 +109,9 @@ Demo, Renovate, and deployment credentials are independent.
 
 See [Operations](docs/OPERATIONS.md),
 [Architecture](docs/ARCHITECTURE.md),
-[Product inbox](docs/PRODUCT_INBOX.md), and
+[Product inbox](docs/PRODUCT_INBOX.md),
+[non-authoritative research questions](docs/RESEARCH_QUESTIONS.md),
+[non-authoritative provider leads](docs/PROVIDER_REFERENCE.md), and
 [contract versions](contracts/VERSIONS.md).
 
 ## Security and license

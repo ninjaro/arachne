@@ -40,8 +40,10 @@ limits the write to one attempt.
 The included active doors cover provisional GitHub attachments, Wikidata
 official dumps and bounded entity lookups, plus Commons `imageinfo` metadata.
 The Commons door returns URLs, dimensions, MIME type, and rights text only; it
-does not fetch image bytes. Wider door-map entries should be activated only
-after their current access and license terms are rechecked.
+does not fetch image bytes. The non-authoritative
+[provider reference](../docs/PROVIDER_REFERENCE.md) records wider research
+leads; a source is not active until its current access and license terms are
+rechecked and an adapter is implemented.
 
 Use `authentication.mode: bearer_env` or `header_env` with an environment-variable
 `secret_name`. Never put the secret value in this file. Unknown fields, insecure
