@@ -172,6 +172,9 @@ Wikidata-specific extraction policy. Each full dump scan writes a disposable
 pass delta and closes it before a short durable merge. Completed whole-pass
 checkpoints survive an interrupted later pass. Stage start/end lines provide
 elapsed time and compact counters without per-helper checkpoint noise.
+Checkpoint identity includes the exact worker implementation as well as the
+source, product, extraction configuration, and candidate policy, so changed
+algorithm code cannot reuse an older completed pass.
 
 The shared `mapping/wikidata.sqlite3` stores the compact canonical-entity/QID
 crosswalk across monthly runs. Existing mappings are revalidated during the

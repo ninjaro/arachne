@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -344,11 +345,13 @@ class WikidataHpcWorkerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_worker(self, *extra: str) -> subprocess.CompletedProcess[str]:
+    def run_worker(
+        self, *extra: str, worker: Path = WORKER
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
-                str(WORKER),
+                str(worker),
                 "--config",
                 str(self.candidate_policy),
                 "--source-control",
@@ -590,6 +593,22 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         self.assertIn("stage=pass2-scan-compact status=reused", resumed.stdout)
         self.assertIn("stage=pass3-scan-merge status=start", resumed.stdout)
         self.assertLessEqual(resumed.stdout.count("wikidata_stage stage="), 12)
+
+    def test_changed_worker_cannot_reuse_completed_checkpoint(self) -> None:
+        worker = self.root / "build_external_graph.py"
+        shutil.copyfile(WORKER, worker)
+        first = self.run_worker("--keep-work-db", worker=worker)
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        worker.write_text(
+            worker.read_text(encoding="utf-8") + "\n# changed implementation\n",
+            encoding="utf-8",
+        )
+        resumed = self.run_worker("--keep-work-db", worker=worker)
+
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertIn("worker implementation inputs", resumed.stderr)
+        self.assertNotIn("status=reused", resumed.stdout)
 
     def test_refuses_recovery_while_another_worker_owns_the_checkpoint(self) -> None:
         first = self.run_worker("--keep-work-db")

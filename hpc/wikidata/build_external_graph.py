@@ -1078,7 +1078,8 @@ def validate_checkpoint(path: Path, identity: Mapping[str, Any]) -> dict[str, An
         ).fetchone()
         if row != (CHECKPOINT_FORMAT_VERSION, checkpoint_identity(identity)):
             raise WorkerError(
-                "Wikidata checkpoint belongs to different source, product, or policy inputs"
+                "Wikidata checkpoint belongs to different source, product, policy, "
+                "or worker implementation inputs"
             )
         return {
             stage: json.loads(counters)
@@ -2820,6 +2821,7 @@ def run(
         arguments.wikidata_config, "Wikidata worker configuration"
     )
     configuration_hash = sha256_file(arguments.wikidata_config)
+    implementation_hash = sha256_file(Path(__file__).resolve())
     arguments.work_directory.mkdir(parents=True, exist_ok=True)
     work_database = arguments.work_directory / (
         f"wikidata-external-graph-{source_snapshot['sha256'][:16]}.sqlite3"
@@ -2836,6 +2838,7 @@ def run(
         "worker_configuration_sha256": configuration_hash,
         "candidate_policy_configuration_sha256": policy_configuration_hash,
         "candidate_policy": ranking_policy,
+        "worker_implementation_sha256": implementation_hash,
     }
     with exclusive_worker_lock(work_lock):
         if not work_database.exists():
