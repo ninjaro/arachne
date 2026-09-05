@@ -10,7 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 WRITERS = (
     "product-integration.yml",
-    "candidate-rebuild.yml",
     "source-refresh.yml",
     "manual-dispatch.yml",
 )
@@ -71,16 +70,16 @@ class WorkflowYamlTests(unittest.TestCase):
         ):
             self.assertNotIn(generated, text)
 
-    def test_transient_product_snapshot_is_exact_and_not_proposed(self) -> None:
-        for name in ("candidate-rebuild.yml", "source-refresh.yml"):
-            text = (WORKFLOWS / name).read_text(encoding="utf-8")
-            self.assertIn("scripts/materialize_local_product_snapshot.py", text)
-            self.assertIn("${RUNNER_TEMP}/product-graph", text)
-            self.assertIn("--product-snapshot", text)
-            self.assertNotIn("graphs/product/active.json", text)
+    def test_provider_refresh_materializes_and_proposes_canonical_product(self) -> None:
         source = (WORKFLOWS / "source-refresh.yml").read_text(encoding="utf-8")
-        self.assertIn("scripts/stage_image_hints.py", source)
-        self.assertIn(".arachne/ci-state/derived/wikidata-image-hints.json", source)
+        self.assertIn("scripts/materialize_local_product_snapshot.py", source)
+        self.assertIn("${RUNNER_TEMP}/product-graph", source)
+        self.assertNotIn("graphs/product/active.json", source)
+        self.assertIn("scripts/prepare_provider_rebuild.py", source)
+        self.assertIn("scripts/materialize_provider_rebuild.py", source)
+        self.assertIn("scripts/activate_provider_product.py", source)
+        self.assertIn("scripts/state_manifest.py refresh", source)
+        self.assertNotIn("scripts/stage_image_hints.py", source)
 
     def test_issue_intake_uses_read_only_state_credential(self) -> None:
         text = (WORKFLOWS / "intake.yml").read_text(encoding="utf-8")

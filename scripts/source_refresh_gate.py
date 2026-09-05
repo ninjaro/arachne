@@ -60,7 +60,7 @@ def gate(arguments: argparse.Namespace) -> int:
         config = json.load(stream)
     if config.get("format_version") != 1:
         raise ValueError("operations configuration format_version must be 1")
-    days = config["candidate_rebuild"]["sources"][arguments.source]["refresh_days"]
+    days = config["provider_refresh"]["sources"][arguments.source]["refresh_days"]
     if (
         not isinstance(days, int)
         or isinstance(days, bool)

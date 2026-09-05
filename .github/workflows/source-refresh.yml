@@ -55,8 +55,11 @@ jobs:
           lfs: true
       - name: Validate selected code and authoritative state
         run: |
-          python3 scripts/state_manifest.py check \
-            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"
+          if ! python3 scripts/state_manifest.py check \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"; then
+            python3 scripts/state_manifest.py check-product \
+              --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"
+          fi
       - name: Evaluate configured source cadence
         id: cadence
         env:
@@ -85,19 +88,20 @@ jobs:
         if: steps.cadence.outputs.due == 'true'
         env:
           ARACHNE_BUILD_TESTS: "OFF"
-          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
-      - name: Materialize config and reviewed product snapshot
+      - name: Stage provider product input and materialize its snapshot
         if: steps.cadence.outputs.due == 'true'
         run: |
+          python3 "${GITHUB_WORKSPACE}/.arachne/ci-state/scripts/prepare_provider_rebuild.py" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
+            --arachne-root "${GITHUB_WORKSPACE}"
           python3 scripts/materialize_ci_config.py \
             --template "${GITHUB_WORKSPACE}/.arachne/ci-state/config/arachne.json" \
             --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
             --runner-temp "${RUNNER_TEMP}" \
             --output "${RUNNER_TEMP}/arachne-config.json"
-          python3 -c 'import json,os; p=json.load(open(os.environ["RUNNER_TEMP"] + "/arachne-config.json"))["paths"]; print("ARACHNE_ARTIFACTS=" + p["artifact_store"])' >> "${GITHUB_ENV}"
           python3 scripts/materialize_local_product_snapshot.py \
-            --database "${GITHUB_WORKSPACE}/.arachne/ci-state/database/art-islands.sqlite" \
+            --database "${GITHUB_WORKSPACE}/.arachne/ci-state/.arachne/provider-rebuild/art-islands.sqlite" \
             --graph-store "${RUNNER_TEMP}/product-graph" \
             --output-control "${RUNNER_TEMP}/product-graph/active.json"
           echo "PRODUCT_CONTROL=${RUNNER_TEMP}/product-graph/active.json" >> "${GITHUB_ENV}"
@@ -107,9 +111,11 @@ jobs:
           echo "FETCH_REQUEST=${RUNNER_TEMP}/wikidata-fetch-controls/wikidata-official-dump.json" >> "${GITHUB_ENV}"
           echo "SOURCE_CONTROL=${RUNNER_TEMP}/wikidata-source.acquired.json" >> "${GITHUB_ENV}"
           echo "RESULT_DIRECTORY=${RUNNER_TEMP}/wikidata-results" >> "${GITHUB_ENV}"
-          echo "EXTERNAL_GRAPH=${RUNNER_TEMP}/wikidata-results/wikidata-external-graph.json" >> "${GITHUB_ENV}"
+          echo "EXTERNAL_GRAPH=${RUNNER_TEMP}/wikidata-results/provider-observations.sqlite" >> "${GITHUB_ENV}"
           echo "IMAGE_HINTS=${RUNNER_TEMP}/wikidata-results/wikidata-image-hints.json" >> "${GITHUB_ENV}"
           echo "HPC_REPORT=${RUNNER_TEMP}/wikidata-results/wikidata-hpc-report.json" >> "${GITHUB_ENV}"
+          echo "PROVIDER_REPORT=${RUNNER_TEMP}/provider-rebuild-report.json" >> "${GITHUB_ENV}"
+          echo "STAGED_PRODUCT=${GITHUB_WORKSPACE}/.arachne/ci-state/.arachne/provider-rebuild/art-islands.sqlite" >> "${GITHUB_ENV}"
       - name: Declare and translate official bulk acquisition
         if: steps.cadence.outputs.due == 'true'
         env:
@@ -133,8 +139,8 @@ jobs:
             --config "${RUNNER_TEMP}/arachne-config.json" \
             --request "${FETCH_REQUEST}" \
             --output-control "${SOURCE_CONTROL}"
-      - name: Stream source graph and recompute candidate snapshot
-        id: rebuild
+      - name: Stream the acquired source
+        id: stream
         if: steps.acquire.outcome == 'success'
         continue-on-error: true
         run: |
@@ -146,18 +152,26 @@ jobs:
             --work-directory "${RUNNER_TEMP}/wikidata-work" \
             --wikidata-config hpc/wikidata/config.json \
             --decompress-threads "$(nproc)"
-          mkdir -p "${ARACHNE_ARTIFACTS}/candidate-plans"
-          "${GITHUB_WORKSPACE}/build/arachne" candidate plan \
-            --config "${RUNNER_TEMP}/arachne-config.json" \
-            --external-graph "${EXTERNAL_GRAPH}" \
-            --product-snapshot "${PRODUCT_CONTROL}" \
-            --output-artifact "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.json" \
-            --output-control "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.control.json"
-          "${GITHUB_WORKSPACE}/build/arachne" candidate rebuild \
-            --config "${RUNNER_TEMP}/arachne-config.json" \
-            --plan-control "${ARACHNE_ARTIFACTS}/candidate-plans/${REFRESH_ID}.control.json" \
-            --product-snapshot "${PRODUCT_CONTROL}" \
-            --run-id "candidate-${REFRESH_ID}"
+      - name: Materialize and activate the provider product
+        id: materialize
+        if: steps.stream.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python3 scripts/materialize_provider_rebuild.py \
+            --graph "${EXTERNAL_GRAPH}" \
+            --database "${STAGED_PRODUCT}" \
+            --priority "${GITHUB_WORKSPACE}/.arachne/ci-state/priority.json" \
+            --report "${PROVIDER_REPORT}"
+          python3 scripts/check_product_database_clean.py "${STAGED_PRODUCT}"
+          python3 "${GITHUB_WORKSPACE}/.arachne/ci-state/scripts/activate_provider_product.py" \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
+            --staged-database "${STAGED_PRODUCT}" \
+            --schema "${GITHUB_WORKSPACE}/schema/product.sql"
+          python3 scripts/state_manifest.py refresh \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state" \
+            --producer-commit "${GITHUB_SHA}"
+          python3 scripts/state_manifest.py check \
+            --state-root "${GITHUB_WORKSPACE}/.arachne/ci-state"
       - name: Preserve source and algorithm diagnostics
         if: steps.cadence.outputs.due == 'true' && always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -167,28 +181,28 @@ jobs:
             ${{ env.SOURCE_CONTROL }}
             ${{ env.HPC_REPORT }}
             ${{ env.IMAGE_HINTS }}
+            ${{ env.PROVIDER_REPORT }}
           if-no-files-found: warn
           retention-days: 14
-      - name: Stop after fresh acquisition or rebuild failure
+      - name: Stop after acquisition, streaming, or materialization failure
         if: >-
           steps.cadence.outputs.due == 'true' &&
-          (steps.acquire.outcome != 'success' || steps.rebuild.outcome != 'success')
+          (steps.acquire.outcome != 'success' ||
+           steps.stream.outcome != 'success' ||
+           steps.materialize.outcome != 'success')
         run: exit 1
-      - name: Stage reviewed image hints and remove disposable source bytes
+      - name: Remove disposable provider artifacts
         if: steps.cadence.outputs.due == 'true'
         run: |
           python3 -c 'import json,os; d=json.load(open(os.environ["SOURCE_CONTROL"])); print("SOURCE_ID=" + d["artifact_id"]); print("SOURCE_SHA=" + d["artifact"]["sha256"])' >> "${GITHUB_ENV}"
-          python3 scripts/stage_image_hints.py \
-            "${IMAGE_HINTS}" \
-            "${GITHUB_WORKSPACE}/.arachne/ci-state/derived/wikidata-image-hints.json" \
-            --product-snapshot-control "${PRODUCT_CONTROL}"
           python3 scripts/discard_acquired_artifact.py \
             --fetch-request "${FETCH_REQUEST}" \
             --acquired-control "${SOURCE_CONTROL}" \
             --config "${RUNNER_TEMP}/arachne-config.json"
           rm -f "${EXTERNAL_GRAPH}"
           rm -f "${IMAGE_HINTS}"
-      - name: Persist source cadence and propose reviewed candidate state
+          rm -f "${GITHUB_WORKSPACE}/.arachne/ci-state/derived/wikidata-image-hints.json"
+      - name: Persist source cadence and propose reviewed source metadata
         if: steps.cadence.outputs.due == 'true'
         env:
           GH_TOKEN: ${{ steps.data-writer.outputs.token }}
@@ -204,5 +218,5 @@ jobs:
             --repository "${STATE_REPOSITORY}" \
             --base main \
             --branch "arachne/wikidata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --title "Arachne Wikidata bulk candidate refresh" \
-            --body "Full bulk-first candidate recomputation from ${SOURCE_ID}. Review transport evidence, HPC report, plan, run manifest, derived image hints, and structural validation before merge."
+            --title "Arachne Wikidata provider product refresh" \
+            --body "Provider product materialization from ${SOURCE_ID}. Review transport evidence, the HPC report, provider report, canonical product, remaining priority IDs, and cadence metadata before merge."

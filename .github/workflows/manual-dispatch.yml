@@ -10,7 +10,6 @@ on:
         options:
           - cocoon-decision
           - product-integration
-          - candidate-rebuild
       envelope_id:
         description: Cocoon ID for an explicit approval or rejection
         required: false
@@ -25,26 +24,6 @@ on:
         default: accepted
       decision_reason:
         description: Auditable reason for the cocoon decision
-        required: false
-        type: string
-      plan_mode:
-        description: Candidate plan mode
-        required: false
-        type: choice
-        options:
-          - prebuilt
-          - generate
-        default: prebuilt
-      run_id:
-        description: Candidate rebuild run ID
-        required: false
-        type: string
-      plan_control:
-        description: Prebuilt candidate plan control in the state repository
-        required: false
-        type: string
-      external_graph:
-        description: External graph JSON for generated planning
         required: false
         type: string
 
@@ -105,7 +84,6 @@ jobs:
       - name: Build Arachne operations binary
         env:
           ARACHNE_BUILD_TESTS: "OFF"
-          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
       - name: Record explicit human decision
         env:
@@ -143,14 +121,4 @@ jobs:
   product-integration:
     if: inputs.operation == 'product-integration'
     uses: ./.github/workflows/product-integration.yml
-    secrets: inherit
-
-  candidate-rebuild:
-    if: inputs.operation == 'candidate-rebuild'
-    uses: ./.github/workflows/candidate-rebuild.yml
-    with:
-      plan_mode: ${{ inputs.plan_mode }}
-      plan_control: ${{ inputs.plan_control }}
-      external_graph: ${{ inputs.external_graph }}
-      run_id: ${{ inputs.run_id }}
     secrets: inherit

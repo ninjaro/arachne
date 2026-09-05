@@ -2,131 +2,13 @@
   "format": "arachne_batch",
   "batch_id": "research-00421",
   "create": {
-    "agents": [
-      {
-        "local_id": "agent-lumen",
-        "agent_type": "person",
-        "birth_year": 1940
-      }
-    ],
-    "works": [
-      {
-        "local_id": "work-luminous-field",
-        "medium": "installation",
-        "year_start": 1971,
-        "date_precision": "year",
-        "country_code": "DE"
-      }
-    ],
     "concepts": [
-      {
-        "local_id": "concept-light-art",
-        "concept_type": "movement",
-        "slug": "light-art"
-      },
-      {
-        "local_id": "concept-immersive-space",
-        "concept_type": "theme",
-        "slug": "immersive-space"
-      }
-    ],
-    "manifestations": [
-      {
-        "local_id": "manifestation-luminous-field-2024",
-        "work_id": "work-luminous-field",
-        "manifestation_type": "restoration",
-        "release_year": 2024,
-        "region_code": "DE",
-        "label": "2024 reconstruction"
-      }
-    ],
-    "work_memberships": [
-      {
-        "child_work_id": "work-luminous-field",
-        "parent_work_id": "work-000321",
-        "membership_type": "part_of",
-        "position": 2,
-        "position_text": "Part II"
-      }
-    ],
-    "agent_relations": [
-      {
-        "subject_agent_id": "agent-lumen",
-        "relation_type": "member_of",
-        "object_agent_id": "agent-000411",
-        "from_year": 1970,
-        "to_year": 1974,
-        "period_text": "early 1970s",
-        "role_text": "artistic director"
-      }
-    ],
-    "events": [
-      {
-        "entity_id": "manifestation-luminous-field-2024",
-        "event_type": "exhibited",
-        "year_start": 2024,
-        "date_text": "2024-05",
-        "date_precision": "month",
-        "place_text": "Museum Example"
-      }
+      {"local_id": "concept-light-art", "concept_type": "movement", "slug": "light-art"},
+      {"local_id": "concept-immersive-space", "concept_type": "theme", "slug": "immersive-space"}
     ],
     "names": [
-      {
-        "entity_id": "agent-lumen",
-        "name_type": "original",
-        "value": "Example Artist",
-        "is_preferred": true
-      },
-      {
-        "entity_id": "work-luminous-field",
-        "name_type": "english",
-        "language_code": "en",
-        "value": "Luminous Field",
-        "is_preferred": true
-      },
-      {
-        "entity_id": "concept-light-art",
-        "name_type": "english",
-        "language_code": "en",
-        "value": "Light art",
-        "is_preferred": true
-      },
-      {
-        "entity_id": "concept-immersive-space",
-        "name_type": "english",
-        "language_code": "en",
-        "value": "Immersive space",
-        "is_preferred": true
-      }
-    ],
-    "external_ids": [
-      {
-        "entity_id": "agent-lumen",
-        "scheme": "wikidata",
-        "value": "Q123456"
-      }
-    ],
-    "remote_assets": [
-      {
-        "entity_id": "agent-lumen",
-        "provider": "wikimedia_commons",
-        "remote_key": "File:Example Artist.jpg",
-        "media_kind": "portrait",
-        "direct_url": "https://upload.wikimedia.org/example/Example_Artist.jpg",
-        "source_page_url": "https://commons.wikimedia.org/wiki/File:Example_Artist.jpg",
-        "origin_provider": "wikidata",
-        "origin_entity_id": "Q123456",
-        "origin_property": "P18",
-        "mime_type": "image/jpeg",
-        "width_pixels": 1200,
-        "height_pixels": 1600,
-        "license_id": "CC-BY-SA-4.0",
-        "license_name": "Creative Commons Attribution-ShareAlike 4.0",
-        "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
-        "attribution_text": "Example Photographer / Wikimedia Commons",
-        "rights_status": "licensed",
-        "display_allowed": true
-      }
+      {"entity_id": "concept-light-art", "name_type": "english", "language_code": "en", "value": "Light art", "is_preferred": true},
+      {"entity_id": "concept-immersive-space", "name_type": "english", "language_code": "en", "value": "Immersive space", "is_preferred": true}
     ],
     "sources": [
       {
@@ -149,47 +31,17 @@
         "stance": "supports"
       }
     ],
-    "credits": [
-      {
-        "entity_id": "manifestation-luminous-field-2024",
-        "agent_id": "agent-lumen",
-        "role": "curator",
-        "credit_order": 0,
-        "importance": "primary"
-      }
-    ],
-    "measurements": [
-      {
-        "entity_id": "manifestation-luminous-field-2024",
-        "measurement_type": "width",
-        "value": 6400,
-        "unit": "millimetres"
-      }
-    ],
-    "financial_facts": [
-      {
-        "work_id": "work-luminous-field",
-        "fact_type": "budget",
-        "amount_min": 125000,
-        "currency_code": "EUR",
-        "value_year": 2024,
-        "is_estimate": true,
-        "confidence": 0.8
-      }
-    ],
     "work_concepts": [
       {
         "local_id": "assertion-work-light-art",
-        "work_id": "work-luminous-field",
+        "work_id": "work-000321",
         "concept_id": "concept-light-art",
         "relation_type": "exemplifies",
         "centrality": 95,
         "centrality_scale": "graded",
         "historical_role": "canonical",
         "confidence": 0.9,
-        "evidence": [
-          "evidence-light-art"
-        ]
+        "evidence": ["evidence-light-art"]
       }
     ],
     "concept_relations": [
@@ -200,15 +52,13 @@
         "object_concept_id": "concept-immersive-space",
         "strength": 70,
         "confidence": 0.75,
-        "evidence": [
-          "evidence-light-art"
-        ]
+        "evidence": ["evidence-light-art"]
       }
     ],
     "parent_guide_assertions": [
       {
         "local_id": "assertion-parent-guide",
-        "work_id": "work-luminous-field",
+        "work_id": "work-000321",
         "concept_id": "concept-immersive-space",
         "category": "frightening",
         "intensity": 1,
@@ -218,83 +68,40 @@
         "realism": 1,
         "spoiler_level": "none",
         "confidence": 0.6,
-        "evidence": [
-          "evidence-light-art"
-        ]
+        "evidence": ["evidence-light-art"]
       }
     ]
   },
   "update": {
-    "works": [
+    "provider_ids": [
       {
-        "id": "work-000321",
-        "set": {
-          "country_code": "DE"
-        },
-        "unset": [
-          "language_code"
-        ]
+        "entity_id": "work-000321",
+        "provider": "wikidata",
+        "old_external_id": "Q100",
+        "new_external_id": "Q101"
       }
     ],
     "sources": [
-      {
-        "id": 42,
-        "set": {
-          "title": "Corrected source title"
-        },
-        "unset": [
-          "author_text"
-        ]
-      }
+      {"id": 42, "set": {"title": "Corrected source title"}, "unset": ["author_text"]}
     ],
     "work_concepts": [
-      {
-        "id": 73,
-        "set": {
-          "centrality": 80,
-          "centrality_scale": "ordinal"
-        },
-        "unset": []
-      }
+      {"id": 73, "set": {"centrality": 80, "centrality_scale": "ordinal"}, "unset": []}
     ],
     "delete": {
-      "names": [
-        17
-      ],
-      "remote_assets": [
-        18
-      ],
-      "work_memberships": [
-        27
-      ],
-      "agent_relations": [
-        28
-      ],
-      "events": [
-        29
-      ],
-      "evidence": [
-        88
-      ]
+      "evidence": [90],
+      "work_concepts": [91],
+      "concept_relations": [92],
+      "parent_guide_assertions": [93]
     }
   },
   "merge": {
-    "agents": [
+    "concepts": [
       {
-        "target": "agent-000411",
-        "members": [
-          "agent-003663",
-          "agent-003705"
-        ],
-        "set": {
-          "birth_year": 1940
-        },
-        "unset": [
-          "death_year"
-        ]
+        "target": "concept-000172",
+        "members": ["concept-000173"],
+        "set": {"concept_type": "movement", "slug": "light-art"},
+        "unset": []
       }
-    ],
-    "works": [],
-    "concepts": []
+    ]
   }
 }

@@ -16,18 +16,12 @@
     "queued_batch_threshold": 15,
     "lock_stale_seconds": 21600
   },
-  "candidate_rebuild": {
+  "provider_refresh": {
     "sources": {
       "wikidata": {
-        "refresh_days": 60,
-        "candidate_pool_size": 3000,
-        "final_target": 1500,
-        "group_count": 4,
-        "gray_bonus_basis_points": 2000,
-        "quality_weight": 0.65
+        "refresh_days": 60
       }
-    },
-    "lock_stale_seconds": 21600
+    }
   },
   "external_enrichment": {
     "optional_bulk_providers": {

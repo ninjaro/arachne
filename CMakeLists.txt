@@ -3,7 +3,6 @@ cmake_minimum_required(VERSION 3.28)
 project(arachne VERSION 2.0.0 LANGUAGES CXX)
 
 option(BUILD_TESTS "Build hermetic tests" ON)
-option(BUILD_LEGACY_CLIENT "Build the deprecated Wikidata compatibility API" OFF)
 option(ENABLE_NETWORK_TESTS "Build tests that access live external services" OFF)
 option(COVERAGE "Enable coverage instrumentation" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer for tests" OFF)
@@ -67,9 +66,8 @@ target_link_libraries(
 )
 target_compile_features(pheidippides_transport PUBLIC cxx_std_23)
 
-# Ariadne owns candidate, catalog, research, and taste semantics.
+# Ariadne owns provider normalization, catalog, research, and taste semantics.
 add_library(ariadne_engine STATIC
-    src/ariadne/candidates.cpp
     src/ariadne/enrichment.cpp
     src/ariadne/providers/wikidata.cpp
     src/ariadne/merge_hints.cpp
@@ -91,9 +89,8 @@ target_link_libraries(
 )
 target_compile_features(ariadne_engine PUBLIC cxx_std_23)
 
-# Penelope alone owns graph schemas, staging, activation, and exports.
+# Penelope owns canonical inbox and derived merge-hint persistence.
 add_library(penelope_store STATIC
-    src/penelope/store.cpp
     src/penelope/inbox.cpp
     src/penelope/merge_hint_store.cpp
 )
@@ -134,27 +131,6 @@ target_compile_definitions(
     arachne_app PRIVATE ARACHNE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
-# The 1.x Wikidata helper is an explicitly deprecated compatibility target and
-# is never linked into the v2 application or workflows.
-if(BUILD_LEGACY_CLIENT)
-    add_library(arachne_legacy STATIC
-        src/arachne.cpp
-        src/ariadne.cpp
-        src/penelope.cpp
-        src/pheidippides.cpp
-        src/rng.cpp
-        src/utils.cpp
-        src/http_client.cpp
-    )
-    target_include_directories(arachne_legacy PUBLIC include)
-    target_link_libraries(
-        arachne_legacy
-        PUBLIC CURL::libcurl nlohmann_json::nlohmann_json ${ARACHNE_SQLITE_TARGET}
-    )
-    target_compile_features(arachne_legacy PUBLIC cxx_std_23)
-    add_library(arachne_lib ALIAS arachne_legacy)
-endif()
-
 add_library(dep_coverage INTERFACE)
 if(COVERAGE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -192,14 +168,10 @@ if(BUILD_TESTS)
         tests/contracts_tests.cpp
         tests/transport_contract_tests.cpp
         tests/coordinator_tests.cpp
-        tests/ariadne_tests.cpp
         tests/enrichment_tests.cpp
         tests/product_projection_tests.cpp
         tests/catalog_tests.cpp
     )
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/candidate_store_tests.cpp")
-        list(APPEND ARACHNE_CORE_TEST_SOURCES tests/candidate_store_tests.cpp)
-    endif()
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/product_inbox_tests.cpp")
         list(APPEND ARACHNE_CORE_TEST_SOURCES tests/product_inbox_tests.cpp)
     endif()
@@ -253,10 +225,6 @@ if(BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_workflow_yaml -v
     )
     add_test(
-        NAME image_hint_staging_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_stage_image_hints -v
-    )
-    add_test(
         NAME wikidata_hpc_worker_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest
             tests.test_wikidata_hpc_worker -v
@@ -292,24 +260,12 @@ if(BUILD_TESTS)
     )
     set_tests_properties(
         actor_boundary_tests intake_adapter_tests workflow_yaml_tests
-        image_hint_staging_tests
         wikidata_hpc_worker_tests wikidata_hpc_run_tests
         local_product_snapshot_materializer_tests product_schema_tests
         source_refresh_tests wikidata_response_bundle_tests
         operations_cli_tests
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
-
-    if(BUILD_LEGACY_CLIENT)
-        add_executable(legacy_unit_tests
-            tests/arachne_tests.cpp
-            tests/rng_tests.cpp
-        )
-        target_link_libraries(
-            legacy_unit_tests PRIVATE arachne_legacy GTest::gtest_main dep_coverage
-        )
-        gtest_discover_tests(legacy_unit_tests)
-    endif()
 
     if(ENABLE_NETWORK_TESTS)
         add_test(
@@ -324,17 +280,6 @@ if(BUILD_TESTS)
         )
     endif()
 
-    if(ENABLE_NETWORK_TESTS AND BUILD_LEGACY_CLIENT)
-        add_executable(network_tests
-            tests/http_client_tests.cpp
-            tests/pheidippides_tests.cpp
-            tests/sparql_tests.cpp
-        )
-        target_link_libraries(
-            network_tests PRIVATE arachne_legacy GTest::gtest_main
-        )
-        gtest_discover_tests(network_tests LABELS network)
-    endif()
 endif()
 
 if(COVERAGE AND TARGET core_tests)

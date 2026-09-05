@@ -99,25 +99,16 @@ build/arachne product taste-index \
   --output /tmp/taste-index.json
 ```
 
-The native candidate rebuild receives the exact product control explicitly; it
-does not reconstruct a path from a snapshot identifier:
-
-```sh
-build/arachne candidate rebuild \
-  --config ../arachne-data/config/arachne.json \
-  --plan-control /reviewed/candidate-plan.control.json \
-  --product-snapshot "$tmp_graph/active.json" \
-  --run-id candidate-wikidata-20260824
-```
-
 ## Bulk source refresh
 
-The Wikidata workflow validates the selected state manifest, creates a transient
-product snapshot under runner temporary storage, streams the official dump, and
-recomputes candidate state. The worker and candidate commands consume the same
-explicit product control. Only reviewed candidate state, cadence records, and
-the closed snapshot-bound `derived/wikidata-image-hints.json` may be proposed to
-`arachne-data`; transient product graphs and raw dump bytes are never proposed.
+The Wikidata workflow validates the recorded current product bytes, stages either
+the one-time clean rebuild or a copy of the current-schema product, and creates a
+transient snapshot of that staged input. It streams the official dump into one
+disposable provider-observation graph, materializes provider-owned product state,
+validates and atomically activates the staged SQLite file, refreshes the state
+manifest, and proposes the product bytes, remaining priority IDs, and cadence
+record together for review. Provider observations, transient product graphs, raw
+dump bytes, reports, and image-hint projections are never canonical state.
 
 For CLAIX/local HPC, point `--state-root` or
 `ARACHNE_STATE_REPOSITORY` at an existing private state checkout. The tool no
@@ -143,12 +134,15 @@ Commons-media, and acquisition context in `wikidata_response_bundle_v1`.
 Missing, extra, mismatched, or unverifiable acquisitions fail without emitting
 a partial bundle. The bundle and resulting enrichment review are disposable;
 they do not authorize canonical writes. The staged semantics are defined in
-[Candidate graph and transient semantic projections](ARCHITECTURE.md#candidate-graph-and-transient-semantic-projections).
+[Provider observation graph](PROVIDER_OBSERVATION_GRAPH.md).
 
 ## Optional bulk-provider plans
 
 Optional IMDb, MusicBrainz, Open Library, and Discogs acquisitions are planned
 from explicit `external_enrichment.optional_bulk_providers` configuration:
+
+Their disposable normalized data model and exact-identity union rules are
+documented in [Provider observation graph](PROVIDER_OBSERVATION_GRAPH.md).
 
 ```sh
 python3 scripts/optional_bulk_provider_plans.py \
@@ -200,9 +194,8 @@ pushes, or creates legacy mapping state.
 | `validation.yml` | Hermetic code validation plus explicit read-only state compatibility |
 | `intake.yml` | Acquire and validate a strict batch; propose only code-repository inbox files |
 | `product-integration.yml` | Serialized canonical SQLite mutation and manifest publication |
-| `candidate-rebuild.yml` | Native plan/rebuild against a transient exact product snapshot |
-| `source-refresh.yml` | Cadence-gated bulk source, candidate rebuild, and reviewed image hints |
-| `manual-dispatch.yml` | Serialized explicit cocoon decision or delegated product/candidate operation |
+| `source-refresh.yml` | Cadence-gated bulk source and provider product materialization proposal |
+| `manual-dispatch.yml` | Serialized explicit cocoon decision or delegated product operation |
 | `html.yml` | Doxygen/coverage artifact only; no Pages deployment |
 
 `arachne-demo` owns public deployment and its prior deployed snapshot remains
@@ -216,7 +209,7 @@ settings so there is only one dependency-update writer.
 ## Recovery
 
 Authoritative recovery comes from protected `arachne-data` history and its LFS
-objects. Candidate state and raw HPC intermediates are replaceable. Never solve a
+objects. Provider observations and raw HPC intermediates are replaceable. Never solve a
 stale writer by rebasing its mutation: discard that run and start from the new
 authoritative head. Product idempotency remains defined by `applied_batches`,
 not by operational backups, hashes, or redirect metadata.

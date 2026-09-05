@@ -6,6 +6,7 @@
 #include "penelope/inbox.hpp"
 
 #include "arachne/contracts.hpp"
+#include "arachne/provider_authority.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -890,9 +891,8 @@ namespace {
     const std::set<std::string, std::less<>> measurement_units { "seconds",
                                                                  "millimetres",
                                                                  "pages" };
-    const std::set<std::string, std::less<>> media_kinds {
-        "portrait", "poster", "logo", "image"
-    };
+    const std::set<std::string, std::less<>> media_kinds { "portrait", "poster",
+                                                           "logo", "image" };
     const std::set<std::string, std::less<>> rights_statuses {
         "public_domain", "licensed", "restricted", "unknown"
     };
@@ -1273,6 +1273,17 @@ namespace {
             return;
         }
         validate_entity_reference_shape(batch, value, "entity_id", path);
+        if (const auto entity = value.find("entity_id");
+            entity != value.end() && entity->is_string()) {
+            const std::string& id = entity->get_ref<const std::string&>();
+            if (looks_like_canonical_entity_id(id)
+                && !valid_canonical_id(id, "concept")) {
+                add_issue(
+                    batch, "wrong_reference_family", path + "/entity_id",
+                    "human-authored names may target concepts only", &*entity
+                );
+            }
+        }
         require_enum(batch, value, "name_type", path, name_types);
         require_nonempty_string(batch, value, "value", path);
         require_kind(batch, value, "is_preferred", path, value_kind::boolean);
@@ -1307,12 +1318,13 @@ namespace {
     ) {
         check_keys(
             batch, value, path,
-            { "entity_id", "provider", "remote_key", "media_kind",
-              "direct_url", "source_page_url", "origin_provider",
-              "origin_entity_id", "origin_property", "mime_type", "width_pixels",
-              "height_pixels", "license_id", "license_name", "license_url",
-              "attribution_text", "author_text", "credit_text",
-              "rights_status", "display_allowed", "rights_note" },
+            { "entity_id",        "provider",         "remote_key",
+              "media_kind",       "direct_url",       "source_page_url",
+              "origin_provider",  "origin_entity_id", "origin_property",
+              "mime_type",        "width_pixels",     "height_pixels",
+              "license_id",       "license_name",     "license_url",
+              "attribution_text", "author_text",      "credit_text",
+              "rights_status",    "display_allowed",  "rights_note" },
             { "entity_id", "provider" }
         );
         if (!value.is_object()) {
@@ -1327,9 +1339,7 @@ namespace {
             require_enum(batch, value, "media_kind", path, media_kinds);
         }
         if (value.contains("rights_status")) {
-            require_enum(
-                batch, value, "rights_status", path, rights_statuses
-            );
+            require_enum(batch, value, "rights_status", path, rights_statuses);
         }
         if (value.contains("display_allowed")) {
             require_kind(
@@ -1339,8 +1349,8 @@ namespace {
         for (const auto& key :
              { "direct_url", "source_page_url", "origin_provider",
                "origin_entity_id", "origin_property", "mime_type", "license_id",
-               "license_name", "license_url", "attribution_text",
-               "author_text", "credit_text", "rights_note" }) {
+               "license_name", "license_url", "attribution_text", "author_text",
+               "credit_text", "rights_note" }) {
             if (value.contains(key)) {
                 require_nonempty_string(batch, value, key, path);
             }
@@ -1392,6 +1402,14 @@ namespace {
             add_issue(
                 batch, "source_identity_required", path,
                 "source needs doi, isbn, url, or bibliography_text", &value
+            );
+        }
+        if (authority::is_automatic_provider_source(value)) {
+            add_issue(
+                batch, "automatic_provider_evidence", path,
+                "automatically mined providers cannot be human evidence "
+                "sources",
+                &value
             );
         }
     }
@@ -1911,6 +1929,46 @@ namespace {
         }
     }
 
+    void validate_provider_id_correction(
+        parsed_batch& batch, const json& value, const std::string& path
+    ) {
+        check_keys(
+            batch, value, path,
+            { "entity_id", "provider", "old_external_id", "new_external_id" },
+            { "entity_id", "provider", "old_external_id", "new_external_id" }
+        );
+        if (!value.is_object()) {
+            return;
+        }
+        for (const auto& key : { "entity_id", "provider", "old_external_id",
+                                 "new_external_id" }) {
+            require_nonempty_string(batch, value, key, path);
+        }
+        const auto entity = value.find("entity_id");
+        if (entity != value.end() && entity->is_string()) {
+            const std::string& id = entity->get_ref<const std::string&>();
+            if (!valid_canonical_id(id, "agent")
+                && !valid_canonical_id(id, "work")
+                && !valid_canonical_id(id, "concept")
+                && !valid_canonical_id(id, "manifestation")) {
+                add_issue(
+                    batch, "invalid_canonical_id", path + "/entity_id",
+                    "entity_id must identify a canonical entity", &*entity
+                );
+            }
+        }
+        if (value.contains("old_external_id")
+            && value.contains("new_external_id")
+            && value["old_external_id"].is_string()
+            && value["new_external_id"].is_string()
+            && value["old_external_id"] == value["new_external_id"]) {
+            add_issue(
+                batch, "unchanged_provider_id", path,
+                "old and new provider IDs must differ", &value
+            );
+        }
+    }
+
     const std::map<std::string, value_kind, std::less<>> agent_mutable {
         { "birth_year", value_kind::integer },
         { "death_year", value_kind::integer },
@@ -2000,20 +2058,8 @@ namespace {
             return;
         }
         const std::set<std::string, std::less<>> tables {
-            "names",
-            "external_ids",
-            "remote_assets",
-            "credits",
-            "work_memberships",
-            "agent_relations",
-            "events",
-            "measurements",
-            "financial_facts",
-            "evidence",
-            "work_concepts",
-            "concept_relations",
-            "parent_guide_assertions",
-            "ingest_issues"
+            "evidence", "work_concepts", "concept_relations",
+            "parent_guide_assertions"
         };
         check_keys(batch, *found, path + "/delete", tables);
         if (!found->is_object()) {
@@ -2278,21 +2324,10 @@ namespace {
 
         auto& create = batch.document["create"];
         const std::set<std::string, std::less<>> create_keys {
-            "agents",
-            "works",
             "concepts",
-            "manifestations",
-            "work_memberships",
-            "agent_relations",
-            "events",
             "names",
-            "external_ids",
-            "remote_assets",
             "sources",
             "evidence",
-            "credits",
-            "measurements",
-            "financial_facts",
             "work_concepts",
             "concept_relations",
             "parent_guide_assertions"
@@ -2300,49 +2335,12 @@ namespace {
         check_keys(batch, create, "/create", create_keys);
         auto& locals = batch.entity_local_ids;
         validate_array(
-            batch, create, "agents", "/create",
-            [&locals](
-                parsed_batch& target, const json& value, const std::string& path
-            ) { validate_create_agent(target, value, path, locals); }
-        );
-        validate_array(
-            batch, create, "works", "/create",
-            [&locals](
-                parsed_batch& target, const json& value, const std::string& path
-            ) { validate_create_work(target, value, path, locals); }
-        );
-        validate_array(
             batch, create, "concepts", "/create",
             [&locals](
                 parsed_batch& target, const json& value, const std::string& path
             ) { validate_create_concept(target, value, path, locals); }
         );
-        validate_array(
-            batch, create, "manifestations", "/create",
-            [&locals](
-                parsed_batch& target, const json& value, const std::string& path
-            ) { validate_create_manifestation(target, value, path, locals); }
-        );
-        validate_array(
-            batch, create, "work_memberships", "/create",
-            validate_create_work_membership
-        );
-        validate_array(
-            batch, create, "agent_relations", "/create",
-            validate_create_agent_relation
-        );
-        validate_array(
-            batch, create, "events", "/create", validate_create_event
-        );
         validate_array(batch, create, "names", "/create", validate_create_name);
-        validate_array(
-            batch, create, "external_ids", "/create",
-            validate_create_external_id
-        );
-        validate_array(
-            batch, create, "remote_assets", "/create",
-            validate_create_remote_asset
-        );
         validate_array(
             batch, create, "sources", "/create",
             [&locals](
@@ -2354,17 +2352,6 @@ namespace {
             [&locals](
                 parsed_batch& target, const json& value, const std::string& path
             ) { validate_create_evidence(target, value, path, locals); }
-        );
-        validate_array(
-            batch, create, "credits", "/create", validate_create_credit
-        );
-        validate_array(
-            batch, create, "measurements", "/create",
-            validate_create_measurement
-        );
-        validate_array(
-            batch, create, "financial_facts", "/create",
-            validate_create_financial
         );
         validate_array(
             batch, create, "work_concepts", "/create",
@@ -2387,30 +2374,9 @@ namespace {
 
         auto& update = batch.document["update"];
         const std::set<std::string, std::less<>> update_keys {
-            "agents",  "works",         "concepts", "manifestations",
-            "sources", "work_concepts", "delete"
+            "concepts", "sources", "work_concepts", "provider_ids", "delete"
         };
         check_keys(batch, update, "/update", update_keys);
-        validate_array(
-            batch, update, "agents", "/update",
-            [](parsed_batch& target, const json& value,
-               const std::string& path) {
-                validate_update_record(
-                    target, value, path, "agent", agent_mutable, {},
-                    agent_update_enums
-                );
-            }
-        );
-        validate_array(
-            batch, update, "works", "/update",
-            [](parsed_batch& target, const json& value,
-               const std::string& path) {
-                validate_update_record(
-                    target, value, path, "work", work_mutable, { "medium" },
-                    work_update_enums
-                );
-            }
-        );
         validate_array(
             batch, update, "concepts", "/update",
             [](parsed_batch& target, const json& value,
@@ -2418,17 +2384,6 @@ namespace {
                 validate_update_record(
                     target, value, path, "concept", concept_mutable,
                     { "concept_type", "slug" }, concept_update_enums
-                );
-            }
-        );
-        validate_array(
-            batch, update, "manifestations", "/update",
-            [](parsed_batch& target, const json& value,
-               const std::string& path) {
-                validate_update_record(
-                    target, value, path, "manifestation", manifestation_mutable,
-                    { "work_id", "manifestation_type", "label" },
-                    manifestation_update_enums
                 );
             }
         );
@@ -2468,10 +2423,13 @@ namespace {
                 }
             }
         );
+        validate_array(
+            batch, update, "provider_ids", "/update",
+            validate_provider_id_correction
+        );
         validate_delete_object(batch, update, "/update");
         for (const auto collection :
-             { "agents", "works", "concepts", "manifestations", "sources",
-               "work_concepts" }) {
+             { "concepts", "sources", "work_concepts", "provider_ids" }) {
             const auto rows = update.find(collection);
             if (rows == update.end() || !rows->is_array()) {
                 continue;
@@ -2479,6 +2437,28 @@ namespace {
             std::set<std::string, std::less<>> targets;
             for (std::size_t index = 0; index < rows->size(); ++index) {
                 const auto& row = (*rows)[index];
+                if (std::string_view(collection) == "provider_ids") {
+                    if (!row.is_object() || !row.contains("entity_id")
+                        || !row["entity_id"].is_string()
+                        || !row.contains("provider")
+                        || !row["provider"].is_string()) {
+                        continue;
+                    }
+                    const std::string identity
+                        = row["entity_id"].get<std::string>() + "\n"
+                        + row["provider"].get<std::string>();
+                    if (!targets.emplace(identity).second) {
+                        add_issue(
+                            batch, "duplicate_update_target",
+                            indexed_path("/update/provider_ids", index)
+                                + "/entity_id",
+                            "an entity's provider ID may be corrected at most "
+                            "once per batch",
+                            &row["entity_id"]
+                        );
+                    }
+                    continue;
+                }
                 const auto id = row.is_object() ? row.find("id") : row.end();
                 if (id == row.end()
                     || (!id->is_string() && !id->is_number_integer()
@@ -2501,30 +2481,8 @@ namespace {
         }
 
         auto& merge = batch.document["merge"];
-        check_keys(batch, merge, "/merge", { "agents", "works", "concepts" });
+        check_keys(batch, merge, "/merge", { "concepts" });
         std::map<std::string, std::string, std::less<>> merged_entities;
-        validate_array(
-            batch, merge, "agents", "/merge",
-            [&merged_entities](
-                parsed_batch& target, const json& value, const std::string& path
-            ) {
-                validate_merge_record(
-                    target, value, path, "agent", agent_merge_mutable,
-                    { "agent_type" }, agent_merge_enums, merged_entities
-                );
-            }
-        );
-        validate_array(
-            batch, merge, "works", "/merge",
-            [&merged_entities](
-                parsed_batch& target, const json& value, const std::string& path
-            ) {
-                validate_merge_record(
-                    target, value, path, "work", work_mutable, { "medium" },
-                    work_update_enums, merged_entities
-                );
-            }
-        );
         validate_array(
             batch, merge, "concepts", "/merge",
             [&merged_entities](
@@ -2539,11 +2497,7 @@ namespace {
         );
 
         for (const auto& family :
-             { std::pair { "agents", std::string_view("agent") },
-               std::pair { "works", std::string_view("work") },
-               std::pair { "concepts", std::string_view("concept") },
-               std::pair { "manifestations",
-                           std::string_view("manifestation") } }) {
+             { std::pair { "concepts", std::string_view("concept") } }) {
             const auto updates = update.find(family.first);
             if (updates == update.end() || !updates->is_array()) {
                 continue;
@@ -2789,7 +2743,9 @@ namespace {
             );
         });
         walk("names", [&](const json& row, const std::string& path) {
-            prevalidate_entity_reference(batch, sql, row, "entity_id", path);
+            prevalidate_entity_reference(
+                batch, sql, row, "entity_id", path, "concept"
+            );
         });
         walk("external_ids", [&](const json& row, const std::string& path) {
             prevalidate_entity_reference(batch, sql, row, "entity_id", path);
@@ -2931,21 +2887,34 @@ namespace {
                 }
                 statement identity(
                     sql,
-                    "SELECT bibliography_text,url,doi,isbn FROM sources WHERE "
-                    "id=?"
+                    "SELECT source_type,title,publisher,bibliography_text,url,"
+                    "doi,isbn FROM sources WHERE id=?"
                 );
                 identity.bind_json_value(1, row["id"]);
                 if (!identity.step()) {
                     continue;
                 }
+                json resulting_source = json::object();
+                constexpr std::array<std::string_view, 7> source_fields {
+                    "source_type", "title", "publisher", "bibliography_text",
+                    "url",         "doi",   "isbn"
+                };
+                for (std::size_t field = 0; field < source_fields.size();
+                     ++field) {
+                    if (!identity.is_null(static_cast<int>(field))) {
+                        resulting_source[std::string(source_fields[field])]
+                            = identity.text(static_cast<int>(field));
+                    }
+                }
                 std::map<std::string, bool, std::less<>> present {
-                    { "bibliography_text", !identity.is_null(0) },
-                    { "url", !identity.is_null(1) },
-                    { "doi", !identity.is_null(2) },
-                    { "isbn", !identity.is_null(3) },
+                    { "bibliography_text", !identity.is_null(3) },
+                    { "url", !identity.is_null(4) },
+                    { "doi", !identity.is_null(5) },
+                    { "isbn", !identity.is_null(6) },
                 };
                 if (row.contains("set") && row["set"].is_object()) {
                     for (const auto& [field, value] : row["set"].items()) {
+                        resulting_source[field] = value;
                         if (present.contains(field)) {
                             present[field] = !value.is_null();
                         }
@@ -2954,10 +2923,27 @@ namespace {
                 if (row.contains("unset") && row["unset"].is_array()) {
                     for (const auto& field : row["unset"]) {
                         if (field.is_string()
+                            && resulting_source.contains(
+                                field.get_ref<const std::string&>()
+                            )) {
+                            resulting_source.erase(
+                                field.get_ref<const std::string&>()
+                            );
+                        }
+                        if (field.is_string()
                             && present.contains(field.get<std::string>())) {
                             present[field.get<std::string>()] = false;
                         }
                     }
+                }
+                if (authority::is_automatic_provider_source(resulting_source)) {
+                    add_issue(
+                        batch, "automatic_provider_evidence",
+                        indexed_path("/update/sources", index),
+                        "source update would use an automatically mined "
+                        "provider as human evidence",
+                        &row
+                    );
                 }
                 if (std::ranges::none_of(present, [](const auto& item) {
                         return item.second;
@@ -3009,6 +2995,64 @@ namespace {
                         "assignment "
                         "also requires binary, ordinal, or graded scale",
                         &*set
+                    );
+                }
+            }
+        }
+        const auto provider_updates = update.find("provider_ids");
+        if (provider_updates != update.end() && provider_updates->is_array()) {
+            for (std::size_t index = 0; index < provider_updates->size();
+                 ++index) {
+                const auto& row = (*provider_updates)[index];
+                if (!row.is_object() || !row.contains("entity_id")
+                    || !row["entity_id"].is_string()
+                    || !row.contains("provider") || !row["provider"].is_string()
+                    || !row.contains("old_external_id")
+                    || !row["old_external_id"].is_string()
+                    || !row.contains("new_external_id")
+                    || !row["new_external_id"].is_string()) {
+                    continue;
+                }
+                const std::string path
+                    = indexed_path("/update/provider_ids", index);
+                const std::string entity_id
+                    = row["entity_id"].get<std::string>();
+                if (entity_family(sql, entity_id).empty()) {
+                    add_issue(
+                        batch, "unknown_canonical_id", path + "/entity_id",
+                        "canonical entity does not exist", &row["entity_id"]
+                    );
+                    continue;
+                }
+                statement current(
+                    sql,
+                    "SELECT 1 FROM external_ids WHERE entity_id=? AND scheme=? "
+                    "AND value=?"
+                );
+                current.bind_json_value(1, row["entity_id"]);
+                current.bind_json_value(2, row["provider"]);
+                current.bind_json_value(3, row["old_external_id"]);
+                if (!current.step()) {
+                    add_issue(
+                        batch, "provider_id_precondition_failed", path,
+                        "current provider ID does not match old_external_id",
+                        &row
+                    );
+                    continue;
+                }
+                statement collision(
+                    sql,
+                    "SELECT entity_id FROM external_ids WHERE scheme=? AND "
+                    "value=?"
+                );
+                collision.bind_json_value(1, row["provider"]);
+                collision.bind_json_value(2, row["new_external_id"]);
+                if (collision.step()) {
+                    add_issue(
+                        batch, "provider_id_conflict",
+                        path + "/new_external_id",
+                        "new provider ID is already assigned to an entity",
+                        &row["new_external_id"]
                     );
                 }
             }
@@ -3631,7 +3675,8 @@ namespace {
                     "INSERT INTO remote_assets("
                     "entity_id,provider,remote_key,media_kind,direct_url,"
                     "source_page_url,origin_provider,origin_entity_id,"
-                    "origin_property,mime_type,width_pixels,height_pixels,license_id,"
+                    "origin_property,mime_type,width_pixels,height_pixels,"
+                    "license_id,"
                     "license_name,license_url,attribution_text,author_text,"
                     "credit_text,rights_status,display_allowed,rights_note)"
                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
@@ -4097,6 +4142,45 @@ namespace {
                 update_row(sql, "work_concepts", "id", row);
             }
         }
+        if (const auto rows = update.find("provider_ids");
+            rows != update.end() && rows->is_array()) {
+            statement replace(
+                sql,
+                "UPDATE external_ids SET value=?,canonical_url=NULL "
+                "WHERE entity_id=? AND scheme=? AND value=?"
+            );
+            statement discard_old_refresh_state(
+                sql,
+                "DELETE FROM provider_general_facts WHERE entity_id=? "
+                "AND provider=? AND external_id=?"
+            );
+            for (std::size_t index = 0; index < rows->size(); ++index) {
+                const auto& row = (*rows)[index];
+                set_application_context(
+                    batch, indexed_path("/update/provider_ids", index), row
+                );
+                sqlite3_reset(replace.native());
+                sqlite3_clear_bindings(replace.native());
+                replace.bind_json_value(1, row.at("new_external_id"));
+                replace.bind_json_value(2, row.at("entity_id"));
+                replace.bind_json_value(3, row.at("provider"));
+                replace.bind_json_value(4, row.at("old_external_id"));
+                replace.execute();
+                if (sqlite3_changes(sql) != 1) {
+                    throw database_error(
+                        "provider ID changed after batch prevalidation"
+                    );
+                }
+                sqlite3_reset(discard_old_refresh_state.native());
+                sqlite3_clear_bindings(discard_old_refresh_state.native());
+                discard_old_refresh_state.bind_json_value(1, row.at("entity_id"));
+                discard_old_refresh_state.bind_json_value(2, row.at("provider"));
+                discard_old_refresh_state.bind_json_value(
+                    3, row.at("old_external_id")
+                );
+                discard_old_refresh_state.execute();
+            }
+        }
     }
 
     void apply_deletes(parsed_batch& batch, sqlite3* const sql) {
@@ -4110,10 +4194,9 @@ namespace {
         // assertion.
         for (const std::string_view table_name :
              { "names", "external_ids", "remote_assets", "credits",
-               "work_memberships", "agent_relations", "events",
-               "measurements", "financial_facts", "work_concepts",
-               "concept_relations", "parent_guide_assertions", "evidence",
-               "ingest_issues" }) {
+               "work_memberships", "agent_relations", "events", "measurements",
+               "financial_facts", "work_concepts", "concept_relations",
+               "parent_guide_assertions", "evidence", "ingest_issues" }) {
             const auto found = deletes->find(table_name);
             if (found == deletes->end()) {
                 continue;

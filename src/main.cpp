@@ -2,14 +2,12 @@
 #include "arachne/coordinator.hpp"
 #include "arachne/crypto.hpp"
 #include "arachne/fetch_translation.hpp"
-#include "ariadne/candidates.hpp"
 #include "ariadne/enrichment.hpp"
 #include "ariadne/merge_hints.hpp"
 #include "ariadne/product.hpp"
 #include "ariadne/providers/wikidata.hpp"
 #include "penelope/inbox.hpp"
 #include "penelope/merge_hint_store.hpp"
-#include "penelope/store.hpp"
 #include "pheidippides/hardened_transport.hpp"
 #include "pheidippides/transport.hpp"
 
@@ -21,7 +19,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -305,20 +302,6 @@ private:
     return result;
 }
 
-[[nodiscard]] std::size_t size_value(
-    const json& object, const std::string_view key, const std::size_t fallback
-) {
-    const std::uint64_t value = unsigned_value(
-        object, key, static_cast<std::uint64_t>(fallback), true
-    );
-    if (value > std::numeric_limits<std::size_t>::max()) {
-        throw cli_error(
-            "configuration field " + std::string(key) + " is too large"
-        );
-    }
-    return static_cast<std::size_t>(value);
-}
-
 struct configuration final {
     fs::path file;
     json document;
@@ -331,7 +314,6 @@ struct configuration final {
     fs::path lock_root;
     std::uintmax_t submission_max_bytes = 64U * 1024U * 1024U;
     std::chrono::seconds product_lock_stale { 21'600 };
-    std::chrono::seconds candidate_lock_stale { 21'600 };
 };
 
 [[nodiscard]] const json&
@@ -451,44 +433,18 @@ required_object(const json& parent, const std::string_view key) {
     );
     const json& product
         = required_object(result.document, "product_integration");
-    const json& candidate
-        = required_object(result.document, "candidate_rebuild");
     const std::uint64_t product_stale
         = unsigned_value(product, "lock_stale_seconds", 21'600U, true);
-    const std::uint64_t candidate_stale
-        = unsigned_value(candidate, "lock_stale_seconds", 21'600U, true);
     const auto seconds_max = static_cast<std::uint64_t>(
         std::numeric_limits<std::chrono::seconds::rep>::max()
     );
-    if (product_stale > seconds_max || candidate_stale > seconds_max) {
+    if (product_stale > seconds_max) {
         throw cli_error("configured lock stale interval is too large");
     }
     result.product_lock_stale = std::chrono::seconds(
         static_cast<std::chrono::seconds::rep>(product_stale)
     );
-    result.candidate_lock_stale = std::chrono::seconds(
-        static_cast<std::chrono::seconds::rep>(candidate_stale)
-    );
     return result;
-}
-
-[[nodiscard]] std::string policy_configuration_hash(
-    const configuration& config, const std::string_view section
-) {
-    const auto value = config.document.find(section);
-    if (value == config.document.end()) {
-        throw cli_error(
-            "configuration section is missing: " + std::string(section)
-        );
-    }
-    const ordered_json stable {
-        { "format_version", config.document.at("format_version") },
-        { "project_timezone", config.document.at("project_timezone") },
-        { std::string(section), *value },
-    };
-    return arachne::crypto::sha256(
-        arachnespace::contracts::canonical_json(stable)
-    );
 }
 
 [[nodiscard]] fs::path command_path(const std::string& value) {
@@ -595,119 +551,6 @@ envelope_json(const arachne::coordination::envelope_record& envelope) {
     return result;
 }
 
-[[nodiscard]] ordered_json
-snapshot_json(const arachne::penelope::snapshot_result& snapshot) {
-    return {
-        { "domain", "research_candidate_graph" },
-        { "snapshot_id", snapshot.snapshot_id },
-        { "database_path", snapshot.database_path.generic_string() },
-        { "export_path", snapshot.export_path.generic_string() },
-        { "metadata_path", snapshot.metadata_path.generic_string() },
-        { "database_sha256", snapshot.database_sha256 },
-        { "export_sha256", snapshot.export_sha256 },
-        { "applied_inputs", snapshot.applied_inputs },
-        { "skipped_inputs", snapshot.skipped_inputs },
-        { "activated", snapshot.activated },
-        { "changed", snapshot.changed },
-    };
-}
-
-struct written_run_manifest final {
-    ordered_json document;
-    fs::path path;
-    std::string storage_ref;
-};
-
-[[nodiscard]] written_run_manifest write_graph_run_manifest(
-    const configuration& config, const std::string_view domain_directory,
-    const std::string_view graph_domain, const std::string_view run_id,
-    ordered_json configuration_hashes, ordered_json inputs,
-    const arachne::penelope::snapshot_result& snapshot
-) {
-    const json metadata = read_json(
-        snapshot.metadata_path, maximum_control_bytes, "snapshot metadata"
-    );
-    ordered_json outputs = ordered_json::array();
-    outputs.push_back(
-        { { "kind", "graph-database" },
-          { "artifact", metadata.at("database") } }
-    );
-    for (const auto& exported : metadata.at("exports")) {
-        outputs.push_back(
-            { { "kind", exported.at("kind") },
-              { "artifact", exported.at("artifact") } }
-        );
-    }
-    outputs.push_back(
-        { { "kind", "structural-validation-report" },
-          { "artifact", metadata.at("structural_validation").at("report") } }
-    );
-    const fs::path metadata_ref
-        = snapshot.metadata_path.lexically_relative(config.graph_store);
-    if (metadata_ref.empty()
-        || !arachne::crypto::is_safe_relative_artifact_ref(
-            metadata_ref.generic_string()
-        )) {
-        throw cli_error("snapshot metadata has no safe graph-store reference");
-    }
-    outputs.push_back(
-        { { "kind", "snapshot-control" },
-          { "artifact",
-            { { "storage_ref", metadata_ref.generic_string() },
-              { "sha256",
-                arachne::crypto::sha256_file(snapshot.metadata_path) },
-              { "byte_length", fs::file_size(snapshot.metadata_path) },
-              { "media_type", "application/json" } } } }
-    );
-
-    ordered_json manifest {
-        { "manifest_type", "arachne_run_manifest_v1" },
-        { "format_version", 1 },
-        { "run_id", std::string(run_id) },
-        { "graph_domain", std::string(graph_domain) },
-        { "generated_at", metadata.at("activated_at") },
-        { "actor_versions",
-          { { "arachne", "2.0.0" },
-            { "pheidippides", "pheidippides-transport-2.0.0" },
-            { "ariadne", "ariadne-engine-2.0.0" },
-            { "penelope", "penelope-store-2.0.0" } } },
-        { "contract_versions",
-          { { "controls",
-              { "arachne_batch", "batch_envelope_v1", "fetch_plan_v1",
-                "fetch_request_v1", "acquired_artifact_v1",
-                "research_candidate_graph_plan_v1", "product_graph_snapshot_v1",
-                "research_candidate_graph_snapshot_v1" } },
-            { "artifacts",
-              { "external_candidate_source_graph_v1",
-                "research_candidate_graph_materialization_v1" } } } },
-        { "configuration_hashes", std::move(configuration_hashes) },
-        { "inputs", std::move(inputs) },
-        { "outputs", std::move(outputs) },
-        { "structural_validation", metadata.at("structural_validation") },
-    };
-    const fs::path path = config.graph_store / domain_directory / "runs"
-        / (std::string(run_id) + ".json");
-    const fs::path relative = path.lexically_relative(config.graph_store);
-    if (!arachne::crypto::is_safe_relative_artifact_ref(
-            relative.generic_string()
-        )) {
-        throw cli_error("run manifest has no safe graph-store reference");
-    }
-    const std::string bytes
-        = arachnespace::contracts::canonical_json(manifest) + "\n";
-    if (fs::exists(path)) {
-        if (read_bytes(path, maximum_control_bytes, "existing run manifest")
-            != bytes) {
-            throw cli_error(
-                "run manifest identity is already bound to different content"
-            );
-        }
-    } else {
-        atomic_write(path, bytes, false);
-    }
-    return { std::move(manifest), path, relative.generic_string() };
-}
-
 [[nodiscard]] ordered_json issue_json(std::string path, std::string message) {
     return { { "path", std::move(path) }, { "message", std::move(message) } };
 }
@@ -728,48 +571,6 @@ path_has_symlink(const fs::path& root, const fs::path& candidate) {
         }
     }
     return false;
-}
-
-[[nodiscard]] fs::path resolve_plan_artifact(
-    const configuration& config, const fs::path& control_path,
-    const std::string_view storage_ref
-) {
-    if (!arachne::crypto::is_safe_relative_artifact_ref(storage_ref)) {
-        throw cli_error(
-            "plan_artifact.storage_ref is not a safe relative path"
-        );
-    }
-    std::vector<fs::path> matches;
-    for (const fs::path& root :
-         std::array { control_path.parent_path(), config.artifact_store }) {
-        const fs::path candidate
-            = arachne::crypto::safe_artifact_path(root, storage_ref);
-        std::error_code error;
-        const auto state = fs::symlink_status(candidate, error);
-        if (error || !fs::is_regular_file(state) || fs::is_symlink(state)) {
-            continue;
-        }
-        if (!arachne::coordination::path_is_within(candidate, root)
-            || path_has_symlink(root, candidate)) {
-            throw cli_error(
-                "candidate plan artifact traverses a symbolic link"
-            );
-        }
-        const fs::path canonical = fs::canonical(candidate);
-        if (std::ranges::find(matches, canonical) == matches.end()) {
-            matches.push_back(canonical);
-        }
-    }
-    if (matches.empty()) {
-        throw cli_error(
-            "candidate plan artifact cannot be resolved beneath its control "
-            "directory or artifact store"
-        );
-    }
-    if (matches.size() != 1U) {
-        throw cli_error("candidate plan artifact reference is ambiguous");
-    }
-    return matches.front();
 }
 
 struct resolved_snapshot_export final {
@@ -851,66 +652,6 @@ struct resolved_snapshot_export final {
     return { std::move(control), export_path };
 }
 
-void verify_external_source_snapshot(
-    const configuration& config, const json& external_graph
-) {
-    const auto& source = external_graph.at("source_snapshot");
-    const std::string storage_ref = source.at("storage_ref").get<std::string>();
-    if (!arachne::crypto::is_safe_relative_artifact_ref(storage_ref)) {
-        throw cli_error("external source snapshot storage_ref is unsafe");
-    }
-    const fs::path artifact = arachne::crypto::safe_artifact_path(
-        config.artifact_store, storage_ref
-    );
-    std::error_code error;
-    const auto state = fs::symlink_status(artifact, error);
-    if (error || !fs::is_regular_file(state) || fs::is_symlink(state)
-        || path_has_symlink(config.artifact_store, artifact)
-        || arachne::crypto::sha256_file(artifact)
-            != source.at("sha256").get<std::string>()) {
-        throw cli_error(
-            "external source snapshot is unavailable or does not match its hash"
-        );
-    }
-}
-
-void verify_product_coverage(
-    const json& external_graph, const json& product_tables
-) {
-    std::set<std::string, std::less<>> product_works;
-    for (const auto& work : product_tables.value("works", json::array())) {
-        if (work.is_object() && work.contains("entity_id")
-            && work.at("entity_id").is_string()) {
-            product_works.insert(work.at("entity_id").get<std::string>());
-        }
-    }
-    std::set<std::string, std::less<>> covered_external_ids;
-    for (const auto& identifier :
-         product_tables.value("external_ids", json::array())) {
-        if (identifier.is_object()
-            && identifier.value("scheme", "") == "wikidata"
-            && product_works.contains(identifier.value("entity_id", ""))
-            && identifier.contains("value")
-            && identifier.at("value").is_string()) {
-            covered_external_ids.insert(
-                identifier.at("value").get<std::string>()
-            );
-        }
-    }
-    for (const auto& work : external_graph.at("works")) {
-        const std::string id = work.at("id").get<std::string>();
-        const bool expected = covered_external_ids.contains(id);
-        if (!work.at("covered").is_boolean()
-            || work.at("covered").get<bool>() != expected) {
-            throw cli_error(
-                "external graph coverage disagrees with the verified product "
-                "snapshot for work "
-                + id
-            );
-        }
-    }
-}
-
 [[nodiscard]] json materialize_jsonl_export(const fs::path& path) {
     const std::string bytes
         = read_bytes(path, maximum_export_bytes, "graph export");
@@ -969,68 +710,6 @@ void verify_product_coverage(
         }
     }
     return tables;
-}
-
-[[nodiscard]] bool valid_logical_date(const std::string_view value) {
-    if (value.size() != 10U || value[4] != '-' || value[7] != '-') {
-        return false;
-    }
-    int year = 0;
-    unsigned month = 0;
-    unsigned day = 0;
-    const auto year_result
-        = std::from_chars(value.data(), value.data() + 4, year);
-    const auto month_result
-        = std::from_chars(value.data() + 5, value.data() + 7, month);
-    const auto day_result
-        = std::from_chars(value.data() + 8, value.data() + 10, day);
-    if (year_result.ec != std::errc {} || month_result.ec != std::errc {}
-        || day_result.ec != std::errc {}) {
-        return false;
-    }
-    return std::chrono::year_month_day(
-               std::chrono::year(year), std::chrono::month(month),
-               std::chrono::day(day)
-    )
-        .ok();
-}
-
-[[nodiscard]] arachne::ariadne::candidate_configuration
-candidate_configuration_from(const configuration& config) {
-    const json& candidate
-        = required_object(config.document, "candidate_rebuild");
-    const json& sources = required_object(candidate, "sources");
-    if (sources.empty()) {
-        throw cli_error("candidate_rebuild.sources must not be empty");
-    }
-    const auto source_iterator = sources.cbegin();
-    const json& source = source_iterator.value();
-    if (!source.is_object()) {
-        throw cli_error("candidate source configuration must be an object");
-    }
-    arachne::ariadne::candidate_configuration result;
-    result.pool_size = size_value(source, "candidate_pool_size", 3000U);
-    result.target_size = size_value(source, "final_target", 1500U);
-    result.group_count = size_value(source, "group_count", 4U);
-
-    const auto gray = source.find("gray_bonus_basis_points");
-    if (gray != source.end()) {
-        if (!gray->is_number_integer()) {
-            throw cli_error("gray_bonus_basis_points must be an integer");
-        }
-        result.gray_bonus_basis_points = gray->get<int>();
-    }
-    const auto quality = source.find("quality_weight");
-    if (quality != source.end()) {
-        if (!quality->is_number()) {
-            throw cli_error("quality_weight must be numeric");
-        }
-        result.quality_weight = quality->get<double>();
-    }
-    static_cast<void>(
-        arachne::ariadne::candidate_planner::configuration_values(result)
-    );
-    return result;
 }
 
 int command_contract_validate(const options& arguments) {
@@ -1643,158 +1322,6 @@ int command_product_enrichment_follow_up_plan(const options& arguments) {
     return 0;
 }
 
-int command_candidate_rebuild(const options& arguments) {
-    const configuration config
-        = load_configuration(arguments.require("--config"));
-    const fs::path control_path
-        = command_path(arguments.require("--plan-control"));
-    const json control = read_json(
-        control_path, maximum_control_bytes, "candidate plan control"
-    );
-    const auto validation = arachnespace::contracts::validate(
-        arachnespace::contracts::contract_name::research_candidate_graph_plan,
-        control
-    );
-    if (!validation) {
-        throw cli_error(
-            validation_details(validation, "candidate plan control")
-        );
-    }
-    const fs::path payload = resolve_plan_artifact(
-        config, control_path,
-        control.at("plan_artifact").at("storage_ref").get<std::string>()
-    );
-    verify_external_source_snapshot(
-        config, json { { "source_snapshot", control.at("source_snapshot") } }
-    );
-    const std::string product_snapshot_id
-        = control.at("product_snapshot").at("snapshot_id").get<std::string>();
-    const fs::path product_control_path
-        = command_path(arguments.require("--product-snapshot"));
-    const resolved_snapshot_export product_snapshot = resolve_snapshot_export(
-        config, product_control_path,
-        arachnespace::contracts::contract_name::product_graph_snapshot,
-        "product-jsonl"
-    );
-    if (product_snapshot.control.at("snapshot_id") != product_snapshot_id
-        || product_snapshot.control.at("content_sha256")
-            != control.at("product_snapshot").at("sha256")) {
-        throw cli_error(
-            "candidate plan product input does not match the verified product "
-            "snapshot"
-        );
-    }
-    const std::string& run_id = arguments.require("--run-id");
-    const std::string created_at = control.at("created_at").get<std::string>();
-    if (created_at.size() < 10U
-        || !valid_logical_date(std::string_view(created_at).substr(0, 10U))) {
-        throw cli_error("candidate plan created_at has no valid logical date");
-    }
-    const std::string logical_date = created_at.substr(0, 10U);
-    arachne::coordination::domain_lock lock(
-        config.lock_root, "research_candidate_graph", run_id,
-        config.candidate_lock_stale
-    );
-    arachne::coordination::operational_ledger ledger(
-        config.ledger, config.legacy_inbox
-    );
-    const std::string operations_hash
-        = policy_configuration_hash(config, "candidate_rebuild");
-    const std::string plan_control_hash
-        = arachne::crypto::sha256_file(control_path);
-    const std::string run_claim_hash = arachne::crypto::sha256(
-        arachnespace::contracts::canonical_json(
-            ordered_json { { "operations", operations_hash },
-                           { "plan_control", plan_control_hash } }
-        )
-    );
-    if (!ledger.claim_logical_run(
-            run_id, "research_candidate_graph", logical_date, run_claim_hash,
-            true, true
-        )) {
-        emit(
-            ordered_json {
-                { "command", "candidate-rebuild" },
-                { "run_id", run_id },
-                { "processed", false },
-                { "reason", "run_already_succeeded" },
-            }
-        );
-        return 0;
-    }
-    std::optional<written_run_manifest> run_manifest;
-    bool completed = false;
-    try {
-        arachne::penelope::store persistence(config.graph_store);
-        const auto snapshot = persistence.replace_candidate_snapshot(
-            { .run_id = run_id,
-              .plan = { .control_contract_path = control_path,
-                        .resolved_plan_payload_path = payload } }
-        );
-        ordered_json inputs = ordered_json::array();
-        inputs.push_back(
-            { { "kind", "candidate-plan-control" },
-              { "identity", control.at("plan_id") },
-              { "sha256", plan_control_hash },
-              { "byte_length", fs::file_size(control_path) } }
-        );
-        inputs.push_back(
-            { { "kind", "candidate-plan-artifact" },
-              { "identity", control.at("plan_id") },
-              { "storage_ref", control.at("plan_artifact").at("storage_ref") },
-              { "sha256", control.at("plan_artifact").at("sha256") },
-              { "byte_length", control.at("plan_artifact").at("byte_length") } }
-        );
-        inputs.push_back(
-            { { "kind", "external-source-snapshot" },
-              { "identity", control.at("source_snapshot").at("snapshot_id") },
-              { "storage_ref",
-                control.at("source_snapshot").at("storage_ref") },
-              { "sha256", control.at("source_snapshot").at("sha256") } }
-        );
-        inputs.push_back(
-            { { "kind", "product-snapshot" },
-              { "identity", product_snapshot_id },
-              { "sha256", control.at("product_snapshot").at("sha256") } }
-        );
-        run_manifest = write_graph_run_manifest(
-            config, "candidate", "research_candidate_graph", run_id,
-            { { "operations", operations_hash },
-              { "algorithm", control.at("configuration").at("sha256") } },
-            std::move(inputs), snapshot
-        );
-        ledger.finish_run(run_id, "succeeded", run_manifest->storage_ref);
-        completed = true;
-        emit(
-            ordered_json {
-                { "command", "candidate-rebuild" },
-                { "run_id", run_id },
-                { "plan_id", control.at("plan_id") },
-                { "snapshot", snapshot_json(snapshot) },
-                { "run_manifest_path", run_manifest->path.generic_string() },
-                { "run_manifest", run_manifest->document },
-            }
-        );
-        return 0;
-    } catch (...) {
-        const std::exception_ptr failure = std::current_exception();
-        if (completed) {
-            std::rethrow_exception(failure);
-        }
-        try {
-            ledger.finish_run(
-                run_id, "failed",
-                run_manifest ? std::string_view(run_manifest->storage_ref)
-                             : std::string_view {}
-            );
-        } catch (const std::exception& error) {
-            std::cerr << "warning: cannot finish failed candidate run "
-                      << run_id << ": " << error.what() << '\n';
-        }
-        std::rethrow_exception(failure);
-    }
-}
-
 int command_fetch(const options& arguments) {
     const configuration config
         = load_configuration(arguments.require("--config"));
@@ -1897,86 +1424,12 @@ int command_fetch_plan(const options& arguments) {
     return 0;
 }
 
-int command_candidate_plan(const options& arguments) {
-    const configuration config
-        = load_configuration(arguments.require("--config"));
-    const fs::path external_graph_path
-        = command_path(arguments.require("--external-graph"));
-    const fs::path product_control_path
-        = command_path(arguments.require("--product-snapshot"));
-    const fs::path output_artifact
-        = command_path(arguments.require("--output-artifact"));
-    const fs::path output_control
-        = command_path(arguments.require("--output-control"));
-    if (!arachne::coordination::path_is_within(
-            output_artifact, config.artifact_store
-        )) {
-        throw cli_error(
-            "candidate output artifact must be beneath the configured artifact "
-            "store"
-        );
-    }
-    if (arachne::coordination::path_is_within(output_control, config.queue)
-        || path_is_in_protected_legacy(output_control, config)) {
-        throw cli_error("candidate plan control must be outside the inbox");
-    }
-    const json external_graph = read_json(
-        external_graph_path, maximum_export_bytes,
-        "external candidate source graph"
-    );
-    if (!external_graph.is_object()
-        || external_graph.value("artifact_type", "")
-            != "external_candidate_source_graph_v1"
-        || external_graph.value("format_version", 0) != 1) {
-        throw cli_error(
-            "external graph must be external_candidate_source_graph_v1"
-        );
-    }
-    const resolved_snapshot_export product_snapshot = resolve_snapshot_export(
-        config, product_control_path,
-        arachnespace::contracts::contract_name::product_graph_snapshot,
-        "product-jsonl"
-    );
-    const json product_tables
-        = materialize_jsonl_export(product_snapshot.export_path);
-    verify_external_source_snapshot(config, external_graph);
-    verify_product_coverage(external_graph, product_tables);
-    const auto candidate_config = candidate_configuration_from(config);
-    const ordered_json materialization
-        = arachne::ariadne::candidate_planner::build(
-            external_graph, candidate_config
-        );
-    const fs::path storage_path
-        = output_artifact.lexically_relative(config.artifact_store);
-    if (storage_path.empty()
-        || !arachne::crypto::is_safe_relative_artifact_ref(
-            storage_path.generic_string()
-        )) {
-        throw cli_error(
-            "candidate output artifact has no safe artifact-store reference"
-        );
-    }
-    const ordered_json control
-        = arachne::ariadne::candidate_planner::write_plan(
-            materialization, output_artifact, storage_path.generic_string(),
-            product_snapshot.control.at("snapshot_id").get<std::string>(),
-            product_snapshot.control.at("content_sha256").get<std::string>(),
-            candidate_config, utc_now()
-        );
-    atomic_write(
-        output_control, arachnespace::contracts::canonical_json(control) + "\n",
-        true
-    );
-    emit(control);
-    return 0;
-}
-
 [[nodiscard]] ordered_json capabilities() {
     return {
         { "format_version", 1 },
         { "commands",
-          { "candidate-plan", "candidate-rebuild", "cocoon-transition",
-            "contract-validate", "fetch", "fetch-plan-translate",
+          { "cocoon-transition", "contract-validate", "fetch",
+            "fetch-plan-translate",
             "inbox-baseline", "inbox-verify", "intake", "product-check-inbox",
             "product-apply-inbox", "product-rebuild-merge-hints",
             "product-export-merge-hints", "product-research", "product-entity",
@@ -1994,7 +1447,6 @@ Usage:
 
 Commands:
   product      Inspect and operate on the canonical product
-  candidate    Build and activate research candidates
   fetch        Acquire reviewed external data
   inbox        Inspect the mutation inbox
   cocoon       Manage intake lifecycle
@@ -2203,62 +1655,6 @@ Example:
 )";
         return 0;
     }
-    if (topics.size() == 1U && topics.front() == "candidate") {
-        std::cout << R"(Arachne candidate
-
-Usage:
-  arachne candidate <subcommand> [options]
-
-Subcommands:
-  plan      Verify source/product inputs and write a bounded candidate plan
-  rebuild   Activate a verified candidate plan as a new candidate snapshot
-
-Examples:
-  build/arachne candidate plan --config run/arachne.json --external-graph run/results/wikidata-external-graph.json --product-snapshot /tmp/product-graph/active.json --output-artifact artifacts/candidate-plans/wikidata.json --output-control run/results/wikidata-candidate-plan.control.json
-  build/arachne candidate rebuild --config run/arachne.json --plan-control run/results/wikidata-candidate-plan.control.json --run-id candidate-wikidata-20260809
-
-Run:
-  arachne help candidate <subcommand>
-)";
-        return 0;
-    }
-    if (topics.size() == 2U && topics.front() == "candidate"
-        && topics.back() == "plan") {
-        std::cout << R"(Arachne candidate plan
-
-Usage:
-  arachne candidate plan --config CONFIG --external-graph GRAPH --product-snapshot CONTROL --output-artifact ARTIFACT --output-control CONTROL
-
-Required options:
-  --config FILE              Materialized operations configuration
-  --external-graph FILE      external_candidate_source_graph_v1 artifact
-  --product-snapshot FILE    Verified product_graph_snapshot_v1 control
-  --output-artifact FILE     Candidate plan beneath the configured artifact store
-  --output-control FILE      research_candidate_graph_plan_v1 control
-
-Example:
-  build/arachne candidate plan --config run/arachne.json --external-graph run/results/wikidata-external-graph.json --product-snapshot /tmp/product-graph/active.json --output-artifact artifacts/candidate-plans/wikidata.json --output-control run/results/wikidata-candidate-plan.control.json
-)";
-        return 0;
-    }
-    if (topics.size() == 2U && topics.front() == "candidate"
-        && topics.back() == "rebuild") {
-        std::cout << R"(Arachne candidate rebuild
-
-Usage:
-  arachne candidate rebuild --config CONFIG --plan-control CONTROL --product-snapshot PRODUCT --run-id RUN_ID
-
-Required options:
-  --config FILE          Materialized operations configuration
-  --plan-control FILE    Verified research_candidate_graph_plan_v1 control
-  --product-snapshot FILE  Exact verified product control used by the plan
-  --run-id ID              Stable logical candidate rebuild identifier
-
-Example:
-  build/arachne candidate rebuild --config run/arachne.json --plan-control run/results/wikidata-candidate-plan.control.json --product-snapshot run/product/active.json --run-id candidate-wikidata-20260809
-)";
-        return 0;
-    }
     throw cli_error(
         "unknown help topic; run 'arachne help' to list command groups"
     );
@@ -2318,20 +1714,6 @@ int dispatch(const std::vector<std::string>& arguments) {
         && arguments[2] == "plan"
         && (arguments[3] == "--help" || arguments[3] == "-h")) {
         return command_help({ "fetch", "plan" });
-    }
-    if (arguments[1] == "candidate" && arguments.size() == 3U
-        && (arguments[2] == "--help" || arguments[2] == "-h")) {
-        return command_help({ "candidate" });
-    }
-    if (arguments[1] == "candidate" && arguments.size() == 4U
-        && arguments[2] == "plan"
-        && (arguments[3] == "--help" || arguments[3] == "-h")) {
-        return command_help({ "candidate", "plan" });
-    }
-    if (arguments[1] == "candidate" && arguments.size() == 4U
-        && arguments[2] == "rebuild"
-        && (arguments[3] == "--help" || arguments[3] == "-h")) {
-        return command_help({ "candidate", "rebuild" });
     }
     if (arguments[1] == "product" && arguments.size() == 3U
         && (arguments[2] == "--help" || arguments[2] == "-h")) {
@@ -2422,21 +1804,6 @@ int dispatch(const std::vector<std::string>& arguments) {
     }
     if (arguments[1] == "product") {
         return command_product_queue(arguments);
-    }
-    if (arguments[1] == "candidate" && arguments.size() >= 3U
-        && arguments[2] == "rebuild") {
-        return command_candidate_rebuild(options(
-            arguments, 3U,
-            { "--config", "--plan-control", "--product-snapshot", "--run-id" }
-        ));
-    }
-    if (arguments[1] == "candidate" && arguments.size() >= 3U
-        && arguments[2] == "plan") {
-        return command_candidate_plan(options(
-            arguments, 3U,
-            { "--config", "--external-graph", "--product-snapshot",
-              "--output-artifact", "--output-control" }
-        ));
     }
     if (arguments[1] == "fetch" && arguments.size() >= 3U
         && arguments[2] == "plan") {

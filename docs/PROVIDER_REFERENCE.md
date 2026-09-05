@@ -3,12 +3,13 @@
 This is a research shortlist, not an activation plan, supported-provider list,
 or statement of semantic trust. A source should enter configuration only after
 its current access, licensing, attribution, and rate-limit terms are reviewed
-and an Ariadne adapter exists. Pheidippides transports bytes and receipts; no
-provider response enters canonical state without the normal human-reviewed
-batch boundary.
+and an Ariadne adapter exists. Pheidippides transports bytes and receipts; a
+provider response has no authority by itself and can supply only the closed
+general-information surface through normalization and automatic
+materialization. It cannot supply human concepts, assertions, or evidence.
 
 The current implemented and optional bulk providers are documented in
-[Architecture](ARCHITECTURE.md#candidate-graph-and-transient-semantic-projections) and
+[Provider observation graph](PROVIDER_OBSERVATION_GRAPH.md) and
 [`config/README.md`](../config/README.md). The following visual-art sources are
 useful leads not otherwise recorded there:
 

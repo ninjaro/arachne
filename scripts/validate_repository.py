@@ -21,17 +21,13 @@ CONTROL_CONTRACTS = (
     "fetch_plan_v1",
     "fetch_request_v1",
     "acquired_artifact_v1",
-    "research_candidate_graph_plan_v1",
     "product_graph_snapshot_v1",
-    "research_candidate_graph_snapshot_v1",
 )
 
 ARTIFACT_FORMATS = (
-    "external_candidate_source_graph_v1",
     "external_enrichment_review_v1",
     "wikidata_image_hints_v1",
     "wikidata_mapping_review_v1",
-    "research_candidate_graph_materialization_v1",
 )
 
 PRODUCT_BATCH_FORMAT = "arachne_batch"
@@ -40,7 +36,6 @@ WORKFLOWS = (
     "validation.yml",
     "intake.yml",
     "product-integration.yml",
-    "candidate-rebuild.yml",
     "source-refresh.yml",
     "manual-dispatch.yml",
 )
@@ -163,13 +158,9 @@ def check_configuration(root: Path) -> None:
     require(paths.get("legacy_inbox") is None
             or isinstance(paths.get("legacy_inbox"), str),
             f"{path}: paths.legacy_inbox must be null or a path")
-    wikidata = config.get("candidate_rebuild", {}).get("sources", {}).get(
+    wikidata = config.get("provider_refresh", {}).get("sources", {}).get(
         "wikidata", {}
     )
-    require(wikidata.get("gray_bonus_basis_points") == 2000,
-            f"{path}: gray_bonus_basis_points must default to 2000")
-    require(wikidata.get("quality_weight") == 0.65,
-            f"{path}: quality_weight must default to 0.65")
     require(wikidata.get("refresh_days") == 60,
             f"{path}: Wikidata refresh_days must default to 60")
     transport = config.get("transport")

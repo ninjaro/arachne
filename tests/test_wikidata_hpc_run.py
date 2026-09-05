@@ -42,14 +42,6 @@ class WikidataHpcRunTests(unittest.TestCase):
                         "lock_root": "locks",
                         "legacy_inbox_baseline": "operations/baseline.json",
                     },
-                    "candidate_rebuild": {
-                        "sources": {
-                            "wikidata": {
-                                "candidate_pool_size": 4,
-                                "gray_bonus_basis_points": 2000,
-                            }
-                        }
-                    },
                 }
             )
             + "\n",
@@ -98,11 +90,6 @@ elif argv[:1] == ["fetch"]:
             "byte_length": payload.stat().st_size
         }
     }) + "\\n")
-elif argv[:2] == ["candidate", "plan"]:
-    option("--output-artifact").write_text('{"plan":true}\\n')
-    option("--output-control").write_text('{"control":true}\\n')
-elif argv[:2] == ["candidate", "rebuild"]:
-    pass
 else:
     raise SystemExit("unexpected fake command: " + repr(argv))
 """,
@@ -187,7 +174,7 @@ print("12345678;claix")
         metadata = self.metadata()
         graph = Path(metadata["external_graph"])
         graph.write_text(
-            '{"artifact_type":"external_candidate_source_graph_v1"}\n',
+            '{"artifact_type":"provider_observation_graph_v1"}\n',
             encoding="utf-8",
         )
         hints = Path(metadata["image_hints"])
@@ -239,7 +226,7 @@ print("12345678;claix")
                 {
                     "status": "succeeded",
                     "output": custody(
-                        graph, "external_candidate_source_graph_v1"
+                        graph, "provider_observation_graph_v1"
                     ),
                     "image_hints_output": custody(
                         hints, "wikidata_image_hints_v1"
@@ -262,7 +249,7 @@ print("12345678;claix")
         prepare = self.invoke("prepare", "--help")
 
         self.assertEqual(root.returncode, 0, root.stderr)
-        self.assertIn("rebuild-candidates", root.stdout)
+        self.assertNotIn("candidate", root.stdout)
         self.assertIn("hpc/wikidata/run prepare", root.stdout)
         self.assertNotIn("_compute", root.stdout)
         self.assertEqual(prepare.returncode, 0, prepare.stderr)
@@ -516,24 +503,6 @@ print("87654321;claix")
         self.assertEqual(result.returncode, 2)
         self.assertIn("must be launched by Slurm", result.stderr)
 
-    def test_compute_continues_through_candidate_publication(self) -> None:
-        self.assertEqual(self.prepare().returncode, 0)
-        metadata = self.finish_extraction()
-        metadata["slurm"] = {"job_id": "12345678"}
-        self.write_metadata(metadata)
-        self.environment["SLURM_JOB_ID"] = "12345678"
-
-        result = self.invoke(
-            "_compute", "--metadata", self.metadata_path(), "--threads", "16"
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.commands()[-2][:2], ["candidate", "plan"])
-        self.assertEqual(self.commands()[-1][:2], ["candidate", "rebuild"])
-        metadata = self.metadata()
-        self.assertEqual(metadata["steps"]["candidates"], "complete")
-        self.assertEqual(metadata["status"], "complete")
-
     def test_result_reports_fixed_paths_and_compact_counts(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)
         metadata = self.finish_extraction()
@@ -541,27 +510,12 @@ print("87654321;claix")
         result = self.invoke("result", "--run-root", self.run_root)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Status:   awaiting_candidates", result.stdout)
+        self.assertIn("Status:   complete", result.stdout)
         self.assertIn("works:      1", result.stdout)
         self.assertIn("agents:     1", result.stdout)
         self.assertIn("images:     3", result.stdout)
         self.assertIn(metadata["image_hints"], result.stdout)
         self.assertIn(metadata["report"], result.stdout)
-
-    def test_result_preserves_a_failed_follow_up_step(self) -> None:
-        self.assertEqual(self.prepare().returncode, 0)
-        metadata = self.finish_extraction()
-        metadata["status"] = "failed"
-        metadata["steps"]["candidates"] = "failed"
-        metadata["steps"]["failed_step"] = "candidates"
-        metadata["steps"]["failure"] = "candidate rebuild failed"
-        self.write_metadata(metadata)
-
-        result = self.invoke("result", "--run-root", self.run_root)
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Status:   failed", result.stdout)
-        self.assertIn("Failed step: candidates", result.stdout)
 
     def test_result_reconciles_a_slurm_oom_failure(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)
@@ -637,22 +591,13 @@ print("COMPLETED|0:0")
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Status:   awaiting_candidates", result.stdout)
+        self.assertIn("Status:   complete", result.stdout)
         self.assertNotIn("Failed step", result.stdout)
         self.assertEqual(self.metadata()["status"], "extracted")
 
-    def test_result_does_not_claim_complete_for_missing_or_active_results(self) -> None:
+    def test_result_does_not_claim_complete_for_missing_results(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)
         metadata = self.finish_extraction()
-        metadata["steps"]["candidates"] = "running"
-        metadata["status"] = "rebuilding_candidates"
-        self.write_metadata(metadata)
-
-        active = self.invoke("result", "--run-root", self.run_root)
-
-        self.assertEqual(active.returncode, 0, active.stderr)
-        self.assertIn("Status:   rebuilding_candidates", active.stdout)
-        self.assertNotIn("Wikidata run complete", active.stdout)
 
         Path(metadata["external_graph"]).unlink()
         missing = self.invoke("result", "--run-root", self.run_root)
@@ -660,38 +605,6 @@ print("COMPLETED|0:0")
         self.assertEqual(missing.returncode, 1)
         self.assertIn("Status:   failed", missing.stdout)
         self.assertIn("missing external graph", missing.stdout)
-
-    def test_candidate_rebuild_uses_native_plan_then_rebuild(self) -> None:
-        self.assertEqual(self.prepare().returncode, 0)
-        self.finish_extraction()
-
-        result = self.invoke(
-            "rebuild-candidates", "--run-root", self.run_root
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        commands = self.commands()
-        self.assertEqual(commands[-2][:2], ["candidate", "plan"])
-        self.assertEqual(commands[-1][:2], ["candidate", "rebuild"])
-        self.assertIn("--product-snapshot", commands[-1])
-        metadata = self.metadata()
-        self.assertEqual(metadata["steps"]["candidates"], "complete")
-        self.assertTrue(Path(metadata["candidate_plan_control"]).is_file())
-
-    def test_existing_pre_mapping_run_can_finish_candidate_publication(self) -> None:
-        self.assertEqual(self.prepare().returncode, 0)
-        metadata = self.finish_extraction()
-        metadata.pop("mapping_database")
-        metadata.pop("mapping_review")
-        metadata["steps"]["candidates"] = "not_requested"
-        self.write_metadata(metadata)
-
-        result = self.invoke(
-            "rebuild-candidates", "--run-root", self.run_root
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.metadata()["steps"]["candidates"], "complete")
 
     def test_clean_verifies_dump_and_keeps_results(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)
@@ -712,12 +625,6 @@ print("COMPLETED|0:0")
         self.assertTrue(Path(metadata["image_hints"]).is_file())
         self.assertTrue(Path(metadata["report"]).is_file())
         self.assertEqual(self.metadata()["steps"]["clean"], "complete")
-
-        candidates = self.invoke(
-            "rebuild-candidates", "--run-root", self.run_root
-        )
-        self.assertEqual(candidates.returncode, 2)
-        self.assertIn("was cleaned", candidates.stderr)
 
     def test_clean_refuses_before_results_are_complete(self) -> None:
         self.assertEqual(self.prepare().returncode, 0)
@@ -743,7 +650,7 @@ print("COMPLETED|0:0")
         )
         payload = Path(config["paths"]["artifact_store"]) / "wikidata" / "raw.bin"
         Path(metadata["external_graph"]).write_text(
-            '{"artifact_type":"external_candidate_source_graph_v1","tampered":true}\n',
+            '{"artifact_type":"provider_observation_graph_v1","tampered":true}\n',
             encoding="utf-8",
         )
 
@@ -753,56 +660,6 @@ print("COMPLETED|0:0")
         self.assertTrue(payload.is_file())
         self.assertIn("changed after extraction", result.stderr)
         self.assertEqual(self.metadata()["steps"]["clean"], "pending")
-
-    def test_clean_and_candidate_rebuild_are_mutually_exclusive(self) -> None:
-        self.assertEqual(self.prepare().returncode, 0)
-        self.assertEqual(self.acquire().returncode, 0)
-        metadata = self.finish_extraction()
-        config = json.loads(
-            Path(metadata["operations_config"]).read_text(encoding="utf-8")
-        )
-        payload = Path(config["paths"]["artifact_store"]) / "wikidata" / "raw.bin"
-        metadata["steps"]["candidates"] = "running"
-        metadata["status"] = "rebuilding_candidates"
-        self.write_metadata(metadata)
-
-        clean = self.invoke("clean", "--run-root", self.run_root)
-
-        self.assertEqual(clean.returncode, 2)
-        self.assertIn("wait for candidate rebuild", clean.stderr)
-        self.assertTrue(payload.is_file())
-
-        metadata = self.metadata()
-        metadata["steps"]["candidates"] = "not_requested"
-        metadata["steps"]["clean"] = "running"
-        metadata["status"] = "cleaning"
-        self.write_metadata(metadata)
-        candidates = self.invoke(
-            "rebuild-candidates", "--run-root", self.run_root
-        )
-
-        self.assertEqual(candidates.returncode, 2)
-        self.assertIn("cleanup is running", candidates.stderr)
-
-    def test_clean_preserves_a_prior_candidate_failure(self) -> None:
-        self.assertEqual(self.prepare().returncode, 0)
-        self.assertEqual(self.acquire().returncode, 0)
-        metadata = self.finish_extraction()
-        metadata["steps"]["candidates"] = "failed"
-        metadata["steps"]["failed_step"] = "candidates"
-        metadata["steps"]["failure"] = "candidate rebuild failed"
-        metadata["status"] = "failed"
-        self.write_metadata(metadata)
-
-        clean = self.invoke("clean", "--run-root", self.run_root)
-        result = self.invoke("result", "--run-root", self.run_root)
-
-        self.assertEqual(clean.returncode, 0, clean.stderr)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Status:   failed", result.stdout)
-        self.assertIn("Failed step: candidates", result.stdout)
-        self.assertEqual(self.metadata()["steps"]["clean"], "complete")
-
 
 if __name__ == "__main__":
     unittest.main()

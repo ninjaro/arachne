@@ -7,7 +7,7 @@
 
 Arachne is the code and canonical-write boundary for Art Lineages research. It
 validates human-authored batches, applies them transactionally, transports
-reviewed source bytes, and owns candidate, research, and taste semantics. It no
+reviewed source bytes, and owns provider-mining, research, and taste semantics. It no
 longer contains the product database or the public viewer.
 
 The sibling repositories have deliberately separate lifecycles:
@@ -31,8 +31,8 @@ rewrite research.
 
 - Arachne owns intake, scheduling, orchestration, and canonical publication.
 - Pheidippides transports bytes and records transport evidence.
-- Ariadne owns candidate algorithms and native domain projections.
-- Penelope owns graph schemas, transactions, snapshots, and base exports.
+- Ariadne owns provider normalization, selection, and native domain projections.
+- Penelope owns canonical schemas and database transactions.
 
 ## Repository map
 

@@ -2115,4 +2115,105 @@ TEST(ProductInbox, CanonicalSchemaContainsNoDisposableHintTables) {
     );
 }
 
+TEST(ProductInbox, HumanBatchRejectsGeneralInformationAndNonConceptNames) {
+    inbox_fixture fixture;
+    json batch = empty_batch("human-authority");
+    batch["create"]["agents"] = json::array(
+        { { { "local_id", "person-local" }, { "agent_type", "person" } } }
+    );
+    batch["create"]["names"] = json::array(
+        { { { "entity_id", "work-000001" },
+            { "name_type", "english" },
+            { "value", "Not a concept name" },
+            { "is_preferred", true } } }
+    );
+    fixture.write("authority.json", batch);
+
+    const auto result = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
+
+    ASSERT_FALSE(result.ok);
+    EXPECT_NE(issues_text(result).find("unknown_field /create/agents"),
+              std::string::npos);
+    EXPECT_NE(
+        issues_text(result).find(
+            "wrong_reference_family /create/names/0/entity_id"
+        ),
+        std::string::npos
+    );
+}
+
+TEST(ProductInbox, HumanEvidenceRejectsAutomaticProviderSourcesAfterUpdate) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO sources(id,source_type,title,bibliography_text) "
+        "VALUES(1,'database','Independent catalogue','Catalogue entry')"
+    );
+    json batch = empty_batch("provider-source-update");
+    batch["update"]["sources"] = json::array(
+        { { { "id", 1 },
+            { "set", { { "title", "MusicBrainz" } } },
+            { "unset", json::array() } } }
+    );
+    fixture.write("provider-source.json", batch);
+
+    const auto result = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
+
+    ASSERT_FALSE(result.ok);
+    EXPECT_NE(issues_text(result).find("automatic_provider_evidence"),
+              std::string::npos);
+}
+
+TEST(ProductInbox, ProviderIdCorrectionUsesCompareAndSwap) {
+    inbox_fixture fixture;
+    fixture.execute(
+        "INSERT INTO entities(id,entity_type) VALUES('work-000001','work');"
+        "INSERT INTO works(entity_id,medium) VALUES('work-000001','film');"
+        "INSERT INTO external_ids(id,entity_id,scheme,value,canonical_url) "
+        "VALUES(1,'work-000001','wikidata','Q100',"
+        "'https://www.wikidata.org/wiki/Q100');"
+        "INSERT INTO provider_general_facts("
+        "entity_id,provider,external_id,field,value_json) "
+        "VALUES('work-000001','wikidata','Q100','medium','\"film\"')"
+    );
+    json correction = empty_batch("provider-id-correction");
+    correction["update"]["provider_ids"] = json::array(
+        { { { "entity_id", "work-000001" },
+            { "provider", "wikidata" },
+            { "old_external_id", "Q100" },
+            { "new_external_id", "Q101" } } }
+    );
+    fixture.write("correction.json", correction);
+
+    const auto applied = arachne::penelope::apply_product_inbox(
+        fixture.root(), fixture.state()
+    );
+    ASSERT_TRUE(applied.ok) << issues_text(applied);
+    EXPECT_EQ(fixture.text("SELECT value FROM external_ids WHERE id=1"), "Q101");
+    EXPECT_EQ(
+        fixture.integer(
+            "SELECT canonical_url IS NULL FROM external_ids WHERE id=1"
+        ),
+        1
+    );
+    EXPECT_EQ(
+        fixture.integer("SELECT count(*) FROM provider_general_facts"), 0
+    );
+
+    json stale = empty_batch("stale-provider-id-correction");
+    stale["update"]["provider_ids"] = correction["update"]["provider_ids"];
+    stale["update"]["provider_ids"][0]["new_external_id"] = "Q102";
+    fixture.write("stale.json", stale);
+    const auto rejected = arachne::penelope::check_product_inbox(
+        fixture.root(), fixture.state()
+    );
+    ASSERT_FALSE(rejected.ok);
+    EXPECT_NE(issues_text(rejected).find("provider_id_precondition_failed"),
+              std::string::npos);
+    EXPECT_EQ(fixture.text("SELECT value FROM external_ids WHERE id=1"), "Q101");
+}
+
 } // namespace

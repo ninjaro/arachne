@@ -8,6 +8,7 @@ from pathlib import Path
 from scripts.state_manifest import (
     StateManifestError,
     check,
+    check_product,
     refresh,
 )
 
@@ -52,6 +53,20 @@ class StateManifestTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(StateManifestError, "schema"):
             check(self.source, self.state)
+
+    def test_product_only_check_allows_an_intentional_schema_transition(self) -> None:
+        document = refresh(self.source, self.state, COMMIT)
+        (self.source / "schema" / "product.sql").write_text(
+            "CREATE TABLE replacement(id INTEGER PRIMARY KEY);\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(check_product(self.state), document)
+
+    def test_product_only_check_still_rejects_changed_product_bytes(self) -> None:
+        refresh(self.source, self.state, COMMIT)
+        (self.state / "database" / "art-islands.sqlite").write_bytes(b"changed")
+        with self.assertRaisesRegex(StateManifestError, "product bytes"):
+            check_product(self.state)
 
     def test_unknown_manifest_field_is_rejected(self) -> None:
         document = refresh(self.source, self.state, COMMIT)

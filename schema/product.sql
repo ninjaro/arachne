@@ -39,7 +39,7 @@ CREATE TABLE entities (
 CREATE TABLE works (
     entity_id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
     medium TEXT NOT NULL CHECK (medium IN
-        ('film','short_film','television','novel','novella','short_story',
+        ('unknown','film','short_film','television','novel','novella','short_story',
          'poetry','play','essay','album','single','composition','painting',
          'print','engraving','drawing','sculpture','installation',
          'photography','mixed_media','nonfiction','comic','performance')),
@@ -167,6 +167,24 @@ CREATE TABLE external_ids (
 ) STRICT;
 CREATE INDEX external_ids_entity_idx ON external_ids(entity_id);
 
+-- Current provider values for materialized general fields. This is compact
+-- refresh state, not provider-dump history or human evidence. One full pass
+-- replaces a provider's non-null value in place; absent observations do not
+-- erase the last known value.
+CREATE TABLE provider_general_facts (
+    id INTEGER PRIMARY KEY,
+    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (length(provider) > 0),
+    external_id TEXT NOT NULL CHECK (length(external_id) > 0),
+    field TEXT NOT NULL CHECK (length(field) > 0),
+    value_json TEXT NOT NULL CHECK (
+        json_valid(value_json) AND json_type(value_json) <> 'null'
+    ),
+    UNIQUE (provider, external_id, field)
+) STRICT;
+CREATE INDEX provider_general_facts_entity_idx
+ON provider_general_facts(entity_id, field);
+
 CREATE TABLE remote_assets (
     id INTEGER PRIMARY KEY,
     entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
@@ -217,6 +235,16 @@ CREATE TABLE agents (
     agent_type TEXT NOT NULL CHECK (agent_type IN ('person','organization','group')),
     birth_year INTEGER,
     death_year INTEGER,
+    birth_date_text TEXT CHECK
+        (birth_date_text IS NULL OR length(birth_date_text) > 0),
+    birth_date_precision TEXT CHECK
+        (birth_date_precision IS NULL OR birth_date_precision IN
+            ('year','month','exact')),
+    death_date_text TEXT CHECK
+        (death_date_text IS NULL OR length(death_date_text) > 0),
+    death_date_precision TEXT CHECK
+        (death_date_precision IS NULL OR death_date_precision IN
+            ('year','month','exact')),
     CHECK (
         length(entity_id) >= 12
         AND substr(entity_id, 1, 6) = 'agent-'

@@ -59,19 +59,6 @@ class OperationsCliTests(unittest.TestCase):
                 "queued_batch_threshold": threshold,
                 "lock_stale_seconds": 21600,
             },
-            "candidate_rebuild": {
-                "sources": {
-                    "wikidata": {
-                        "refresh_days": 60,
-                        "candidate_pool_size": 4,
-                        "final_target": 3,
-                        "group_count": 2,
-                        "gray_bonus_basis_points": 2000,
-                        "quality_weight": 0.65,
-                    }
-                },
-                "lock_stale_seconds": 21600,
-            },
             "transport": {
                 "format_version": 1,
                 "defaults": {
@@ -272,8 +259,6 @@ class OperationsCliTests(unittest.TestCase):
                 "product-enrichment-plan",
                 "product-enrichment-follow-up-plan",
                 "product-enrichment",
-                "candidate-plan",
-                "candidate-rebuild",
             },
         )
 
@@ -475,12 +460,6 @@ class OperationsCliTests(unittest.TestCase):
             (("fetch", "--help"), "fetch plan"),
             (("help", "fetch", "plan"), "--output-directory"),
             (("fetch", "plan", "--help"), "fetch_plan_v1"),
-            (("help", "candidate"), "candidate snapshot"),
-            (("candidate", "--help"), "candidate rebuild"),
-            (("help", "candidate", "plan"), "--external-graph"),
-            (("candidate", "plan", "--help"), "--output-artifact"),
-            (("help", "candidate", "rebuild"), "--run-id"),
-            (("candidate", "rebuild", "--help"), "plan-control"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments)

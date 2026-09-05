@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Stream a Pheidippides-delivered Wikidata dump into Ariadne's source graph.
+"""Stream a Pheidippides-delivered Wikidata dump into provider observations.
 
 This worker performs no network access. It verifies the acquired-artifact and
 product-snapshot controls, scans the compressed dump in bounded memory, uses a
-disposable SQLite graph for joins, and emits the same versioned external graph
-consumed by local and GitHub Actions candidate runs plus a separate bounded
-Wikidata/Commons image-hint projection for canonical works and agents.
+disposable SQLite graph for joins, and emits a provider-neutral observation
+graph plus a separate bounded Wikidata/Commons image-hint projection for
+canonical works and agents.
 """
 
 from __future__ import annotations
@@ -32,13 +32,25 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
+REPOSITORY_ROOT = next(
+    (
+        candidate
+        for candidate in (Path(__file__).resolve().parents[2], Path.cwd().resolve())
+        if (candidate / "scripts/provider_observation_graph.py").is_file()
+    ),
+    Path(__file__).resolve().parents[2],
+)
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from scripts.provider_observation_graph import ObservationGraph
+
 
 CHUNK_BYTES = 8 * 1024 * 1024
 BATCH_SIZE = 10_000
 MAX_DUMP_LINE_BYTES = 256 * 1024 * 1024
 MAX_PRODUCT_LINE_BYTES = 16 * 1024 * 1024
 MAX_CONTROL_BYTES = 64 * 1024 * 1024
-MAX_EXTERNAL_GRAPH_BYTES = 1024 * 1024 * 1024
 MAX_IMAGE_HINTS_BYTES = 64 * 1024 * 1024
 MAX_WORK_CLASSES = 10_000_000
 MAX_PRODUCT_IMAGE_TARGETS = 2_000_000
@@ -54,6 +66,7 @@ EXTENSION_KEY = re.compile(
     r"[a-z][a-z0-9]*(?:\.[a-z0-9][a-z0-9_-]*)+\Z"
 )
 PROFILE_ITEM_PROPERTIES = {
+    "P31": "classes",
     "P21": "genders",
     "P27": "countries",
     "P17": "countries",
@@ -63,6 +76,76 @@ PROFILE_ITEM_PROPERTIES = {
     "P135": "movements",
     "P136": "genres",
     "P1412": "languages",
+}
+ORIGINAL_DATE_PROPERTIES = ("P571", "P577", "P1191", "P1619")
+WIKIDATA_CREDIT_ROLES = {
+    "P50": "author",
+    "P57": "director",
+    "P58": "screenwriter",
+    "P84": "designer",
+    "P86": "composer",
+    "P87": "author",
+    "P98": "editor",
+    "P110": "illustrator",
+    "P123": "publisher",
+    "P161": "actor",
+    "P162": "producer",
+    "P170": "artist",
+    "P175": "performer",
+    "P176": "production_company",
+    "P178": "designer",
+    "P264": "record_label",
+    "P272": "production_company",
+    "P287": "designer",
+    "P344": "cinematographer",
+    "P371": "narrator",
+    "P655": "translator",
+    "P676": "lyricist",
+    "P725": "actor",
+    "P736": "artist",
+    "P750": "distributor",
+    "P767": "artist",
+    "P1040": "editor",
+    "P1431": "producer",
+    "P1809": "choreographer",
+    "P2515": "designer",
+    "P2554": "designer",
+    "P3092": "artist",
+    "P3174": "designer",
+    "P3300": "performer",
+    "P4608": "designer",
+    "P5028": "sound_engineer",
+    "P6942": "director",
+}
+WIKIDATA_AGENT_TYPES = {
+    "Q5": "person",
+    "Q215380": "group",
+    "Q16334295": "group",
+    "Q43229": "organization",
+    "Q4830453": "organization",
+}
+WIKIDATA_WORK_MEDIA = {
+    "Q11424": "film",
+    "Q5398426": "television",
+    "Q21191270": "television",
+    "Q482994": "album",
+    "Q7366": "composition",
+    "Q3305213": "painting",
+}
+EXTERNAL_PROPERTY_IDENTITIES = {
+    "P214": ("viaf", "entity"),
+    "P213": ("isni", "entity"),
+    "P227": ("gnd", "entity"),
+    "P268": ("bnf", "entity"),
+    "P244": ("lcnaf", "entity"),
+    "P245": ("ulan", "entity"),
+    "P434": ("musicbrainz", "artist"),
+    "P436": ("musicbrainz", "release_group"),
+    "P1953": ("discogs", "artist"),
+    "P1954": ("discogs", "master"),
+    "P4947": ("tmdb", "movie"),
+    "P4985": ("tmdb", "person"),
+    "P356": ("doi", "entity"),
 }
 PROFILE_TIME_PROPERTIES = {
     "P569": "birth",
@@ -727,6 +810,81 @@ def claim_strings(entity: Mapping[str, Any], property_id: str) -> set[str]:
     return result
 
 
+def raw_claim_strings(entity: Mapping[str, Any], property_id: str) -> set[str]:
+    claims = entity.get("claims")
+    statements = claims.get(property_id) if isinstance(claims, Mapping) else None
+    if not isinstance(statements, list):
+        return set()
+    result: set[str] = set()
+    for statement in statements:
+        if not isinstance(statement, Mapping) or statement.get("rank") == "deprecated":
+            continue
+        mainsnak = statement.get("mainsnak")
+        datavalue = mainsnak.get("datavalue") if isinstance(mainsnak, Mapping) else None
+        value = datavalue.get("value") if isinstance(datavalue, Mapping) else None
+        if isinstance(value, str) and value.strip():
+            result.add(value.strip())
+    return result
+
+
+def provider_identities(entity: Mapping[str, Any]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for property_id, (provider, namespace) in EXTERNAL_PROPERTY_IDENTITIES.items():
+        for external_id in sorted(raw_claim_strings(entity, property_id)):
+            result.append(
+                {
+                    "provider": provider,
+                    "namespace": namespace,
+                    "external_id": external_id,
+                }
+            )
+    for external_id in sorted(raw_claim_strings(entity, "P345")):
+        namespace = (
+            "name"
+            if external_id.startswith("nm")
+            else "title"
+            if external_id.startswith("tt")
+            else "entity"
+        )
+        result.append(
+            {
+                "provider": "imdb",
+                "namespace": namespace,
+                "external_id": external_id,
+            }
+        )
+    return result
+
+
+def claim_dates(entity: Mapping[str, Any], property_id: str) -> list[str]:
+    claims = entity.get("claims")
+    statements = claims.get(property_id) if isinstance(claims, Mapping) else None
+    if not isinstance(statements, list):
+        return []
+    result: set[str] = set()
+    for statement in statements:
+        if not isinstance(statement, Mapping) or statement.get("rank") == "deprecated":
+            continue
+        mainsnak = statement.get("mainsnak")
+        datavalue = mainsnak.get("datavalue") if isinstance(mainsnak, Mapping) else None
+        value = datavalue.get("value") if isinstance(datavalue, Mapping) else None
+        raw = value.get("time") if isinstance(value, Mapping) else None
+        precision = value.get("precision") if isinstance(value, Mapping) else None
+        if not isinstance(raw, str) or not isinstance(precision, int):
+            continue
+        match = re.fullmatch(r"([+-])([0-9]{4,})-([0-9]{2})-([0-9]{2})T.*", raw)
+        if match is None or precision < 9:
+            continue
+        year = int(match.group(2)) * (-1 if match.group(1) == "-" else 1)
+        text = f"{year:04d}" if year >= 0 else f"-{abs(year):04d}"
+        if precision >= 10 and match.group(3) != "00":
+            text += f"-{int(match.group(3)):02d}"
+            if precision >= 11 and match.group(4) != "00":
+                text += f"-{int(match.group(4)):02d}"
+        result.add(text)
+    return sorted(result)
+
+
 def valid_commons_filename(value: object) -> bool:
     if (
         not isinstance(value, str)
@@ -913,6 +1071,38 @@ def profile(entity: Mapping[str, Any]) -> dict[str, Any]:
                 adjustment = 25 if field == "birth" else -25 if field in {"death", "dissolution"} else 0
                 output["activity_year"] = years[field] + adjustment
                 break
+    dates = {
+        field: values
+        for property_id, field in PROFILE_TIME_PROPERTIES.items()
+        if (values := claim_dates(entity, property_id))
+    }
+    if dates:
+        output["dates"] = dates
+    external_ids = provider_identities(entity)
+    if external_ids:
+        output["external_ids"] = external_ids
+    original_dates = sorted(
+        {
+            value
+            for property_id in ORIGINAL_DATE_PROPERTIES
+            for value in claim_dates(entity, property_id)
+        }
+    )
+    if original_dates:
+        output["original_dates"] = original_dates
+    media = [
+        {
+            "property_id": property_id,
+            "filename": filename,
+            "rank": "preferred" if rank_priority == 0 else "normal",
+        }
+        for property_id in IMAGE_CLAIM_PROPERTIES
+        for rank_priority, filename in commons_media_claims(entity, property_id)[
+            :MAX_IMAGE_HINTS_PER_ENTITY
+        ]
+    ]
+    if media:
+        output["media"] = media
     return output
 
 
@@ -940,11 +1130,13 @@ def create_database(path: Path) -> sqlite3.Connection:
         CREATE TABLE class_edges(parent_id TEXT NOT NULL, child_id TEXT NOT NULL,
           PRIMARY KEY(parent_id, child_id)) WITHOUT ROWID;
         CREATE TABLE work_classes(id TEXT PRIMARY KEY) WITHOUT ROWID;
-        CREATE TABLE works(id TEXT PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE works(id TEXT PRIMARY KEY, label TEXT NOT NULL,
+          profile_json TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE agents(id TEXT PRIMARY KEY, label TEXT NOT NULL,
           profile_json TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE edges(work_id TEXT NOT NULL, agent_id TEXT NOT NULL,
-          PRIMARY KEY(work_id, agent_id)) WITHOUT ROWID;
+          property_id TEXT NOT NULL,
+          PRIMARY KEY(work_id, agent_id, property_id)) WITHOUT ROWID;
         CREATE INDEX edges_agent_work ON edges(agent_id, work_id);
         CREATE TABLE product_work_entities(id TEXT PRIMARY KEY) WITHOUT ROWID;
         CREATE TABLE product_agent_entities(id TEXT PRIMARY KEY) WITHOUT ROWID;
@@ -1567,16 +1759,18 @@ def scan_second_pass(
     connection = create_delta(
         delta,
         """
-        CREATE TABLE works(id TEXT PRIMARY KEY, label TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE works(id TEXT PRIMARY KEY, label TEXT NOT NULL,
+          profile_json TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE agents(id TEXT PRIMARY KEY, label TEXT NOT NULL,
           profile_json TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE edges(work_id TEXT NOT NULL, agent_id TEXT NOT NULL,
-          PRIMARY KEY(work_id, agent_id)) WITHOUT ROWID;
+          property_id TEXT NOT NULL,
+          PRIMARY KEY(work_id, agent_id, property_id)) WITHOUT ROWID;
         """,
     )
-    works: list[tuple[str, str]] = []
+    works: list[tuple[str, str, str]] = []
     agents: list[tuple[str, str, str]] = []
-    edges: list[tuple[str, str]] = []
+    edges: list[tuple[str, str, str]] = []
     second_pass = 0
     try:
         for entity in iter_entities(dump, threads):
@@ -1588,11 +1782,17 @@ def scan_second_pass(
                 or not (claim_qids(entity, "P31") & work_classes)
             ):
                 continue
-            works.append((entity_id, best_label(entity, languages, entity_id)))
+            works.append(
+                (
+                    entity_id,
+                    best_label(entity, languages, entity_id),
+                    json.dumps(profile(entity), sort_keys=True, separators=(",", ":")),
+                )
+            )
             for property_id in properties:
                 for agent_id in claim_qids(entity, property_id):
                     agents.append((agent_id, agent_id, "{}"))
-                    edges.append((entity_id, agent_id))
+                    edges.append((entity_id, agent_id, property_id))
             if len(works) + len(agents) + len(edges) >= BATCH_SIZE:
                 flush_graph_rows(connection, works, agents, edges)
         flush_graph_rows(connection, works, agents, edges)
@@ -1605,7 +1805,6 @@ def scan_second_pass(
 def merge_second_pass(
     checkpoint: Path,
     delta: Path,
-    ranking_policy: Mapping[str, int],
     counters: dict[str, int],
 ) -> dict[str, int]:
     connection = open_database(checkpoint)
@@ -1615,15 +1814,14 @@ def merge_second_pass(
         connection.execute("DELETE FROM edges")
         connection.execute("DELETE FROM agents")
         connection.execute("DELETE FROM works")
-        connection.execute("INSERT INTO works SELECT id,label FROM delta.works")
+        connection.execute(
+            "INSERT INTO works SELECT id,label,profile_json FROM delta.works"
+        )
         connection.execute(
             "INSERT INTO agents SELECT id,label,profile_json FROM delta.agents"
         )
         connection.execute(
-            "INSERT INTO edges SELECT work_id,agent_id FROM delta.edges"
-        )
-        counters["ranked_pool_agents"] = compact_to_ranked_pool(
-            connection, ranking_policy
+            "INSERT INTO edges SELECT work_id,agent_id,property_id FROM delta.edges"
         )
         counters["works"] = int(
             connection.execute("SELECT COUNT(*) FROM works").fetchone()[0]
@@ -2211,7 +2409,6 @@ def build_graph(
     checkpoint: Path,
     dump: Path,
     config: Mapping[str, Any],
-    ranking_policy: Mapping[str, int],
     threads: int,
     checkpoints: dict[str, Any],
     mapping_database: Path,
@@ -2238,15 +2435,15 @@ def build_graph(
 
     if "pass2" in checkpoints:
         pass2 = checkpoints["pass2"]
-        stage_reused("pass2-scan-compact", pass2)
+        stage_reused("pass2-scan-merge", pass2)
     else:
-        started = stage_start("pass2-scan-compact")
+        started = stage_start("pass2-scan-merge")
         pass2 = scan_second_pass(
             checkpoint, pass2_delta, dump, properties, languages, threads
         )
-        pass2 = merge_second_pass(checkpoint, pass2_delta, ranking_policy, pass2)
+        pass2 = merge_second_pass(checkpoint, pass2_delta, pass2)
         pass2_delta.unlink(missing_ok=True)
-        stage_end("pass2-scan-compact", started, pass2)
+        stage_end("pass2-scan-merge", started, pass2)
 
     mapping = update_provider_mappings(
         checkpoint,
@@ -2294,13 +2491,13 @@ def build_graph(
 
 def flush_graph_rows(
     connection: sqlite3.Connection,
-    works: list[tuple[str, str]],
+    works: list[tuple[str, str, str]],
     agents: list[tuple[str, str, str]],
-    edges: list[tuple[str, str]],
+    edges: list[tuple[str, str, str]],
 ) -> None:
-    connection.executemany("INSERT OR IGNORE INTO works VALUES(?,?)", works)
+    connection.executemany("INSERT OR IGNORE INTO works VALUES(?,?,?)", works)
     connection.executemany("INSERT OR IGNORE INTO agents VALUES(?,?,?)", agents)
-    connection.executemany("INSERT OR IGNORE INTO edges VALUES(?,?)", edges)
+    connection.executemany("INSERT OR IGNORE INTO edges VALUES(?,?,?)", edges)
     works.clear()
     agents.clear()
     edges.clear()
@@ -2333,143 +2530,157 @@ def flush_mapping_candidates(
     candidates.clear()
 
 
-def candidate_policy(configuration: Mapping[str, Any]) -> dict[str, int]:
-    try:
-        source = configuration["candidate_rebuild"]["sources"]["wikidata"]
-        pool_size = source["candidate_pool_size"]
-        gray_bonus = source["gray_bonus_basis_points"]
-    except (KeyError, TypeError) as error:
-        raise WorkerError("candidate policy configuration is incomplete") from error
-    if (
-        configuration.get("format_version") != 1
-        or not isinstance(pool_size, int)
-        or isinstance(pool_size, bool)
-        or pool_size <= 0
-        or pool_size > 100_000
-        or not isinstance(gray_bonus, int)
-        or isinstance(gray_bonus, bool)
-        or gray_bonus < 0
-        or gray_bonus > 1_000_000
+def wikidata_identity(external_id: str) -> dict[str, str]:
+    return {
+        "provider": "wikidata",
+        "namespace": "item",
+        "external_id": external_id,
+    }
+
+
+def agent_type_from_profile(value: Mapping[str, Any]) -> str:
+    classes = value.get("classes")
+    class_ids = set(classes) if isinstance(classes, list) else set()
+    for qid, entity_type in WIKIDATA_AGENT_TYPES.items():
+        if qid in class_ids:
+            return entity_type
+    dates = value.get("dates")
+    if isinstance(dates, Mapping) and ({"birth", "death"} & set(dates)):
+        return "person"
+    return "unknown"
+
+
+def profile_identities(value: Mapping[str, Any]) -> list[dict[str, str]]:
+    identities = value.get("external_ids")
+    if not isinstance(identities, list):
+        return []
+    return [
+        identity
+        for identity in identities
+        if isinstance(identity, dict)
+        and set(identity) == {"provider", "namespace", "external_id"}
+    ]
+
+
+def profile_media(value: Mapping[str, Any], family: str) -> list[dict[str, Any]]:
+    allowed = (
+        {"P3383": "poster", "P18": "image"}
+        if family == "work"
+        else {"P18": "portrait", "P154": "logo"}
+    )
+    media = value.get("media")
+    if not isinstance(media, list):
+        return []
+    candidates: list[tuple[int, int, str, dict[str, Any]]] = []
+    property_order = {property_id: index for index, property_id in enumerate(allowed)}
+    for row in media:
+        if not isinstance(row, Mapping):
+            continue
+        property_id = row.get("property_id")
+        filename = row.get("filename")
+        rank = row.get("rank")
+        if (
+            not isinstance(property_id, str)
+            or property_id not in allowed
+            or not isinstance(filename, str)
+            or not filename
+            or rank not in {"preferred", "normal"}
+        ):
+            continue
+        candidates.append(
+            (
+                0 if rank == "preferred" else 1,
+                property_order[property_id],
+                filename,
+                {
+                    "kind": allowed[property_id],
+                    "remote_key": filename,
+                    "origin_property": property_id,
+                },
+            )
+        )
+    candidates.sort(key=lambda row: row[:3])
+    return [row[3] for row in candidates[:MAX_IMAGE_HINTS_PER_ENTITY]]
+
+
+def wikidata_observation_records(
+    connection: sqlite3.Connection,
+) -> Iterator[dict[str, Any]]:
+    edge_rows = iter(
+        connection.execute(
+            "SELECT work_id,agent_id,property_id FROM edges "
+            "ORDER BY work_id,agent_id,property_id"
+        )
+    )
+    pending_edge = next(edge_rows, None)
+    for work_id, label, profile_json in connection.execute(
+        "SELECT id,label,profile_json FROM works ORDER BY id"
     ):
-        raise WorkerError("candidate ranking policy is invalid or unbounded")
-    return {"pool_size": pool_size, "gray_bonus_basis_points": gray_bonus}
+        work_profile = json.loads(profile_json)
+        facts: list[dict[str, Any]] = []
+        dates = work_profile.get("original_dates")
+        if isinstance(dates, list):
+            facts.extend(
+                {"field": "original_date", "value": value}
+                for value in dates
+                if isinstance(value, str)
+            )
+        classes = work_profile.get("classes")
+        media = {
+            WIKIDATA_WORK_MEDIA[qid]
+            for qid in classes if qid in WIKIDATA_WORK_MEDIA
+        } if isinstance(classes, list) else set()
+        if len(media) == 1:
+            facts.append({"field": "medium", "value": next(iter(media))})
+        edges: list[dict[str, Any]] = []
+        while pending_edge is not None and pending_edge[0] == work_id:
+            _edge_work, agent_id, property_id = pending_edge
+            edges.append(
+                {
+                    "target": wikidata_identity(str(agent_id)),
+                    "target_entity_type": "unknown",
+                    "relation_family": "credit",
+                    "relation_type": WIKIDATA_CREDIT_ROLES.get(
+                        str(property_id), f"wikidata_{str(property_id).lower()}"
+                    ),
+                    "metadata": {"property_id": str(property_id)},
+                }
+            )
+            pending_edge = next(edge_rows, None)
+        yield {
+            "id": wikidata_identity(str(work_id)),
+            "entity_type": "work",
+            "identifiers": profile_identities(work_profile),
+            "names": [{"type": "label", "value": str(label)}],
+            "facts": facts,
+            "media": profile_media(work_profile, "work"),
+            "edges": edges,
+        }
 
-
-def compact_to_ranked_pool(
-    connection: sqlite3.Connection, policy: Mapping[str, int]
-) -> int:
-    """Run Ariadne's exact first pass in SQLite and retain only its top pool."""
-    gray_bonus = policy["gray_bonus_basis_points"]
-    connection.execute(
-        """CREATE TABLE ranked_agents(
-          id TEXT PRIMARY KEY, rank INTEGER NOT NULL UNIQUE) WITHOUT ROWID;
-        """
-    )
-    connection.execute(
-        "CREATE TABLE claimed_works(id TEXT PRIMARY KEY) WITHOUT ROWID"
-    )
-    connection.execute(
-        "CREATE TEMP TABLE new_claims(id TEXT PRIMARY KEY) WITHOUT ROWID"
-    )
-    connection.execute(
-        """CREATE TABLE agent_stats(
-          id TEXT PRIMARY KEY,
-          total INTEGER NOT NULL,
-          parsed INTEGER NOT NULL,
-          gray INTEGER NOT NULL,
-          unclaimed INTEGER NOT NULL,
-          score INTEGER NOT NULL,
-          qid_length INTEGER NOT NULL,
-          qid_digits TEXT NOT NULL,
-          selected INTEGER NOT NULL,
-          rank INTEGER
-        ) WITHOUT ROWID"""
-    )
-    connection.execute(
-        """INSERT INTO agent_stats
-        WITH counts AS (
-          SELECT a.id AS id,
-                 COUNT(e.work_id) AS total,
-                 SUM(CASE WHEN c.id IS NULL THEN 0 ELSE 1 END) AS parsed
-          FROM agents a
-          JOIN edges e ON e.agent_id=a.id
-          LEFT JOIN covered_qids c ON c.id=e.work_id
-          GROUP BY a.id
-        )
-        SELECT id,total,parsed,0,total-parsed,
-               (parsed * 10000) / total,
-               LENGTH(id)-1,SUBSTR(id,2),0,NULL
-        FROM counts"""
-    )
-    connection.execute(
-        "CREATE INDEX agent_stats_choice ON agent_stats("
-        "selected,score DESC,unclaimed,qid_length,qid_digits,id)"
-    )
-    selected = 0
-    while selected < policy["pool_size"]:
-        best = connection.execute(
-            "SELECT id,unclaimed FROM agent_stats "
-            "WHERE selected=0 AND parsed+gray>0 AND unclaimed>0 "
-            "ORDER BY score DESC,unclaimed,qid_length,qid_digits,id LIMIT 1"
-        ).fetchone()
-        if best is None:
-            break
-        agent_id, expected_claims = best
-        selected += 1
-        connection.execute("DELETE FROM new_claims")
-        connection.execute(
-            "INSERT INTO new_claims "
-            "SELECT e.work_id FROM edges e "
-            "LEFT JOIN covered_qids c ON c.id=e.work_id "
-            "LEFT JOIN claimed_works p ON p.id=e.work_id "
-            "WHERE e.agent_id=? AND c.id IS NULL AND p.id IS NULL",
-            (agent_id,),
-        )
-        actual_claims = int(
-            connection.execute("SELECT COUNT(*) FROM new_claims").fetchone()[0]
-        )
-        if actual_claims != expected_claims:
-            raise WorkerError("candidate ranking state became inconsistent")
-        connection.execute(
-            "UPDATE agent_stats SET selected=1,rank=? WHERE id=?",
-            (selected, agent_id),
-        )
-        connection.execute(
-            "INSERT INTO ranked_agents VALUES(?,?)", (agent_id, selected)
-        )
-        connection.execute(
-            "INSERT INTO claimed_works SELECT id FROM new_claims"
-        )
-        connection.execute(
-            "UPDATE agent_stats "
-            "SET gray=gray+(SELECT COUNT(*) FROM edges e "
-            " JOIN new_claims n ON n.id=e.work_id "
-            " WHERE e.agent_id=agent_stats.id), "
-            "unclaimed=unclaimed-(SELECT COUNT(*) FROM edges e "
-            " JOIN new_claims n ON n.id=e.work_id "
-            " WHERE e.agent_id=agent_stats.id) "
-            "WHERE selected=0 AND EXISTS(SELECT 1 FROM edges e "
-            " JOIN new_claims n ON n.id=e.work_id "
-            " WHERE e.agent_id=agent_stats.id)"
-        )
-        connection.execute(
-            "UPDATE agent_stats "
-            "SET score=(parsed*10000+gray*(10000+?))/total "
-            "WHERE selected=0 AND EXISTS(SELECT 1 FROM edges e "
-            " JOIN new_claims n ON n.id=e.work_id "
-            " WHERE e.agent_id=agent_stats.id)",
-            (gray_bonus,),
-        )
-    connection.execute(
-        "DELETE FROM edges WHERE agent_id NOT IN (SELECT id FROM ranked_agents)"
-    )
-    connection.execute(
-        "DELETE FROM agents WHERE id NOT IN (SELECT id FROM ranked_agents)"
-    )
-    connection.execute(
-        "DELETE FROM works WHERE id NOT IN (SELECT work_id FROM edges)"
-    )
-    return selected
+    for agent_id, label, profile_json in connection.execute(
+        "SELECT id,label,profile_json FROM agents ORDER BY id"
+    ):
+        agent_profile = json.loads(profile_json)
+        facts: list[dict[str, Any]] = []
+        dates = agent_profile.get("dates")
+        if isinstance(dates, Mapping):
+            for source, target in (("birth", "birth_date"), ("death", "death_date")):
+                values = dates.get(source)
+                if isinstance(values, list):
+                    facts.extend(
+                        {"field": target, "value": value}
+                        for value in values
+                        if isinstance(value, str)
+                    )
+        yield {
+            "id": wikidata_identity(str(agent_id)),
+            "entity_type": agent_type_from_profile(agent_profile),
+            "identifiers": profile_identities(agent_profile),
+            "names": [{"type": "label", "value": str(label)}],
+            "facts": facts,
+            "media": profile_media(agent_profile, "agent"),
+            "edges": [],
+        }
 
 
 def emit_graph(
@@ -2478,95 +2689,39 @@ def emit_graph(
     source_snapshot: Mapping[str, str | int],
 ) -> tuple[str, int]:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         raise WorkerError(f"output already exists: {destination}")
     staging = destination.parent / f".{destination.name}.stage-{os.getpid()}"
-    digest = hashlib.sha256()
-    byte_count = 0
-
-    def write(stream: BinaryIO, value: str) -> None:
-        nonlocal byte_count
-        encoded = value.encode("utf-8")
-        if byte_count + len(encoded) > MAX_EXTERNAL_GRAPH_BYTES:
-            raise WorkerError("external candidate graph exceeds its safe bound")
-        stream.write(encoded)
-        digest.update(encoded)
-        byte_count += len(encoded)
-
+    staging.unlink(missing_ok=True)
     try:
-        with staging.open("xb") as stream:
-            write(stream, '{"artifact_type":"external_candidate_source_graph_v1",')
-            write(stream, '"format_version":1,"source_snapshot":')
-            write(
-                stream,
-                json.dumps(
-                    {
-                        "snapshot_id": source_snapshot["snapshot_id"],
-                        "storage_ref": source_snapshot["storage_ref"],
-                        "sha256": source_snapshot["sha256"],
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
+        graph = ObservationGraph.create(staging)
+        graph.ingest("wikidata", wikidata_observation_records(connection))
+        with sqlite3.connect(staging) as output:
+            output.execute(
+                "INSERT INTO provider_sources(provider,snapshot_id,storage_ref,sha256) "
+                "VALUES('wikidata',?,?,?)",
+                (
+                    str(source_snapshot["snapshot_id"]),
+                    str(source_snapshot["storage_ref"]),
+                    str(source_snapshot["sha256"]),
                 ),
             )
-            write(stream, ',"works":[')
-            first = True
-            for work_id, label, covered in connection.execute(
-                "SELECT w.id,w.label,EXISTS(SELECT 1 FROM covered_qids c WHERE c.id=w.id) "
-                "FROM works w ORDER BY w.id"
-            ):
-                if not first:
-                    write(stream, ",")
-                first = False
-                write(
-                    stream,
-                    json.dumps(
-                        {"id": work_id, "label": label, "covered": bool(covered)},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                )
-            write(stream, '],"agents":[')
-            first = True
-            for agent_id, label, profile_json in connection.execute(
-                "SELECT id,label,profile_json FROM agents ORDER BY id"
-            ):
-                if not first:
-                    write(stream, ",")
-                first = False
-                write(
-                    stream,
-                    json.dumps(
-                        {"id": agent_id, "label": label, "profile": json.loads(profile_json)},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                )
-            write(stream, '],"edges":[')
-            first = True
-            for work_id, agent_id in connection.execute(
-                "SELECT work_id,agent_id FROM edges ORDER BY work_id,agent_id"
-            ):
-                if not first:
-                    write(stream, ",")
-                first = False
-                write(
-                    stream,
-                    json.dumps(
-                        {"work_id": work_id, "agent_id": agent_id},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                )
-            write(stream, "]}\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+            if output.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise WorkerError("provider observation graph failed integrity_check")
+            if output.execute("PRAGMA foreign_key_check").fetchall():
+                raise WorkerError("provider observation graph has foreign-key errors")
+            output.commit()
+        descriptor = os.open(staging, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.link(staging, destination)
         staging.unlink()
     except BaseException:
         staging.unlink(missing_ok=True)
         raise
-    return digest.hexdigest(), byte_count
+    return sha256_file(destination), destination.stat().st_size
 
 
 def image_hint_records(
@@ -2799,7 +2954,7 @@ def run(
         or arguments.output_directory.is_symlink()
     ):
         raise WorkerError("result directory must be a non-symlink directory")
-    output = arguments.output_directory / "wikidata-external-graph.json"
+    output = arguments.output_directory / "provider-observations.sqlite"
     image_hints_output = (
         arguments.output_directory / "wikidata-image-hints.json"
     )
@@ -2815,8 +2970,7 @@ def run(
     product_path, product_snapshot = verify_product(
         arguments.product_snapshot_control, graph_store
     )
-    ranking_policy = candidate_policy(operations_configuration)
-    policy_configuration_hash = sha256_file(arguments.config)
+    operations_configuration_hash = sha256_file(arguments.config)
     configuration = load_json(
         arguments.wikidata_config, "Wikidata worker configuration"
     )
@@ -2836,8 +2990,7 @@ def run(
         "source": source_snapshot,
         "product": product_snapshot,
         "worker_configuration_sha256": configuration_hash,
-        "candidate_policy_configuration_sha256": policy_configuration_hash,
-        "candidate_policy": ranking_policy,
+        "operations_configuration_sha256": operations_configuration_hash,
         "worker_implementation_sha256": implementation_hash,
     }
     with exclusive_worker_lock(work_lock):
@@ -2849,7 +3002,6 @@ def run(
             work_database,
             source_path,
             configuration,
-            ranking_policy,
             arguments.decompress_threads,
             checkpoints,
             mapping_database,
@@ -2876,14 +3028,13 @@ def run(
             "status": "succeeded",
             "baseline": "wikidata_art_hpc.zip",
             "configuration_sha256": configuration_hash,
-            "candidate_policy_configuration_sha256": policy_configuration_hash,
-            "candidate_policy": ranking_policy,
+            "operations_configuration_sha256": operations_configuration_hash,
             "product_snapshot": product_snapshot,
             "covered_product_qids": covered,
             "statistics": statistics,
         },
         "output": {
-            "artifact_type": "external_candidate_source_graph_v1",
+            "artifact_type": "provider_observation_graph_v1",
             "path": str(output),
             "sha256": publication["graph_sha256"],
             "byte_length": publication["graph_bytes"],

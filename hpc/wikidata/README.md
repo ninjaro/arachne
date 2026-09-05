@@ -72,7 +72,7 @@ hpc/wikidata/run result
 The fixed result paths are:
 
 ```text
-results/wikidata-external-graph.json
+results/provider-observations.sqlite
 results/wikidata-image-hints.json
 results/wikidata-mapping-review.json
 results/wikidata-hpc-report.json
@@ -84,17 +84,6 @@ extraction is outstanding it reconciles metadata with `sacct`, falling back to
 `squeue`, so cancellation, timeout, out-of-memory, and other scheduler failures
 identify the failed step and error log.
 
-Candidate planning and activation are the final Slurm operation after extraction.
-If that operation alone needs to be retried, it remains directly callable:
-
-```bash
-hpc/wikidata/run rebuild-candidates
-```
-
-This calls `build/arachne candidate plan` and then
-`build/arachne candidate rebuild`, reusing an already published valid plan
-control when present.
-
 Once the graph, image hints, and successful report are safely present, remove
 the verified raw dump and disposable worker state with:
 
@@ -102,14 +91,11 @@ the verified raw dump and disposable worker state with:
 hpc/wikidata/run clean
 ```
 
-An explicit cleanup after a failed candidate operation is terminal for that run;
-retry the candidate operation before cleaning when publication is still wanted.
-
 Cleanup delegates raw-custody verification to the existing
 `discard_acquired_artifact.py` implementation. Before that deletion it verifies
 the external graph and image-hint byte lengths and SHA-256 values recorded by
 the successful worker report. It keeps the run metadata, logs, reports,
-external graph, image hints, and any requested candidate artifacts.
+provider-observation graph and image hints.
 
 ## Discovery and overrides
 
@@ -161,7 +147,7 @@ verified acquired Wikidata dump
         ▼
 build_external_graph.py (offline, bounded streaming)
         │
-        ├── external_candidate_source_graph_v1
+        ├── provider_observation_graph_v1
         ├── wikidata_image_hints_v1
         └── wikidata_mapping_review_v1
 ```
@@ -173,8 +159,10 @@ pass delta and closes it before a short durable merge. Completed whole-pass
 checkpoints survive an interrupted later pass. Stage start/end lines provide
 elapsed time and compact counters without per-helper checkpoint noise.
 Checkpoint identity includes the exact worker implementation as well as the
-source, product, extraction configuration, and candidate policy, so changed
-algorithm code cannot reuse an older completed pass.
+source, product, extraction configuration, and operations configuration, so
+changed algorithm code cannot reuse an older completed pass. Extraction emits
+the complete discovered work/agent topology; selection and ranking happen only
+after provider observations have been unified.
 
 The shared `mapping/wikidata.sqlite3` stores the compact canonical-entity/QID
 crosswalk across monthly runs. Existing mappings are revalidated during the

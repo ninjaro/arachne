@@ -69,7 +69,6 @@ jobs:
       - name: Build Arachne
         env:
           ARACHNE_BUILD_TESTS: "OFF"
-          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/build.sh
 
       - name: Validate and apply strict arachne_batch inbox batches

@@ -22,9 +22,7 @@ enum class contract_name {
     fetch_plan,
     fetch_request,
     acquired_artifact,
-    research_candidate_graph_plan,
     product_graph_snapshot,
-    research_candidate_graph_snapshot,
 };
 
 /** One independently actionable validation failure. */

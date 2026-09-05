@@ -22,7 +22,7 @@ class SourceRefreshTests(unittest.TestCase):
             json.dumps(
                 {
                     "format_version": 1,
-                    "candidate_rebuild": {
+                    "provider_refresh": {
                         "sources": {"wikidata": {"refresh_days": 60}}
                     }
                 }

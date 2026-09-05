@@ -30,8 +30,6 @@ REQUIRED_CAPABILITIES = frozenset(
         "product-research",
         "product-entity",
         "product-taste-index",
-        "candidate-plan",
-        "candidate-rebuild",
     }
 )
 
@@ -231,32 +229,6 @@ def core_argv(arguments: argparse.Namespace, config_path: Path) -> tuple[str, li
         return command, ["inbox", "baseline", *common]
     if command == "inbox-verify":
         return command, ["inbox", "verify", *common]
-    if command == "candidate-rebuild":
-        return command, [
-            "candidate",
-            "rebuild",
-            *common,
-            "--plan-control",
-            str(arguments.plan_control.resolve(strict=True)),
-            "--product-snapshot",
-            str(arguments.product_snapshot.resolve(strict=True)),
-            "--run-id",
-            arguments.run_id,
-        ]
-    if command == "candidate-plan":
-        return command, [
-            "candidate",
-            "plan",
-            *common,
-            "--external-graph",
-            str(arguments.external_graph.resolve(strict=True)),
-            "--product-snapshot",
-            str(arguments.product_snapshot.resolve(strict=True)),
-            "--output-artifact",
-            str(arguments.output_artifact.resolve(strict=False)),
-            "--output-control",
-            str(arguments.output_control.resolve(strict=False)),
-        ]
     if command in {"product-research", "product-entity", "product-taste-index"}:
         subcommand = command.removeprefix("product-")
         result = [
@@ -324,17 +296,6 @@ def add_core_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
 
     subparsers.add_parser("inbox-baseline")
     subparsers.add_parser("inbox-verify")
-
-    candidate = subparsers.add_parser("candidate-rebuild")
-    candidate.add_argument("--plan-control", type=Path, required=True)
-    candidate.add_argument("--product-snapshot", type=Path, required=True)
-    candidate.add_argument("--run-id", required=True)
-
-    candidate_plan = subparsers.add_parser("candidate-plan")
-    candidate_plan.add_argument("--external-graph", type=Path, required=True)
-    candidate_plan.add_argument("--product-snapshot", type=Path, required=True)
-    candidate_plan.add_argument("--output-artifact", type=Path, required=True)
-    candidate_plan.add_argument("--output-control", type=Path, required=True)
 
     for name in ("product-research", "product-taste-index"):
         projection = subparsers.add_parser(name)
@@ -425,20 +386,6 @@ def main() -> int:
                 config_root,
                 "fetch output control",
             )
-        if arguments.command == "candidate-plan":
-            require_new_output_outside_inbox(
-                arguments.output_artifact,
-                config,
-                config_root,
-                "candidate-plan artifact",
-            )
-            require_new_output_outside_inbox(
-                arguments.output_control,
-                config,
-                config_root,
-                "candidate-plan output control",
-            )
-
         unresolved_binary = (
             arguments.binary
             if arguments.binary.is_absolute()

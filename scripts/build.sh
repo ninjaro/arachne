@@ -9,8 +9,6 @@ if [[ -n "${HPCWORK:-}" ]]; then
 else
     build_tests="${ARACHNE_BUILD_TESTS:-ON}"
 fi
-legacy_client="${ARACHNE_BUILD_LEGACY_CLIENT:-OFF}"
-
 cmake_extra=()
 
 if [[ -n "${HPCWORK:-}" ]]; then
@@ -55,7 +53,6 @@ fi
 cmake -S "${source_root}" -B "${build_root}" \
   -DCMAKE_BUILD_TYPE="${build_type}" \
   -DBUILD_TESTS="${build_tests}" \
-  -DBUILD_LEGACY_CLIENT="${legacy_client}" \
   "${cmake_extra[@]}" \
   "$@"
 cmake --build "${build_root}" --parallel

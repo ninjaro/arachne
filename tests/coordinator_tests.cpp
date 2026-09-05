@@ -704,17 +704,17 @@ TEST(Coordinator, StaleOrIncompleteLocksRequireNonDestructiveRecovery) {
 
     const auto incomplete_root = temporary.path() / "incomplete-locks";
     std::filesystem::create_directories(
-        incomplete_root / "research_candidate_graph.lock"
+        incomplete_root / "product_graph.lock"
     );
     EXPECT_THROW(
         arachne::coordination::domain_lock(
-            incomplete_root, "research_candidate_graph", "candidate-run"
+            incomplete_root, "product_graph", "incomplete-run"
         ),
         std::runtime_error
     );
     EXPECT_TRUE(
         std::filesystem::is_directory(
-            incomplete_root / "research_candidate_graph.lock"
+            incomplete_root / "product_graph.lock"
         )
     );
 }

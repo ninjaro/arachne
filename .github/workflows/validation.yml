@@ -53,8 +53,6 @@ jobs:
             nlohmann-json3-dev \
             yamllint
       - name: Run local-equivalent checks
-        env:
-          ARACHNE_BUILD_LEGACY_CLIENT: "OFF"
         run: scripts/run_checks.sh
 
   state-compatibility:

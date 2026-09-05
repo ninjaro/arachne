@@ -37,7 +37,7 @@ def time_claim(value: str) -> dict[str, object]:
         "rank": "normal",
         "mainsnak": {
             "snaktype": "value",
-            "datavalue": {"value": {"time": value}},
+            "datavalue": {"value": {"time": value, "precision": 11}},
         },
     }
 
@@ -133,9 +133,11 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                 "id": "Q10",
                 "labels": {"en": {"value": "Example creator"}},
                 "claims": {
+                    "P31": [item_claim("Q5")],
                     "P27": [item_claim("Q183")],
                     "P106": [item_claim("Q1028181")],
                     "P569": [time_claim("+1900-01-01T00:00:00Z")],
+                    "P345": [string_claim("nm0000010")],
                     "P18": [media_claim("Example portrait.jpg")],
                     "P154": [
                         media_claim("Example logo.svg", rank="preferred")
@@ -145,7 +147,10 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             {
                 "id": "Q11",
                 "labels": {"en": {"value": "Frontier creator"}},
-                "claims": {"P27": [item_claim("Q30")]},
+                "claims": {
+                    "P31": [item_claim("Q5")],
+                    "P27": [item_claim("Q30")],
+                },
             },
             {
                 "id": "Q12",
@@ -316,8 +321,8 @@ class WikidataHpcWorkerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.candidate_policy = self.root / "candidate-policy.json"
-        self.candidate_policy.write_text(
+        self.operations_config = self.root / "operations-config.json"
+        self.operations_config.write_text(
             json.dumps(
                 {
                     "format_version": 1,
@@ -325,20 +330,12 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                         "artifact_store": str(self.artifacts),
                         "graph_store": str(self.graphs),
                     },
-                    "candidate_rebuild": {
-                        "sources": {
-                            "wikidata": {
-                                "candidate_pool_size": 4,
-                                "gray_bonus_basis_points": 2000,
-                            }
-                        }
-                    },
                 }
             ),
             encoding="utf-8",
         )
         self.results = self.root / "results"
-        self.output = self.results / "wikidata-external-graph.json"
+        self.output = self.results / "provider-observations.sqlite"
         self.image_hints_output = self.results / "wikidata-image-hints.json"
         self.report = self.results / "wikidata-hpc-report.json"
 
@@ -353,7 +350,7 @@ class WikidataHpcWorkerTests(unittest.TestCase):
                 sys.executable,
                 str(worker),
                 "--config",
-                str(self.candidate_policy),
+                str(self.operations_config),
                 "--source-control",
                 str(self.source_control),
                 "--product-snapshot-control",
@@ -376,29 +373,81 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         result = self.run_worker()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        graph = json.loads(self.output.read_text(encoding="utf-8"))
-        self.assertEqual(graph["artifact_type"], "external_candidate_source_graph_v1")
-        self.assertEqual(graph["source_snapshot"]["sha256"], digest(self.dump))
-        works = {item["id"]: item for item in graph["works"]}
-        self.assertTrue(works["Q1"]["covered"])
-        self.assertFalse(works["Q2"]["covered"])
-        self.assertFalse(works["Q4"]["covered"])
-        self.assertNotIn("Q3", works)
-        self.assertEqual(
-            {item["id"] for item in graph["agents"]}, {"Q10", "Q11"}
-        )
-        creator = next(item for item in graph["agents"] if item["id"] == "Q10")
-        self.assertEqual(creator["label"], "Example creator")
-        self.assertEqual(creator["profile"]["countries"], ["Q183"])
-        self.assertEqual(creator["profile"]["activity_year"], 1925)
-        self.assertEqual(len(graph["edges"]), 4)
+        with sqlite3.connect(self.output) as graph:
+            self.assertEqual(
+                graph.execute(
+                    "SELECT sha256 FROM provider_sources WHERE provider='wikidata'"
+                ).fetchone()[0],
+                digest(self.dump),
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT count(*) FROM entity_clusters WHERE entity_type='work'"
+                ).fetchone()[0],
+                4,
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT count(*) FROM entity_clusters WHERE entity_type='person'"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT value FROM clustered_provider_names "
+                    "WHERE subject_external_id='Q3'"
+                ).fetchone()[0],
+                "Orphan work",
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT count(*) FROM provider_edges "
+                    "WHERE relation_family='credit' AND relation_type='artist'"
+                ).fetchone()[0],
+                4,
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT value_json FROM clustered_provider_facts "
+                    "WHERE subject_external_id='Q10' AND field='birth_date'"
+                ).fetchone()[0],
+                '"1900-01-01"',
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT count(*) FROM provider_ids "
+                    "WHERE provider='imdb' AND namespace='name' "
+                    "AND external_id='nm0000010'"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT media_kind,media_key FROM clustered_provider_media "
+                    "WHERE subject_external_id='Q1' ORDER BY media_kind,media_key"
+                ).fetchall(),
+                [
+                    ("image", "Representative work.jpg"),
+                    ("poster", "Normal poster.jpg"),
+                    ("poster", "Preferred poster.jpg"),
+                ],
+            )
+            self.assertEqual(
+                graph.execute(
+                    "SELECT media_kind,media_key FROM clustered_provider_media "
+                    "WHERE subject_external_id='Q10' ORDER BY media_kind,media_key"
+                ).fetchall(),
+                [
+                    ("logo", "Example logo.svg"),
+                    ("portrait", "Example portrait.jpg"),
+                ],
+            )
+            self.assertEqual(graph.execute("PRAGMA foreign_key_check").fetchall(), [])
         report = json.loads(self.report.read_text(encoding="utf-8"))
         self.assertEqual(report["transport"]["status"], "verified")
         self.assertEqual(report["algorithm"]["status"], "succeeded")
         self.assertEqual(report["algorithm"]["covered_product_qids"], 1)
-        self.assertEqual(
-            report["algorithm"]["statistics"]["ranked_pool_agents"], 2
-        )
+        self.assertEqual(report["algorithm"]["statistics"]["agents"], 2)
         self.assertEqual(
             report["algorithm"]["statistics"]["product_image_targets"], 3
         )
@@ -590,7 +639,7 @@ class WikidataHpcWorkerTests(unittest.TestCase):
 
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         self.assertIn("stage=pass1-scan-merge status=reused", resumed.stdout)
-        self.assertIn("stage=pass2-scan-compact status=reused", resumed.stdout)
+        self.assertIn("stage=pass2-scan-merge status=reused", resumed.stdout)
         self.assertIn("stage=pass3-scan-merge status=start", resumed.stdout)
         self.assertLessEqual(resumed.stdout.count("wikidata_stage stage="), 12)
 
@@ -750,25 +799,6 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         report = json.loads(self.report.read_text(encoding="utf-8"))
         self.assertEqual(report["transport"]["status"], "failed")
         self.assertEqual(report["algorithm"]["status"], "not_started")
-
-    def test_unbounded_candidate_policy_fails_closed(self) -> None:
-        configuration = json.loads(
-            self.candidate_policy.read_text(encoding="utf-8")
-        )
-        configuration["candidate_rebuild"]["sources"]["wikidata"][
-            "candidate_pool_size"
-        ] = 100_001
-        self.candidate_policy.write_text(
-            json.dumps(configuration), encoding="utf-8"
-        )
-
-        result = self.run_worker()
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(self.output.exists())
-        report = json.loads(self.report.read_text(encoding="utf-8"))
-        self.assertEqual(report["transport"]["status"], "verified")
-        self.assertEqual(report["algorithm"]["status"], "failed")
 
     def test_compression_is_detected_from_verified_bytes_not_filename(self) -> None:
         renamed = self.dump.with_suffix(".payload")

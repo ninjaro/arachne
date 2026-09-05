@@ -1,23 +1,26 @@
 # Architecture
 
 Arachne is the code and canonical-write repository for accumulating human-mined
-research and materializing isolated graph domains. Authoritative persistent
+research and processing provider observations. Authoritative persistent
 state lives in the private sibling `arachne-data`; presentation and publication
 live in the public sibling `arachne-demo`.
 
 ## Trust and current scope
 
-Human miners own factual and semantic correctness: source selection, identity,
-assertions, quotations, weights, and confidence. Mechanical success does not
+Human miners own taxonomy and semantic correctness: source selection,
+assertions, quotations, weights, confidence, concept names and merges, and the
+narrow correction of a known-wrong provider ID. Automatic provider mining owns
+ordinary entity identity and descriptive metadata. Mechanical success does not
 certify truth. Current contributors are treated as trusted participants; public
 contributor ratings, approval queues, and malicious-miner controls are deferred.
 Ambiguous semantic content is not guessed or rewritten by automation.
 
 Product-database intake has one strict format: `arachne_batch`. It is a
-closed, plain UTF-8 JSON document with explicit create, update, and merge
-operations. Unknown fields are rejected. The repository commit defines the
-only supported product schema and batch shape; repository history is the only
-mechanism for opening older states. See
+closed, plain UTF-8 JSON document limited to concepts, concept names, human
+sources/evidence/assertions, concept merges, and compare-and-swap provider-ID
+corrections. General metadata and grouping are absent. Unknown fields are
+rejected. The repository commit defines the only supported product schema and
+batch shape; repository history is the only mechanism for opening older states. See
 [Product inbox](PRODUCT_INBOX.md).
 
 ## Actor boundaries
@@ -26,13 +29,13 @@ mechanism for opening older states. See
 |---|---|---|
 | Arachne | External API, opaque-byte intake, scheduling, delegation, run status, and serialized canonical state publication | Ranking, grouping, presentation, or semantic verification |
 | Pheidippides | Byte transport, redirects, retries, checksums, transport metadata and failures | Domain interpretation, trust decisions, normalization, either graph store |
-| Ariadne | Coverage, ranking, grouping, query plans, candidate plans, catalog, research, and taste semantics | Transport execution, presentation, raw custody, database transactions, semantic correction |
-| Penelope | Current schemas, transactions, constraints, graph materialization, staging, activation, snapshots and base exports | Ranking policy, API query design, layout or semantic correctness |
+| Ariadne | Provider normalization and selection, query plans, catalog, research, and taste semantics | Transport execution, presentation, raw custody, database transactions, semantic correction |
+| Penelope | Current canonical schemas, transactions, constraints, and accepted writes | Ranking policy, API query design, layout or semantic correctness |
 
 All external operations enter through Arachne. Pheidippides is the sole transport
 implementation and returns bytes plus evidence; delivery means only that bytes
 arrived. Ariadne produces declarative plans and projections. Penelope alone
-writes the canonical product and candidate graphs; Ariadne's merge-hint
+writes the canonical product; Ariadne's provider and merge-hint
 calculations use only disposable derived state. One process may host all actors,
 but cross-actor data still uses explicit contracts rather than private storage
 access.
@@ -41,16 +44,24 @@ access.
 
 Algorithms may observe, compare, rank, cluster, align, and produce disposable
 hints, but they never treat a score or threshold as permission to update the
-canonical product. In particular, calculated centrality, confidence, historical
-role, concept type, assignments, relations, agent data, evidence, and source
-references are not written back. A hint is not a draft batch and is never
-converted or applied as one automatically. The only semantic path is:
+human-owned semantic product. In particular, calculated centrality, confidence,
+historical role, concept type, concept assignments, concept relations, evidence,
+and source references are not written back. A hint is not a draft batch and is
+never converted or applied as one automatically. The semantic path is:
 
 ```text
 algorithm -> disposable observation or hint -> human review and research
           -> human-authored product batch -> normal validation
           -> explicit batch apply -> canonical product database
 ```
+
+Provider-owned general information has a separate mechanical path. Exact
+provider identities, names, entity types, dates, credits, automatic work
+memberships, and provider media references enter one disposable observation
+graph and are selected/materialized by the automatic provider writer. That
+writer cannot write concepts, human sources, evidence, or assertions. Provider
+selection is therefore canonical write authority only for the closed general-
+information surface; it is never semantic approval.
 
 An explicitly supplied batch may of course be validated and applied by the
 normal pipeline. A product-schema change updates `schema/product.sql`, the
@@ -83,7 +94,7 @@ falls back to stale bytes.
 | Product SQLite | Penelope | `arachne-data/database/art-islands.sqlite`; `arachne/schema/product.sql` is the sole schema and the closed state manifest binds its hash to the database hash and producer commit |
 | Hint analysis | Ariadne | Code-local `.arachne/tmp/merge-hints.sqlite` and `.arachne/merge-hints-review.json` are disposable; `arachne-data/database/merge-hint-decisions.json` preserves reviewed decisions |
 | Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
-| Candidate graph | Penelope | Replaceable suggestions; may remain stale between infrequent rebuilds |
+| Provider observation graph | Ariadne | Disposable normalized provider facts and topology; never canonical state or human evidence |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
 
 Arachne's own `paths.queue` is not an immutable inbox. Fully transferred raw queue
@@ -139,9 +150,10 @@ source-URL alias, source-archive, or legacy-ID mapping tables.
 It also has no merge-hint candidates, blocks, or block memberships. A normal
 batch transaction never performs similarity calculations or hint maintenance.
 
-`work_memberships` records containment such as episodes, seasons, tracks,
-volumes, issues, chapters, parts, and collections without inventing
-intermediate works. `agent_relations` records explicit memberships and corporate
+`work_memberships` records provider-derived containment such as episodes,
+seasons, tracks, volumes, issues, chapters, parts, and collections, including
+explicit intermediate structures when the provider data identifies them.
+`agent_relations` records explicit memberships and corporate
 relationships; shared credits never imply `member_of`. `credits.entity_id`
 targets either a work or manifestation, so release-specific distributors,
 publishers, platforms, translators, and similar roles do not distort the work
@@ -223,18 +235,12 @@ first-class structural edges and compact events, but does not justify holdings,
 agent-category, copy-count, or expanded manifestation-type tables. Those are
 deliberate no-ops until query demand becomes material.
 
-## Candidate graph and transient semantic projections
+## Provider observations and transient semantic projections
 
 External bytes remain untrusted and never enter the product graph directly.
-Ariadne owns coverage, top-N selection, grouping, gray-node policy, quality
-weighting, greedy pruning, and query planning. `candidate-plan` can run in GitHub
-Actions or locally/HPC against a declared external graph and product snapshot;
-`candidate-rebuild` also accepts a prebuilt plan control from an HPC handoff.
-Penelope stages and atomically replaces the candidate graph.
-
-Candidate outputs are soft suggestions, not accepted ontology or assignments. They
-may be stale: a product update does not require immediate candidate recomputation,
-and large HPC intermediate graphs may be deleted after a successful queue build.
+Provider adapters normalize recoverable general information into one disposable
+observation graph before selection and automatic materialization. The obsolete
+provider-specific research-candidate snapshot is not an authority boundary.
 
 Periodic Wikidata processing is bulk-first. Ariadne declares the official entity
 dump in `fetch_plan_v1`; Arachne translates that need into a concrete door request;
@@ -257,11 +263,13 @@ disposable mapping review and never removes entities from processing. Mapping,
 candidate, and review artifacts have no canonical write authority.
 
 The worker hash-verifies the source receipt and product export, derives coverage,
-and emits `external_candidate_source_graph_v1`, `wikidata_image_hints_v1`, and
-`wikidata_mapping_review_v1`. Image targets never enter work-only coverage and
-disposable image suggestions never become product data automatically. After
-human review, a normal product batch may store a provider reference, URL, and
-rights metadata in `remote_assets`; media bytes are never canonical. Point
+and emits a disposable `provider_observation_graph_v1` SQLite graph,
+`wikidata_image_hints_v1`, and
+`wikidata_mapping_review_v1`. Image targets never enter work-only coverage.
+Current provider media references in the observation graph are ordinary general
+information and may be materialized automatically in `remote_assets`; media
+bytes are never canonical. The separate image-hint projection is diagnostic and
+has no canonical-write authority. Point
 requests are reserved for bounded enrichment or repair. A failed fresh
 acquisition cannot be relabelled as a fresh rebuild using old cache data.
 
@@ -286,17 +294,21 @@ across the eligible product rather than ranked by popularity:
    media, conflict, and unmapped-value records.
 
 The adapter performs no transport and writes no Penelope state. Both the bundle
-and review are mining inputs only. Any accepted identifier, metadata, relation,
-or remote-asset link still arrives through a human-reviewed `arachne_batch`.
+and review are disposable inputs. General information accepted from a supported
+provider is normalized into the provider observation graph and reaches the
+product only through the automatic provider materializer. Human semantic claims
+still require a human-reviewed `arachne_batch`.
 
 Optional secondary bulk sources use the same fetch-plan, closed-door, and
 acquired-artifact boundary. IMDb official daily TSV files are non-commercial
 and non-redistributable; MusicBrainz core snapshots, Open Library catalog dumps,
-and Discogs catalog dumps are optional CC0 observations. Disabled, unconfigured,
-or unavailable providers are reported and do not fail Wikidata processing.
-MusicBrainz precedes Discogs for music cross-checking. Crossref and OpenAlex are
-outside this provider set because their snapshot cost is a separate operational
-class. No optional provider payload becomes canonical state directly.
+and Discogs catalog dumps are optional observations subject to their reviewed
+source policies. Disabled, unconfigured, or unavailable providers are reported
+and do not fail Wikidata processing. MusicBrainz precedes Discogs for music
+cross-checking. Crossref and OpenAlex are outside this provider set because
+their snapshot cost is a separate operational class. Optional payloads have no
+authority by themselves; only normalized, selected general information may be
+written by the provider materializer.
 
 Ariadne owns product catalog, research, and taste projection semantics.
 The native CLI can write a physical report, inspect a work or agent, or produce
@@ -329,9 +341,8 @@ transitions. GitHub operations are the priority path; the system is not required
 coordinate them with arbitrary local writes, and local conflicts belong to the
 local operator.
 
-Candidate graph activations keep immutable run manifests under their graph-domain
-`runs/` directory. Product inbox application is intentionally smaller: each
-strict batch is committed directly to the canonical database and records only
-its `batch_id` in `applied_batches` in the same transaction. Product batches do
-not create run manifests, hashes, compatibility metadata, or snapshot-control
-records.
+Provider observation graphs and complete foreign dumps are disposable and are
+not activated as product state. Product inbox application records only each
+strict batch's `batch_id` in `applied_batches` in the same transaction. Product
+batches do not create run manifests, hashes, compatibility metadata, or
+snapshot-control records.

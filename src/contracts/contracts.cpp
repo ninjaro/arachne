@@ -1,4 +1,5 @@
 #include "arachne/contracts.hpp"
+#include "arachne/provider_authority.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -21,19 +22,15 @@ namespace {
 
     using json = nlohmann::json;
 
-    constexpr std::array<std::pair<std::string_view, contract_name>, 8>
+    constexpr std::array<std::pair<std::string_view, contract_name>, 6>
         contract_names { {
             { "arachne_batch", contract_name::arachne_batch },
             { "batch_envelope_v1", contract_name::batch_envelope },
             { "fetch_plan_v1", contract_name::fetch_plan },
             { "fetch_request_v1", contract_name::fetch_request },
             { "acquired_artifact_v1", contract_name::acquired_artifact },
-            { "research_candidate_graph_plan_v1",
-              contract_name::research_candidate_graph_plan },
             { "product_graph_snapshot_v1",
               contract_name::product_graph_snapshot },
-            { "research_candidate_graph_snapshot_v1",
-              contract_name::research_candidate_graph_snapshot },
         } };
 
     void
@@ -854,10 +851,7 @@ namespace {
     ) {
         reject_unknown_fields(
             create, path,
-            { "agents", "works", "concepts", "manifestations",
-              "work_memberships", "agent_relations", "events", "names",
-              "external_ids", "remote_assets", "sources", "evidence",
-              "credits", "measurements", "financial_facts", "work_concepts",
+            { "concepts", "names", "sources", "evidence", "work_concepts",
               "concept_relations", "parent_guide_assertions" },
             result
         );
@@ -1119,6 +1113,18 @@ namespace {
                     validate_stable_reference(
                         *entity, child_path(item_path, "entity_id"), item_result
                     );
+                    if (entity->is_string()) {
+                        const std::string_view id
+                            = entity->get_ref<const std::string&>();
+                        if (id.starts_with("agent-") || id.starts_with("work-")
+                            || id.starts_with("manifestation-")) {
+                            add(
+                                item_result, child_path(item_path, "entity_id"),
+                                "entity_family",
+                                "human-authored names may target concepts only"
+                            );
+                        }
+                    }
                 }
                 require_enum(
                     item, "name_type", item_path,
@@ -1163,13 +1169,13 @@ namespace {
                validation_result& item_result) {
                 reject_unknown_fields(
                     item, item_path,
-                    { "entity_id", "provider", "remote_key", "media_kind",
-                      "direct_url", "source_page_url", "origin_provider",
-                      "origin_entity_id", "origin_property", "mime_type", "width_pixels",
-                      "height_pixels", "license_id", "license_name",
-                      "license_url", "attribution_text", "author_text",
-                      "credit_text", "rights_status", "display_allowed",
-                      "rights_note" },
+                    { "entity_id",        "provider",         "remote_key",
+                      "media_kind",       "direct_url",       "source_page_url",
+                      "origin_provider",  "origin_entity_id", "origin_property",
+                      "mime_type",        "width_pixels",     "height_pixels",
+                      "license_id",       "license_name",     "license_url",
+                      "attribution_text", "author_text",      "credit_text",
+                      "rights_status",    "display_allowed",  "rights_note" },
                     item_result
                 );
                 const json* entity
@@ -1184,8 +1190,7 @@ namespace {
                     item, item_path,
                     { "remote_key", "direct_url", "source_page_url",
                       "origin_provider", "origin_entity_id", "origin_property",
-                      "mime_type",
-                      "license_id", "license_name", "license_url",
+                      "mime_type", "license_id", "license_name", "license_url",
                       "attribution_text", "author_text", "credit_text",
                       "rights_note" },
                     item_result
@@ -1212,8 +1217,7 @@ namespace {
                         item, "display_allowed", item_path, item_result
                     );
                 }
-                if (!item.contains("remote_key")
-                    && !item.contains("direct_url")
+                if (!item.contains("remote_key") && !item.contains("direct_url")
                     && !item.contains("source_page_url")) {
                     add(item_result, item_path, "any_of",
                         "remote asset needs remote_key, direct_url, or "
@@ -1252,6 +1256,11 @@ namespace {
                     && !item.contains("bibliography_text")) {
                     add(item_result, item_path, "any_of",
                         "source requires url, doi, isbn, or bibliography_text");
+                }
+                if (::arachne::authority::is_automatic_provider_source(item)) {
+                    add(item_result, item_path, "automatic_provider_evidence",
+                        "automatically mined providers cannot be human "
+                        "evidence sources");
                 }
             }
         );
@@ -1446,14 +1455,16 @@ namespace {
                     item_result
                 );
                 require_stable_id(item, "local_id", item_path, item_result);
-                for (const std::string_view key : { "work_id", "concept_id" }) {
-                    const json* reference
-                        = field(item, key, item_path, item_result);
-                    if (reference != nullptr) {
-                        validate_stable_reference(
-                            *reference, child_path(item_path, key), item_result
-                        );
-                    }
+                validate_entity_id(
+                    item, "work_id", item_path, "work", item_result
+                );
+                const json* concept_reference
+                    = field(item, "concept_id", item_path, item_result);
+                if (concept_reference != nullptr) {
+                    validate_stable_reference(
+                        *concept_reference, child_path(item_path, "concept_id"),
+                        item_result
+                    );
                 }
                 require_enum(
                     item, "relation_type", item_path,
@@ -1542,14 +1553,16 @@ namespace {
                     item_result
                 );
                 require_stable_id(item, "local_id", item_path, item_result);
-                for (const std::string_view key : { "work_id", "concept_id" }) {
-                    const json* reference
-                        = field(item, key, item_path, item_result);
-                    if (reference != nullptr) {
-                        validate_stable_reference(
-                            *reference, child_path(item_path, key), item_result
-                        );
-                    }
+                validate_entity_id(
+                    item, "work_id", item_path, "work", item_result
+                );
+                const json* concept_reference
+                    = field(item, "concept_id", item_path, item_result);
+                if (concept_reference != nullptr) {
+                    validate_stable_reference(
+                        *concept_reference, child_path(item_path, "concept_id"),
+                        item_result
+                    );
                 }
                 require_enum(
                     item, "category", item_path,
@@ -1656,8 +1669,8 @@ namespace {
     ) {
         reject_unknown_fields(
             update, path,
-            { "agents", "works", "concepts", "manifestations", "sources",
-              "work_concepts", "delete" },
+            { "concepts", "sources", "work_concepts", "provider_ids",
+              "delete" },
             result
         );
         validate_optional_object_array(
@@ -1806,6 +1819,14 @@ namespace {
                           "language_code" },
                         item_result
                     );
+                    if (::arachne::authority::is_automatic_provider_source(
+                            *set
+                        )) {
+                        add(item_result, set_path,
+                            "automatic_provider_evidence",
+                            "automatically mined providers cannot be human "
+                            "evidence sources");
+                    }
                 }
                 if (unset != nullptr) {
                     const std::string unset_path
@@ -1914,56 +1935,83 @@ namespace {
                 }
             }
         );
+        validate_optional_object_array(
+            update, "provider_ids", path, result,
+            [](const json& item, const std::string& item_path,
+               validation_result& item_result) {
+                reject_unknown_fields(
+                    item, item_path,
+                    { "entity_id", "provider", "old_external_id",
+                      "new_external_id" },
+                    item_result
+                );
+                const json* entity
+                    = field(item, "entity_id", item_path, item_result);
+                if (entity != nullptr) {
+                    static const std::regex entity_id(
+                        R"(^(?:agent|work|concept|manifestation)-[0-9]{6,}$)"
+                    );
+                    if (!entity->is_string()
+                        || !std::regex_match(
+                            entity->is_string()
+                                ? entity->get_ref<const std::string&>()
+                                : std::string {},
+                            entity_id
+                        )) {
+                        add(item_result, child_path(item_path, "entity_id"),
+                            "pattern", "expected a canonical entity ID");
+                    }
+                }
+                for (const std::string_view key :
+                     { "provider", "old_external_id", "new_external_id" }) {
+                    require_string(item, key, item_path, item_result);
+                }
+                if (item.contains("old_external_id")
+                    && item.contains("new_external_id")
+                    && item["old_external_id"].is_string()
+                    && item["new_external_id"].is_string()
+                    && item["old_external_id"] == item["new_external_id"]) {
+                    add(item_result, item_path, "unchanged_provider_id",
+                        "old and new provider IDs must differ");
+                }
+            }
+        );
+        if (const auto rows = update.find("provider_ids");
+            rows != update.end() && rows->is_array()) {
+            std::set<std::string> targets;
+            for (std::size_t index = 0; index < rows->size(); ++index) {
+                const json& item = (*rows)[index];
+                if (!item.is_object() || !item.contains("entity_id")
+                    || !item["entity_id"].is_string()
+                    || !item.contains("provider")
+                    || !item["provider"].is_string()) {
+                    continue;
+                }
+                const std::string key = item["entity_id"].get<std::string>()
+                    + "\n" + item["provider"].get<std::string>();
+                if (!targets.insert(key).second) {
+                    add(result,
+                        child_path(path, "provider_ids") + "/"
+                            + std::to_string(index) + "/entity_id",
+                        "duplicate_update_target",
+                        "an entity's provider ID may be corrected at most once "
+                        "per batch");
+                }
+            }
+        }
         if (const json* deletes
             = optional_object(update, "delete", path, result)) {
             const std::string delete_path = child_path(path, "delete");
             reject_unknown_fields(
                 *deletes, delete_path,
-                { "names", "external_ids", "remote_assets", "credits",
-                  "work_memberships", "agent_relations", "events", "measurements",
-                  "financial_facts", "evidence", "work_concepts",
-                  "concept_relations", "parent_guide_assertions",
-                  "ingest_issues" },
+                { "evidence", "work_concepts", "concept_relations",
+                  "parent_guide_assertions" },
                 result
             );
             for (const std::string_view key :
-                 { "names", "external_ids", "remote_assets", "credits",
-                   "work_memberships", "agent_relations", "events", "measurements",
-                   "financial_facts", "evidence", "work_concepts",
-                   "concept_relations", "parent_guide_assertions" }) {
+                 { "evidence", "work_concepts", "concept_relations",
+                   "parent_guide_assertions" }) {
                 validate_positive_id_array(*deletes, key, delete_path, result);
-            }
-            if (const json* issues = optional_array(
-                    *deletes, "ingest_issues", delete_path, result
-                )) {
-                const std::string issues_path
-                    = child_path(delete_path, "ingest_issues");
-                validate_unique_items(*issues, issues_path, result);
-                for (std::size_t index = 0; index < issues->size(); ++index) {
-                    const json& issue = (*issues)[index];
-                    const std::string issue_path
-                        = issues_path + "/" + std::to_string(index);
-                    if (!issue.is_object()) {
-                        add(result, issue_path, "type",
-                            "expected an ingest issue key object");
-                        continue;
-                    }
-                    reject_unknown_fields(
-                        issue, issue_path, { "batch_id", "code", "json_path" },
-                        result
-                    );
-                    require_stable_id(issue, "batch_id", issue_path, result);
-                    require_string(issue, "code", issue_path, result);
-                    if (const json* json_path = require_string(
-                            issue, "json_path", issue_path, result
-                        );
-                        json_path != nullptr
-                        && !json_path->get_ref<const std::string&>()
-                                .starts_with('/')) {
-                        add(result, child_path(issue_path, "json_path"),
-                            "pattern", "JSON Pointer must start with '/'");
-                    }
-                }
             }
         }
     }
@@ -1972,9 +2020,7 @@ namespace {
         const json& merge, const std::string_view path,
         validation_result& result
     ) {
-        reject_unknown_fields(
-            merge, path, { "agents", "works", "concepts" }, result
-        );
+        reject_unknown_fields(merge, path, { "concepts" }, result);
         const auto validate_merge = [&merge, path, &result](
                                         const std::string_view key,
                                         const std::string_view family,
@@ -2222,9 +2268,7 @@ namespace {
                     }
                 }
                 if (request.contains("language_fallback")) {
-                    require_boolean(
-                        request, "language_fallback", path, result
-                    );
+                    require_boolean(request, "language_fallback", path, result);
                 }
                 if (const json* query = optional_object(
                         request, "identity_query", path, result
@@ -2249,18 +2293,16 @@ namespace {
                             result
                         );
                     }
-                    const json* kind = require_string(
-                        *query, "kind", query_path, result
-                    );
+                    const json* kind
+                        = require_string(*query, "kind", query_path, result);
                     require_string(*query, "value", query_path, result);
                     if (string_is_one_of(kind, { "name" })) {
-                        require_string(
-                            *query, "language", query_path, result
-                        );
+                        require_string(*query, "language", query_path, result);
                         if (query->contains("scheme")
                             || query->contains("provider_property")) {
                             add(result, query_path, "selector_conflict",
-                                "name identity query cannot contain external-ID "
+                                "name identity query cannot contain "
+                                "external-ID "
                                 "selectors");
                         }
                     } else if (string_is_one_of(kind, { "external_id" })) {
@@ -2286,7 +2328,8 @@ namespace {
                         = child_path(path, "media_files");
                     if (files->empty() || files->size() > 10U) {
                         add(result, files_path, "item_count",
-                            "media lookup must contain between one and ten files");
+                            "media lookup must contain between one and ten "
+                            "files");
                     }
                     static const std::regex file_key(R"(^File:.+$)");
                     static const std::regex canonical(
@@ -2304,13 +2347,15 @@ namespace {
                             continue;
                         }
                         reject_unknown_fields(
-                            file, file_path, { "remote_key", "contexts" }, result
+                            file, file_path, { "remote_key", "contexts" },
+                            result
                         );
                         require_pattern(
                             file, "remote_key", file_path, file_key, result
                         );
-                        const json* contexts
-                            = require_array(file, "contexts", file_path, result);
+                        const json* contexts = require_array(
+                            file, "contexts", file_path, result
+                        );
                         if (contexts == nullptr) {
                             continue;
                         }
@@ -2318,10 +2363,12 @@ namespace {
                             = child_path(file_path, "contexts");
                         if (contexts->empty()) {
                             add(result, contexts_path, "min_items",
-                                "media file needs at least one canonical context");
+                                "media file needs at least one canonical "
+                                "context");
                         }
                         for (std::size_t context_index = 0U;
-                             context_index < contexts->size(); ++context_index) {
+                             context_index < contexts->size();
+                             ++context_index) {
                             const json& context = contexts->at(context_index);
                             const std::string context_path = contexts_path + "/"
                                 + std::to_string(context_index);
@@ -2680,72 +2727,6 @@ namespace {
         validate_extensions(document, "", result);
     }
 
-    void
-    validate_candidate_plan(const json& document, validation_result& result) {
-        reject_unknown_fields(
-            document, "",
-            { "contract", "format_version", "plan_id", "source_snapshot",
-              "product_snapshot", "algorithm_version", "configuration",
-              "plan_artifact", "summary", "created_at", "extensions" },
-            result
-        );
-        require_stable_id(document, "plan_id", "", result);
-        require_string(document, "algorithm_version", "", result);
-        require_timestamp(document, "created_at", "", result);
-        const json* source
-            = require_object(document, "source_snapshot", "", result);
-        if (source != nullptr) {
-            reject_unknown_fields(
-                *source, "/source_snapshot",
-                { "snapshot_id", "storage_ref", "sha256" }, result
-            );
-            require_stable_id(
-                *source, "snapshot_id", "/source_snapshot", result
-            );
-            require_string(*source, "storage_ref", "/source_snapshot", result);
-            require_sha256(*source, "sha256", "/source_snapshot", result);
-        }
-        const json* product
-            = require_object(document, "product_snapshot", "", result);
-        if (product != nullptr) {
-            reject_unknown_fields(
-                *product, "/product_snapshot", { "snapshot_id", "sha256" },
-                result
-            );
-            require_stable_id(
-                *product, "snapshot_id", "/product_snapshot", result
-            );
-            require_sha256(*product, "sha256", "/product_snapshot", result);
-        }
-        const json* configuration
-            = require_object(document, "configuration", "", result);
-        if (configuration != nullptr) {
-            reject_unknown_fields(
-                *configuration, "/configuration", { "sha256", "values" }, result
-            );
-            require_sha256(*configuration, "sha256", "/configuration", result);
-            require_object(*configuration, "values", "/configuration", result);
-        }
-        validate_artifact_field(document, "plan_artifact", "", result);
-        const json* summary = require_object(document, "summary", "", result);
-        if (summary != nullptr) {
-            reject_unknown_fields(
-                *summary, "/summary",
-                { "candidate_count", "edge_count", "group_count" }, result
-            );
-            require_nonnegative_integer(
-                *summary, "candidate_count", "/summary", result
-            );
-            require_nonnegative_integer(
-                *summary, "edge_count", "/summary", result
-            );
-            require_nonnegative_integer(
-                *summary, "group_count", "/summary", result
-            );
-        }
-        validate_extensions(document, "", result);
-    }
-
     void validate_structural_validation(
         const json& value, const std::string_view path,
         validation_result& result
@@ -2797,21 +2778,6 @@ namespace {
         }
     }
 
-    void validate_candidate_snapshot(
-        const json& document, validation_result& result
-    ) {
-        validate_snapshot_common(
-            document,
-            { "contract", "format_version", "snapshot_id", "run_id",
-              "graph_version", "content_sha256", "database", "exports",
-              "plan_id", "source_snapshot_id", "activated_at",
-              "structural_validation", "extensions" },
-            result
-        );
-        require_stable_id(document, "plan_id", "", result);
-        require_stable_id(document, "source_snapshot_id", "", result);
-    }
-
     void validate_body(
         const contract_name name, const json& document,
         validation_result& result
@@ -2832,14 +2798,8 @@ namespace {
         case contract_name::acquired_artifact:
             validate_acquired_artifact(document, result);
             break;
-        case contract_name::research_candidate_graph_plan:
-            validate_candidate_plan(document, result);
-            break;
         case contract_name::product_graph_snapshot:
             validate_product_snapshot(document, result);
-            break;
-        case contract_name::research_candidate_graph_snapshot:
-            validate_candidate_snapshot(document, result);
             break;
         }
     }
@@ -2891,9 +2851,7 @@ bool is_artifact_bearing(const contract_name name) noexcept {
     case contract_name::batch_envelope:
     case contract_name::fetch_request:
     case contract_name::acquired_artifact:
-    case contract_name::research_candidate_graph_plan:
     case contract_name::product_graph_snapshot:
-    case contract_name::research_candidate_graph_snapshot:
         return true;
     case contract_name::arachne_batch:
     case contract_name::fetch_plan:

@@ -177,8 +177,7 @@ namespace {
                 "run_id must be a safe stable identifier"
             );
         }
-        if (graph_domain != "product_graph"
-            && graph_domain != "research_candidate_graph") {
+        if (graph_domain != "product_graph") {
             throw std::invalid_argument("unknown graph domain");
         }
         if (!is_logical_date(logical_date)) {
@@ -1674,8 +1673,7 @@ domain_lock::domain_lock(
     const std::filesystem::path& lock_root, const std::string_view graph_domain,
     const std::string_view run_id, const std::chrono::seconds stale_after
 ) {
-    if (graph_domain != "product_graph"
-        && graph_domain != "research_candidate_graph") {
+    if (graph_domain != "product_graph") {
         throw std::invalid_argument("unknown graph domain");
     }
     if (!is_safe_identifier(run_id)) {

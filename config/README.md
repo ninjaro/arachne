@@ -14,16 +14,13 @@ The storage split is intentional:
 - `remainders` is reserved for future untransferred portions. It is currently
   unused: without evidence-based transfer/remainder schemas, a failed batch stays
   whole in the queue and database mutation does not begin.
-- `graph_store` contains replaceable Penelope candidate snapshots. Product
-  snapshots are generated transiently from the canonical Git-LFS SQLite.
-- candidate snapshots under `graph_store` and HPC intermediates are replaceable
-  and may be stale.
+- `graph_store` is temporary storage for exact product snapshots consumed by
+  native projections. Those snapshots and HPC intermediates are replaceable.
 
 The current reviewed defaults are a local-hour check at approximately 03:00 and an
-exact queue threshold of 15 unless the repository owner forces a run. Candidate
-defaults retain the 3,000/1,500/four-group baseline, a 2,000 basis-point gray-node
-bonus, and a 0.65 quality weight. Attachment host, redirect, timeout, retry,
-archive, and decompression limits remain explicit.
+exact queue threshold of 15 unless the repository owner forces a run. The
+provider-refresh section records source cadence only. Attachment host, redirect,
+timeout, retry, archive, and decompression limits remain explicit.
 
 `transport` is a closed declarative door registry. Defaults merge in this order:
 

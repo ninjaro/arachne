@@ -129,6 +129,16 @@ def check(source: Path, state: Path) -> dict[str, Any]:
     return actual
 
 
+def check_product(state: Path) -> dict[str, Any]:
+    """Validate recorded product bytes during an intentional schema transition."""
+    actual = read_manifest(state / MANIFEST_NAME)
+    validate_shape(actual)
+    product = regular_file(state / PRODUCT_PATH, "canonical product database")
+    if sha256_file(product) != actual["product"]["sha256"]:
+        raise StateManifestError("canonical product bytes do not match state manifest")
+    return actual
+
+
 def refresh(source: Path, state: Path, producer_commit: str) -> dict[str, Any]:
     document = expected(source, state, producer_commit)
     destination = state / MANIFEST_NAME
@@ -152,7 +162,7 @@ def refresh(source: Path, state: Path, producer_commit: str) -> dict[str, Any]:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("command", choices=("check", "refresh"))
+    result.add_argument("command", choices=("check", "check-product", "refresh"))
     result.add_argument("--source-root", type=Path, default=SOURCE_ROOT)
     result.add_argument("--state-root", type=Path)
     result.add_argument("--producer-commit")
@@ -168,6 +178,10 @@ def main() -> int:
             if arguments.producer_commit is not None:
                 raise StateManifestError("--producer-commit is only valid with refresh")
             document = check(source, state)
+        elif arguments.command == "check-product":
+            if arguments.producer_commit is not None:
+                raise StateManifestError("--producer-commit is only valid with refresh")
+            document = check_product(state)
         else:
             if arguments.producer_commit is None:
                 raise StateManifestError("refresh requires --producer-commit")

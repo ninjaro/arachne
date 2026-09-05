@@ -1,8 +1,9 @@
 # Product inbox
 
-The product inbox is the only routine path for applying research batches to the
-canonical product database. It accepts one current, closed format:
-`arachne_batch`. The current commit defines the complete supported shape.
+The product inbox is the human-reviewed path for applying taxonomy, evidence,
+and semantic assertions to the canonical product database. It accepts one
+current, closed format: `arachne_batch`. Automatic provider materialization is
+a separate Penelope write path and is never encoded as a human batch.
 
 ## Fixed repository interface
 
@@ -80,17 +81,19 @@ file may be deleted.
 
 ### References and local IDs
 
-New agents, works, concepts, manifestations, sources, evidence, work-concept
-assertions, concept relations, and parent-guide assertions declare a
-`local_id`. Local IDs exist only while one batch is being resolved and must be
-unique across the complete batch.
+New concepts, sources, evidence, work-concept assertions, concept relations,
+and parent-guide assertions declare a `local_id`. Local IDs exist only while
+one batch is being resolved and must be unique across the complete batch.
 
 Entity references are strings:
 
-- use a local ID to reference an entity created in the same batch;
-- use its readable canonical ID to reference an existing entity, such as
-  `agent-000411`, `work-000321`, `concept-000172`, or
-  `manifestation-000014`.
+- use a local ID for a concept created in the same batch;
+- use a readable canonical concept ID for an existing concept;
+- use an existing readable canonical work ID where an assertion needs a work.
+
+Agents, works, and manifestations are created by automatic provider
+materialization, not by local IDs in this contract. Human-authored names may
+target concepts only.
 
 Sources, evidence, and assertions have integer database keys. A reference to
 one of these records is either a positive integer for an existing record or a
@@ -106,21 +109,10 @@ family reject the batch.
 `create` may contain arrays named:
 
 ```text
-agents
-works
 concepts
-manifestations
-work_memberships
-agent_relations
-events
 names
-external_ids
-remote_assets
 sources
 evidence
-credits
-measurements
-financial_facts
 work_concepts
 concept_relations
 parent_guide_assertions
@@ -130,9 +122,11 @@ Each array inserts records; it is never interpreted as an upsert or
 replacement list. Existing records are referenced explicitly, while newly
 created dependencies use local IDs.
 
-Names require an explicit `is_preferred` boolean. Financial facts require an
-explicit `is_estimate` boolean. Evidence requires a source, a non-empty
-`exact_quote`, and an explicit canonical `stance`. Every work-concept,
+Concept names require an explicit `is_preferred` boolean. Evidence requires a
+human source, a non-empty `exact_quote`, and an explicit canonical `stance`.
+Sources in an automatically mined provider namespace are rejected; Wikidata,
+Wikimedia, Wikipedia, IMDb, MusicBrainz, Open Library, and Discogs data cannot
+serve as evidence for human semantic claims. Every work-concept,
 concept-relation, and parent-guide assertion requires a non-empty `evidence`
 array. A new work-concept assignment also requires a pair-local
 `centrality_scale` of `binary`, `ordinal`, or `graded`; `none` is canonical
@@ -140,51 +134,24 @@ storage for mechanically migrated, not-yet-reviewed legacy rows and is not
 valid for a new assignment. No stance, preference, assertion weight, scale, or
 boolean is inferred.
 
-Work memberships describe structural containment such as `episode_of`,
-`track_of`, or `collected_in`; both endpoints are works and may use same-batch
-local IDs. Agent relations describe explicit membership or corporate structure,
-not a relationship inferred from shared credits. Events target a work or
-manifestation and preserve independent dates such as publication, release,
-premiere, broadcast, performance, exhibition, and recording. `date_precision`
-includes `month`; full dates use `exact`.
-
-Credits use `entity_id`, which must identify a work or manifestation. Put
-edition-, pressing-, translation-, release-, or platform-specific credits on
-the manifestation. Broad media include `nonfiction`, `comic`, and
-`performance`; narrower forms such as autobiography, manga, and documentary
-remain concepts. Irregular tail metadata may remain in `production_info_json`.
-
-General product facts that the database models directly, including work dates,
-memberships, agent relations, events, credits, measurements, and budgets, do
-not require assertion evidence. General metadata is stored on a best-effort
-basis and is not an authoritative factual record. Values may be incomplete,
-stale, or incorrect. External identifiers and links let users consult the
-original databases and sources when authoritative detail is needed.
-
-Remote assets are provider references linked to canonical entities. They may
-store a provider/file key, direct URL, source-page URL, media kind, cheap file
-metadata, and rights/attribution text; they never store media bytes. Rights
-status and `display_allowed` are independent review fields. A reference may be
-kept when inline display is restricted or undecided, and no image is inferred
-to be the entity's primary image. `provider` identifies the media host/catalog;
-`origin_provider`, `origin_entity_id`, and `origin_property` separately retain
-where an external suggestion was discovered (for example Wikidata `Q…`/`P18`).
+Agent/work creation, descriptive scalar fields, external-ID insertion, media,
+credits, events, measurements, finance, and structural grouping such as
+`episode_of`, `season_of`, and `track_of` are deliberately absent. They belong
+to reproducible provider materialization.
 
 ## Update and deletion operations
 
-Scalar updates address existing records only. Entity records use readable
-canonical IDs; sources use their positive integer key. Every update has the
-form:
+Human updates address existing concepts, sources, and work-concept assertions.
+Concepts use readable canonical IDs; internal rows use positive integer keys.
+Every ordinary update has the form:
 
 ```json
 {
-  "id": "work-000321",
+  "id": "concept-000172",
   "set": {
-    "country_code": "DE"
+    "concept_type": "movement"
   },
-  "unset": [
-    "language_code"
-  ]
+  "unset": []
 }
 ```
 
@@ -193,16 +160,31 @@ instruction. Unknown mutable fields, attempts to change a canonical ID or
 entity family, removal of a required field, and changes that violate natural
 uniqueness are rejected.
 
-The updateable scalar families are:
+The updateable families are:
 
 ```text
-agents
-works
 concepts
-manifestations
 sources
 work_concepts
 ```
+
+A wrong foreign identity has one narrow compare-and-swap operation:
+
+```json
+{
+  "entity_id": "work-000321",
+  "provider": "wikidata",
+  "old_external_id": "Q100",
+  "new_external_id": "Q101"
+}
+```
+
+`provider` is the stored external-ID scheme. The row changes only if the named
+entity still has that exact old provider ID, and the new `(provider, ID)` must
+not already exist. Applying the correction clears the old canonical URL but
+does not ask the human to repair general metadata; the next automatic provider
+pass refreshes it. More than one correction for the same entity and provider in
+one batch is rejected.
 
 Work-concept updates use the positive integer assertion row ID. They may change
 `centrality`, `centrality_scale`, `historical_role`, or `confidence`; only the
@@ -218,15 +200,6 @@ Relationship and internal-row deletion is explicit under `update.delete`.
 Each array contains positive integer database row IDs:
 
 ```text
-names
-external_ids
-remote_assets
-credits
-work_memberships
-agent_relations
-events
-measurements
-financial_facts
 evidence
 work_concepts
 concept_relations
@@ -252,23 +225,22 @@ and historical role, and may differ for the same concept on different works.
 
 ## Explicit merges
 
-Only agents, works, and concepts can be merged. Every merge identifies one
-existing canonical target, one or more existing canonical members, and
-explicit scalar conflict resolution:
+Only concepts can be merged. Every merge identifies one existing canonical
+target, one or more existing canonical members, and explicit scalar conflict
+resolution:
 
 ```json
 {
-  "target": "agent-000411",
+  "target": "concept-000172",
   "members": [
-    "agent-003663",
-    "agent-003705"
+    "concept-000173",
+    "concept-000174"
   ],
   "set": {
-    "birth_year": 1940
+    "concept_type": "movement",
+    "slug": "light-art"
   },
-  "unset": [
-    "death_year"
-  ]
+  "unset": []
 }
 ```
 
@@ -277,13 +249,10 @@ belong to the declared family. Conflicting or overlapping merges in one batch
 are rejected.
 
 A valid merge rewrites every member foreign key to the target, deduplicates
-rows that become logically identical, removes membership or agent-relation
-edges that would become self-relations, applies the declared `set` and `unset`
-resolution, and deletes the member entities. Work merges move only credits and
-events that directly target the merged work; manifestation-targeted records
-remain attached to their manifestation. A collision with incompatible required
-values rejects the whole batch. No redirect, alias, tombstone, retired-ID
-table, or compatibility mapping is created.
+rows that become logically identical, applies the declared resolution, and
+deletes the member concepts. A collision with incompatible required values
+rejects the whole batch. No redirect, alias, tombstone, retired-ID table, or
+compatibility mapping is created.
 
 Similarity, matching names, matching slugs, graph overlap, or shared external
 identifiers never authorize a merge. They can create a review hint only.
@@ -339,26 +308,9 @@ in place and the command prints the diagnostics. `check-inbox` reports the
 same problems but never records issues or moves files.
 
 When a corrected batch with the same `batch_id` applies successfully, its open
-issues are marked resolved in the batch transaction. Resolved and ignored
-issues may be deleted explicitly by their complete key:
-
-```json
-{
-  "update": {
-    "delete": {
-      "ingest_issues": [
-        {
-          "batch_id": "research-00421",
-          "code": "unknown_reference",
-          "json_path": "/create/credits/2/agent_id"
-        }
-      ]
-    }
-  }
-}
-```
-
-Open issues cannot be deleted. Old unresolved JSONL rows are not migrated.
+issues are marked resolved in the batch transaction. Ingest issues are
+operational records rather than human knowledge and have no manual deletion
+operation in the batch contract. Old unresolved JSONL rows are not migrated.
 
 ## Merge hints
 
@@ -418,8 +370,9 @@ Strong identity candidates remain reviewable. The fuzzy tail uses deterministic
 family-specific score distributions rather than operator-supplied thresholds or
 fixed per-entity caps. The exported messages explain the positive reasons for
 selection and preserve machine-readable component signals. Hints are advisory:
-no score or signal performs a merge, and every identity change must arrive in a
-later explicit `arachne_batch` batch.
+no score or signal performs a merge. A concept identity change must arrive as a
+later explicit concept merge; general entity identity is owned by provider
+materialization, with only the narrow provider-ID correction exposed here.
 
 Structural hints are not merge candidates. They preserve independent bounded
 measurements such as overlap, directional containment, temporal displacement,
