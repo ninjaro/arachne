@@ -2603,6 +2603,37 @@ def profile_media(value: Mapping[str, Any], family: str) -> list[dict[str, Any]]
     return [row[3] for row in candidates[:MAX_IMAGE_HINTS_PER_ENTITY]]
 
 
+# Selected semantic work-profile values become hint-only signals for the
+# separate research-hint artifact; they never become product general facts.
+# Values are QIDs, kept as stable vocabulary IDs. P921 (main subject) is not
+# emitted until testing shows it is a useful mining lead.
+WIKIDATA_HINT_PROFILE_FIELDS = (
+    ("movements", "movement", "wikidata_movement", "P135"),
+    ("genres", "genre", "wikidata_genre", "P136"),
+)
+
+
+def profile_signals(value: Mapping[str, Any]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for field, family, signal_type, property_id in WIKIDATA_HINT_PROFILE_FIELDS:
+        values = value.get(field)
+        if not isinstance(values, list):
+            continue
+        signals.extend(
+            {
+                "kind": "concept",
+                "family": family,
+                "type": signal_type,
+                "value": qid,
+                "vocabulary_id": f"wikidata:{qid}",
+                "metadata": {"property_id": property_id},
+            }
+            for qid in values
+            if isinstance(qid, str) and valid_qid(qid)
+        )
+    return signals
+
+
 def wikidata_observation_records(
     connection: sqlite3.Connection,
 ) -> Iterator[dict[str, Any]]:
@@ -2655,6 +2686,7 @@ def wikidata_observation_records(
             "facts": facts,
             "media": profile_media(work_profile, "work"),
             "edges": edges,
+            "signals": profile_signals(work_profile),
         }
 
     for agent_id, label, profile_json in connection.execute(

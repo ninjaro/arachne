@@ -142,6 +142,44 @@ ON provider_edges(subject_provider_id, relation_family, relation_type);
 CREATE INDEX provider_edges_object_idx
 ON provider_edges(object_provider_id, relation_family, relation_type);
 
+-- Hint-only semantic signals and source/search leads. The product materializer
+-- never reads this table: a signal is a research lead for a miner, never a
+-- general fact, a canonical concept, or evidence. It feeds only the separate
+-- disposable research-hint artifact (schema/research_hint_v1.sql).
+CREATE TABLE provider_signals (
+    id INTEGER PRIMARY KEY,
+    subject_provider_id INTEGER NOT NULL
+        REFERENCES provider_ids(id) ON DELETE CASCADE,
+    observation_provider TEXT NOT NULL CHECK (length(observation_provider) > 0),
+    signal_kind TEXT NOT NULL CHECK (signal_kind IN
+        ('concept','content_signal','source_lead','search_lead')),
+    semantic_family TEXT CHECK (semantic_family IS NULL OR semantic_family IN
+        ('genre','style','theme','keyword','motif','trope','phobia','taboo',
+         'technique','movement','setting','mood','content_warning')),
+    signal_type TEXT NOT NULL CHECK (length(signal_type) > 0),
+    value TEXT NOT NULL CHECK (length(value) > 0),
+    vocabulary_id TEXT CHECK (vocabulary_id IS NULL OR length(vocabulary_id) > 0),
+    strength REAL,
+    url TEXT CHECK (url IS NULL OR length(url) > 0),
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(metadata_json) AND json_type(metadata_json) = 'object'),
+    CHECK (
+        signal_kind NOT IN ('concept','content_signal')
+        OR semantic_family IS NOT NULL
+    )
+) STRICT;
+CREATE UNIQUE INDEX provider_signals_logical_unique ON provider_signals(
+    subject_provider_id,
+    observation_provider,
+    signal_kind,
+    COALESCE(semantic_family, ''),
+    signal_type,
+    value,
+    COALESCE(vocabulary_id, ''),
+    COALESCE(url, ''),
+    metadata_json
+);
+
 CREATE VIEW clustered_provider_facts AS
 SELECT i.cluster_id,
        i.provider AS subject_provider,
@@ -195,3 +233,20 @@ SELECT subject.cluster_id AS subject_cluster_id,
 FROM provider_edges AS edge
 JOIN provider_ids AS subject ON subject.id = edge.subject_provider_id
 JOIN provider_ids AS object ON object.id = edge.object_provider_id;
+
+CREATE VIEW clustered_provider_signals AS
+SELECT i.cluster_id,
+       i.provider AS subject_provider,
+       i.namespace AS subject_namespace,
+       i.external_id AS subject_external_id,
+       s.observation_provider,
+       s.signal_kind,
+       s.semantic_family,
+       s.signal_type,
+       s.value,
+       s.vocabulary_id,
+       s.strength,
+       s.url,
+       s.metadata_json
+FROM provider_signals AS s
+JOIN provider_ids AS i ON i.id = s.subject_provider_id;

@@ -22,7 +22,33 @@ DEFAULT_SCHEMA = ROOT / "schema/provider_observation_v1.sql"
 TOKEN = re.compile(r"[a-z][a-z0-9_-]*\Z")
 ENTITY_TYPES = {"unknown", "work", "person", "organization", "group"}
 RELATION_FAMILIES = {"credit", "work_membership", "agent_relation"}
-RECORD_FIELDS = {"id", "entity_type", "identifiers", "names", "facts", "media", "edges"}
+RECORD_FIELDS = {
+    "id",
+    "entity_type",
+    "identifiers",
+    "names",
+    "facts",
+    "media",
+    "edges",
+    "signals",
+}
+SIGNAL_KINDS = {"concept", "content_signal", "source_lead", "search_lead"}
+SEMANTIC_FAMILIES = {
+    "genre",
+    "style",
+    "theme",
+    "keyword",
+    "motif",
+    "trope",
+    "phobia",
+    "taboo",
+    "technique",
+    "movement",
+    "setting",
+    "mood",
+    "content_warning",
+}
+VOCABULARY_ID = re.compile(r"[a-z][a-z0-9_-]*:\S+\Z")
 
 
 class ObservationGraphError(RuntimeError):
@@ -342,6 +368,63 @@ class ObservationGraph:
             ),
         )
 
+    @staticmethod
+    def _insert_signal(
+        connection: sqlite3.Connection,
+        subject_id: int,
+        provider: str,
+        value: Any,
+        context: str,
+    ) -> None:
+        record = _object(value, context)
+        _only_fields(
+            record,
+            {"kind", "family", "type", "value", "vocabulary_id", "strength", "url", "metadata"},
+            context,
+        )
+        kind = _token(record.get("kind"), f"{context}.kind")
+        if kind not in SIGNAL_KINDS:
+            raise ObservationGraphError(f"{context}.kind is unsupported")
+        family = record.get("family")
+        if family is not None:
+            family = _token(family, f"{context}.family")
+            if family not in SEMANTIC_FAMILIES:
+                raise ObservationGraphError(f"{context}.family is unsupported")
+        elif kind in {"concept", "content_signal"}:
+            raise ObservationGraphError(f"{context} requires a semantic family")
+        vocabulary_id = _optional_text(record.get("vocabulary_id"), f"{context}.vocabulary_id")
+        if vocabulary_id is not None and not VOCABULARY_ID.fullmatch(vocabulary_id):
+            raise ObservationGraphError(
+                f"{context}.vocabulary_id must be scheme:identifier"
+            )
+        strength = record.get("strength")
+        if strength is not None and (
+            isinstance(strength, bool)
+            or not isinstance(strength, (int, float))
+            or strength != strength
+            or strength in {float("inf"), float("-inf")}
+        ):
+            raise ObservationGraphError(f"{context}.strength must be a finite number")
+        metadata = _without_nulls(_object(record.get("metadata", {}), f"{context}.metadata"))
+        connection.execute(
+            "INSERT OR IGNORE INTO provider_signals("
+            "subject_provider_id,observation_provider,signal_kind,semantic_family,"
+            "signal_type,value,vocabulary_id,strength,url,metadata_json) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                subject_id,
+                provider,
+                kind,
+                family,
+                _token(record.get("type"), f"{context}.type"),
+                _text(record.get("value"), f"{context}.value").strip(),
+                vocabulary_id,
+                None if strength is None else float(strength),
+                _optional_text(record.get("url"), f"{context}.url"),
+                _canonical_json(metadata),
+            ),
+        )
+
     def ingest(self, provider: str, records: Iterable[Mapping[str, Any]]) -> None:
         """Atomically ingest one provider's normalized current observations."""
 
@@ -392,11 +475,13 @@ class ObservationGraph:
                 facts = record.get("facts", [])
                 media = record.get("media", [])
                 edges = record.get("edges", [])
+                signals = record.get("signals", [])
                 for field, values in (
                     ("names", names),
                     ("facts", facts),
                     ("media", media),
                     ("edges", edges),
+                    ("signals", signals),
                 ):
                     if not isinstance(values, list):
                         raise ObservationGraphError(f"{context}.{field} must be an array")
@@ -432,6 +517,14 @@ class ObservationGraph:
                         edge,
                         f"{context}.edges[{item_index}]",
                     )
+                for item_index, signal in enumerate(signals):
+                    self._insert_signal(
+                        connection,
+                        subject_id,
+                        provider,
+                        signal,
+                        f"{context}.signals[{item_index}]",
+                    )
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -450,6 +543,7 @@ class ObservationGraph:
                 "provider_facts",
                 "provider_media",
                 "provider_edges",
+                "provider_signals",
             )
             return {
                 table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
