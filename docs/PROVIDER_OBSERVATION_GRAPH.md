@@ -6,8 +6,8 @@ not canonical product state, a provider-history archive, or human evidence.
 Its schema is `schema/provider_observation_v1.sql`.
 
 Each normalized record has one exact provider identity, an entity type, and
-arrays of additional exact identifiers, names, facts, media hints, and typed
-edges. Facts and edges keep the provider that made the observation. Missing
+arrays of additional exact identifiers, names, facts, media hints, typed
+edges, and hint-only signals. Facts and edges keep the provider that made the observation. Missing
 fact values are omitted, while different non-null values from different
 providers remain separate and queryable.
 
@@ -20,17 +20,23 @@ become product identifiers.
 
 The narrow fixture adapters in `scripts/provider_fixture_adapters.py` cover:
 
-- IMDb name/title basics, title credits, and episode membership TSV rows;
-  explicit season numbers become stable provider-local season nodes;
-- MusicBrainz artist, recording, release, and release-group JSON rows,
-  including Wikidata URL crosswalks, artist credits, and recording-to-album
-  membership;
-- Open Library author and work JSON rows, including remote-ID crosswalks,
-  authorship, and image keys.
+- IMDb name/title basics, akas, crew, principals, and episode membership TSV
+  rows; explicit season numbers become stable provider-local season nodes, and
+  only original or language-tagged akas are kept;
+- MusicBrainz artist, label, recording, release, release-group, and work JSON
+  rows, including Wikidata URL crosswalks, artist/writer credits, and
+  recording-to-album membership;
+- Open Library author, work, edition, and redirect rows, including remote-ID
+  crosswalks, authorship, image keys, merged-key identity, and edition dates
+  attached to their work (editions never become manifestations);
+- Discogs artist, label, master, and release XML elements. Masters are work
+  identities (matching Wikidata P1954); releases only contribute the earliest
+  date and main-release album/single type to their master.
 
 `scripts/ingest_provider_dump.py` is the streaming entrypoint for the supported
-IMDb TSV, MusicBrainz core JSON archive, and Open Library tab/JSON dump
-families. Reuse one graph path across calls; only the first call uses `--create`:
+IMDb TSV, MusicBrainz core JSON archive, Open Library tab/JSON, and Discogs
+XML dump families. Reuse one graph path across calls; only the first call uses
+`--create`:
 
 ```sh
 python3 scripts/ingest_provider_dump.py \
@@ -69,3 +75,41 @@ human assertions, sources, or evidence. Missing observations do not erase a
 stored non-null general value; changed non-empty provider-owned name, media,
 credit, membership, and agent-relation sets replace their compact current sets
 rather than accumulating stale rows.
+
+## Hint-only signals
+
+`provider_signals` holds semantic provider values that are research leads, not
+general information: IMDb genres, Wikidata P135/P136 values (as
+`wikidata:Q…` vocabulary IDs), Open Library subjects, Discogs styles and
+genres, and useful MusicBrainz URL relations (review, interview, biography,
+discography entry, Wikipedia) as source leads. The product materializer never
+reads this table. The separate research-hint builder (`docs/RESEARCH_HINTS.md`)
+is its only consumer. Graphs built before this table existed yield no hints
+and must be rebuilt.
+
+## One multi-provider pass
+
+`scripts/run_provider_pass.py` connects the left side of the pipeline. It
+starts from the required Wikidata graph, streams every acquired dump named
+in a `provider_pass_manifest` into that same graph, materializes exactly once,
+and then builds research hints from the same graph:
+
+```json
+{
+  "format": "provider_pass_manifest",
+  "format_version": 1,
+  "base_graph": "wikidata-provider-observations.sqlite",
+  "inputs": [
+    {"provider": "discogs", "kind": "masters",
+     "path": "discogs_20260901_masters.xml.gz", "snapshot_id": "20260901"},
+    {"provider": "imdb", "kind": "title-basics",
+     "path": "title.basics.tsv.gz", "snapshot_id": "2026-09-20"}
+  ]
+}
+```
+
+Each input is ingested atomically. A failed optional input is recorded in the
+pass report and the pass continues; an input marked `"required": true` aborts
+before materialization. Each ingested provider gets one `provider_sources` row
+whose digest covers the sorted `(kind, sha256)` list of its files. Acquisition
+stays behind the Pheidippides boundary; the pass consumes acquired artifacts.

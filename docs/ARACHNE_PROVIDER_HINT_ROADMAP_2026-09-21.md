@@ -303,16 +303,16 @@ Common Sense Media has rich content/theme data, but its API requires a partnersh
 
 Tasks:
 
-- [ ] Define `research_hint_v1` SQLite schema.
-- [ ] Keep it outside `product.sql`.
-- [ ] Add deterministic rebuild support.
-- [ ] Add hint types/families and provider provenance.
-- [ ] Add authority/vocabulary IDs where known.
-- [ ] Gate hint generation to under-mined works.
-- [ ] Add generic-term suppression / specificity weighting.
-- [ ] Add provider-independent deduplication of identical normalized hints.
-- [ ] Add miner-facing query: highest-priority hints for a work / highest-priority under-mined works.
-- [ ] Ensure no hint path can write `work_concepts`, `concept_relations`, `sources`, or `evidence` automatically.
+- [x] Define `research_hint_v1` SQLite schema.
+- [x] Keep it outside `product.sql`.
+- [x] Add deterministic rebuild support.
+- [x] Add hint types/families and provider provenance.
+- [x] Add authority/vocabulary IDs where known.
+- [x] Gate hint generation to under-mined works.
+- [x] Add generic-term suppression / specificity weighting.
+- [x] Add provider-independent deduplication of identical normalized hints.
+- [x] Add miner-facing query: highest-priority hints for a work / highest-priority under-mined works.
+- [x] Ensure no hint path can write `work_concepts`, `concept_relations`, `sources`, or `evidence` automatically.
 
 Do **not** require full-text storage, a search engine, embeddings, or ML to ship this.
 
@@ -328,10 +328,10 @@ Current code: https://github.com/ninjaro/arachne/blob/master/scripts/provider_fi
 
 Tasks:
 
-- [ ] Export IMDb `genres` to `research_hint_v1`.
-- [ ] Apply strong generic-genre penalty.
-- [ ] Do not treat IMDb genres as evidence.
-- [ ] Do not scrape IMDb keywords/Parents Guide/site pages.
+- [x] Export IMDb `genres` to `research_hint_v1`.
+- [x] Apply strong generic-genre penalty.
+- [x] Do not treat IMDb genres as evidence.
+- [x] Do not scrape IMDb keywords/Parents Guide/site pages.
 
 IMDb public datasets: https://developer.imdb.com/non-commercial-datasets/
 
@@ -343,11 +343,11 @@ Current code: https://github.com/ninjaro/arachne/blob/master/hpc/wikidata/build_
 
 Tasks:
 
-- [ ] Emit selected semantic values to the hint artifact, not the product materializer.
-- [ ] Give generic `P136` genres negligible priority.
-- [ ] Prefer more specific values only when they are useful as mining leads.
+- [x] Emit selected semantic values to the hint artifact, not the product materializer.
+- [x] Give generic `P136` genres negligible priority.
+- [x] Prefer more specific values only when they are useful as mining leads.
 - [ ] Consider `P921` (main subject) later as a hint-only property if testing shows value.
-- [ ] Keep Wikidata references out of canonical evidence; optionally expose them later as source leads.
+- [x] Keep Wikidata references out of canonical evidence; optionally expose them later as source leads.
 
 Wikidata property pages:
 
@@ -361,10 +361,10 @@ The JSON dumps already contain relationships. The current adapter traverses URL 
 
 Tasks:
 
-- [ ] Preserve useful URL relations as `source_lead` hints, especially review/interview/biography-like links.
-- [ ] Do not ingest the linked page as evidence automatically.
-- [ ] Keep URL leads cheap: URL + relation type + MusicBrainz entity ID is sufficient.
-- [ ] Treat MusicBrainz user tags/genre associations as optional, license-gated hints.
+- [x] Preserve useful URL relations as `source_lead` hints, especially review/interview/biography-like links.
+- [x] Do not ingest the linked page as evidence automatically.
+- [x] Keep URL leads cheap: URL + relation type + MusicBrainz entity ID is sufficient.
+- [x] Treat MusicBrainz user tags/genre associations as optional, license-gated hints.
 
 Important licensing boundary: MusicBrainz core data is CC0; user tags, including genre associations, are supplementary data under CC BY-NC-SA 3.0.
 
@@ -382,10 +382,10 @@ The current work adapter ignores subjects.
 
 Tasks:
 
-- [ ] Export work `subjects` as hint candidates.
-- [ ] Treat raw Open Library subjects as medium/low-quality unless mapped to an authority vocabulary.
-- [ ] Keep work/author general ingestion separate from subject hints.
-- [ ] Use editions only when they improve date/identity/access discovery; do not materialize edition entities merely because they exist.
+- [x] Export work `subjects` as hint candidates.
+- [x] Treat raw Open Library subjects as medium/low-quality unless mapped to an authority vocabulary.
+- [x] Keep work/author general ingestion separate from subject hints.
+- [x] Use editions only when they improve date/identity/access discovery; do not materialize edition entities merely because they exist.
 
 References:
 
@@ -401,25 +401,25 @@ This is still required independently of hints.
 
 Planned datasets already include more than the current ingester handles.
 
-- [ ] Add `title.akas` ingestion for alternate/localized names.
-- [ ] Add `title.crew` ingestion for creator topology.
-- [ ] Keep `title.ratings` low priority unless a concrete selection use appears.
-- [ ] Preserve existing `title.basics`, `name.basics`, `title.principals`, `title.episode` support.
+- [x] Add `title.akas` ingestion for alternate/localized names.
+- [x] Add `title.crew` ingestion for creator topology.
+- [x] Keep `title.ratings` low priority unless a concrete selection use appears.
+- [x] Preserve existing `title.basics`, `name.basics`, `title.principals`, `title.episode` support.
 
 License warning: IMDb public datasets are personal/non-commercial and website scraping is prohibited. See: https://help.imdb.com/article/imdb/general-information/can-i-use-imdb-data-in-my-software/G5JTRESSHJBBHTGX
 
 #### MusicBrainz
 
-- [ ] Add `work` ingestion.
-- [ ] Add `label` ingestion if useful for identity/topology.
-- [ ] Continue using release rows structurally without materializing manifestations.
+- [x] Add `work` ingestion.
+- [x] Add `label` ingestion if useful for identity/topology.
+- [x] Continue using release rows structurally without materializing manifestations.
 - [ ] Use release data to improve earliest date/topology where useful.
 
 #### Open Library
 
-- [ ] Keep `authors` and `works` as primary product inputs.
-- [ ] Add redirects/ID maintenance where useful.
-- [ ] Use edition data only for derived earliest date, identity, or access links; do not create product manifestations.
+- [x] Keep `authors` and `works` as primary product inputs.
+- [x] Add redirects/ID maintenance where useful.
+- [x] Use edition data only for derived earliest date, identity, or access links; do not create product manifestations.
 
 #### Discogs
 
@@ -427,13 +427,13 @@ Discogs currently has transport/planning but no public-master ingestion adapter.
 
 Implement in this order:
 
-- [ ] artists;
-- [ ] labels where useful;
-- [ ] masters as work/album identities;
-- [ ] master `styles` as high-value hint candidates;
-- [ ] broad `genres` as low-value hints;
-- [ ] releases only as structural/date input where needed, not as product manifestations;
-- [ ] derive earliest useful original date for a master/work from release data when it improves precision;
+- [x] artists;
+- [x] labels where useful;
+- [x] masters as work/album identities;
+- [x] master `styles` as high-value hint candidates;
+- [x] broad `genres` as low-value hints;
+- [x] releases only as structural/date input where needed, not as product manifestations;
+- [x] derive earliest useful original date for a master/work from release data when it improves precision;
 - [ ] preserve useful third-party URL links as source/search leads when warranted.
 
 Discogs explicitly distinguishes broad `genre` from `style`, with style functioning roughly as subgenre. This makes `style` more valuable for Arachne hints.
@@ -462,11 +462,11 @@ Discogs ────────┘
 Tasks:
 
 - [ ] Translate each enabled provider plan through the existing Pheidippides acquisition boundary.
-- [ ] Stream each acquired dump into the same provider observation graph.
-- [ ] Make optional-provider failure explicit and non-fatal when the required source succeeded.
-- [ ] Materialize only once after all available provider inputs are ingested.
-- [ ] Build research hints from the same snapshots but into a separate artifact.
-- [ ] Do not create one product database or candidate graph per provider.
+- [x] Stream each acquired dump into the same provider observation graph.
+- [x] Make optional-provider failure explicit and non-fatal when the required source succeeded.
+- [x] Materialize only once after all available provider inputs are ingested.
+- [x] Build research hints from the same snapshots but into a separate artifact.
+- [x] Do not create one product database or candidate graph per provider.
 
 ## 8. Controlled vocabularies and identity bridges
 
