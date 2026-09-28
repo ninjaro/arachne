@@ -26,6 +26,7 @@ CONTROL_CONTRACTS = (
 
 ARTIFACT_FORMATS = (
     "external_enrichment_review_v1",
+    "hint_vocabulary_v1",
     "wikidata_image_hints_v1",
     "wikidata_mapping_review_v1",
 )
@@ -214,6 +215,9 @@ def check_repository_surface(root: Path) -> None:
         "canonical product JSONL exporter": "export_product_jsonl.py",
         "state compatibility manifest guard": "state_manifest.py",
         "serialized state publisher": "publish_state_repository.py",
+        "optional-provider plan translator": "translate_provider_plans.py",
+        "GND identity resolver": "resolve_gnd_identities.py",
+        "research-hint builder": "research_hints.py",
     }
     for label, name in required_scripts.items():
         path = root / "scripts" / name

@@ -20,13 +20,11 @@ import argparse
 import json
 import math
 import os
-import re
 import sqlite3
 import sys
-import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -35,10 +33,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.hint_vocabulary import (
+    AuthorityTerm,
+    Concordance,
+    HintVocabularyError,
+    load_concordance,
+    normalize_label,
+)
 from scripts.materialize_provider_rebuild import TAG_THRESHOLD, Identity
 from scripts.provider_observation_graph import SEMANTIC_FAMILIES, SIGNAL_KINDS
 from scripts.provider_policy import (
     AUTHORITY_VOCABULARIES,
+    PROVIDER_POLICIES,
     SIGNAL_POLICIES,
     SignalPolicy,
 )
@@ -124,11 +130,6 @@ def canonical_json(value: Any) -> str:
     )
 
 
-def normalize_label(value: str) -> str:
-    text = unicodedata.normalize("NFKC", value).casefold()
-    return " ".join(re.sub(r"[^\w]+|_", " ", text).split())
-
-
 def normalize_url(value: str) -> str:
     parts = urlsplit(value.strip())
     path = parts.path.rstrip("/")
@@ -157,10 +158,21 @@ class Signal:
     provider_entity_id: str
     attachment: str
     snapshot: str | None
+    # The authority term this provider value resolves to, when one does. The
+    # provider-native value and ID above always stay exactly as observed.
+    authority: AuthorityTerm | None = None
 
     @property
     def normalized(self) -> str:
         return normalize_label(self.value)
+
+    @property
+    def effective_vocabulary_id(self) -> str | None:
+        return (
+            self.authority.vocabulary_id
+            if self.authority is not None
+            else self.vocabulary_id
+        )
 
     @property
     def origin(self) -> str:
@@ -175,14 +187,15 @@ class Signal:
                 value = self.metadata.get(key)
                 if isinstance(value, str) and value.strip():
                     return f"{key}:{value.strip().lower()}"
-        if self.vocabulary_id:
-            return "id:" + self.vocabulary_id
+        identifier = self.effective_vocabulary_id
+        if identifier:
+            return "id:" + identifier
         return "label:" + self.normalized
 
     def quality_class(self, policy: SignalPolicy) -> str:
-        if is_generic(self.normalized, self.vocabulary_id):
+        if is_generic(self.normalized, self.effective_vocabulary_id):
             return "E"
-        scheme = (self.vocabulary_id or "").split(":", 1)[0]
+        scheme = (self.effective_vocabulary_id or "").split(":", 1)[0]
         if scheme in AUTHORITY_VOCABULARIES:
             return "A"
         return policy.quality_class
@@ -337,7 +350,13 @@ def graph_signals(
 def manual_signals(
     path: Path, works: Mapping[str, WorkNeed], issues: list[dict[str, Any]]
 ) -> Iterator[tuple[str, Signal]]:
-    """Read lawful manual/private signals addressed to product work IDs."""
+    """Read lawful manually imported signals addressed to product work IDs.
+
+    Only signal types whose reviewed provider is acquired by manual import may
+    arrive this way, so a local file can never impersonate a bulk provider.
+    Licence gating still applies: a restricted type, such as a MovieLens Tag
+    Genome descriptor, additionally needs an explicit opt-in on the build.
+    """
 
     allowed = {"work_id", "kind", "family", "type", "value", "vocabulary_id",
                "strength", "url", "metadata"}
@@ -361,8 +380,13 @@ def manual_signals(
             if kind in {"concept", "content_signal"} and family is None:
                 raise ResearchHintError(f"{context} requires a semantic family")
             policy = SIGNAL_POLICIES.get(signal_type) if isinstance(signal_type, str) else None
-            if policy is None or policy.provider_id != "manual":
-                raise ResearchHintError(f"{context} must use a manual signal type")
+            provider = (
+                PROVIDER_POLICIES[policy.provider_id] if policy is not None else None
+            )
+            if provider is None or provider.acquisition_mode != "manual-import":
+                raise ResearchHintError(
+                    f"{context} must use a manually imported signal type"
+                )
             if not isinstance(value, str) or not value.strip():
                 raise ResearchHintError(f"{context} requires a value")
             strength = record.get("strength")
@@ -391,11 +415,25 @@ def manual_signals(
                 strength=None if strength is None else float(strength),
                 url=record.get("url"),
                 metadata=metadata,
-                provider="manual",
+                provider=provider.provider_id,
                 provider_entity_id=str(work_id),
                 attachment="work",
                 snapshot=None,
             )
+
+
+def resolved_signal(signal: Signal, vocabulary: Concordance) -> Signal:
+    """Attach the authority term a concept or content signal denotes, if any.
+
+    Resolution is exact (authority ID, then concordance ID, then an exact
+    normalized label within the term kind the family asks for). Leads keep
+    their URLs, and an unresolved value stays provider-native.
+    """
+
+    if signal.kind in {"source_lead", "search_lead"}:
+        return signal
+    term = vocabulary.resolve(signal.family, signal.value, signal.vocabulary_id)
+    return signal if term is None else replace(signal, authority=term)
 
 
 @dataclass
@@ -409,15 +447,27 @@ class Hint:
     def score(self, work: WorkNeed) -> dict[str, Any]:
         classes = sorted(quality for _signal, quality in self.signals)
         best = classes[0]
-        first = min(
+        ordered = sorted(
             (signal for signal, _quality in self.signals),
             key=lambda signal: (signal.attachment != "work", signal.provider, signal.value),
         )
+        first = ordered[0]
         normalized = None if self.kind in {"source_lead", "search_lead"} else first.normalized
         vocabulary_id = next(
             (signal.vocabulary_id for signal, _q in self.signals if signal.vocabulary_id),
             None,
         )
+        # A resolved authority term names the hint: its preferred label and ID
+        # replace the provider spelling, while every provider-native value
+        # stays in research_hint_signals.
+        authority = next(
+            (signal.authority for signal in ordered if signal.authority), None
+        )
+        display_value = first.value
+        if authority is not None:
+            display_value = authority.label
+            normalized = normalize_label(authority.label)
+            vocabulary_id = authority.vocabulary_id
         generic = best == "E" and is_generic(normalized, vocabulary_id)
         specificity = GENERIC_SPECIFICITY if generic else 1.0
         if self.family is None:
@@ -435,9 +485,11 @@ class Hint:
         quality = QUALITY_WEIGHTS[best]
         lead_kind = first.metadata.get("lead_kind")
         return {
-            "display_value": first.value,
+            "display_value": display_value,
             "normalized_value": normalized,
             "vocabulary_id": vocabulary_id,
+            "term_kind": None if authority is None else authority.term_kind,
+            "authority_ids": {} if authority is None else authority.vocabulary_ids,
             "lead_kind": lead_kind if lead_kind in LEAD_KINDS else None,
             "source_url": next((s.url for s, _q in self.signals if s.url), None),
             "quality_class": best,
@@ -458,6 +510,7 @@ def build(
     *,
     manual_path: Path | None = None,
     allow_restricted: Iterable[str] = (),
+    vocabulary_path: Path | None = None,
     schema_path: Path = DEFAULT_SCHEMA,
 ) -> dict[str, Any]:
     output_path = Path(output_path)
@@ -476,6 +529,7 @@ def build(
             "only restricted signal types can be opted in: " + ", ".join(unknown_allow)
         )
 
+    vocabulary = load_concordance(vocabulary_path)
     issues: list[dict[str, Any]] = []
     skipped: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     # Read-only URI connections: the hint path structurally cannot mutate
@@ -506,6 +560,7 @@ def build(
                 if policy.restricted and signal.signal_type not in allow:
                     skipped["license_restricted"][signal.signal_type] += 1
                     continue
+                signal = resolved_signal(signal, vocabulary)
                 key = (work_id, signal.kind, signal.family or "", signal.dedup_key())
                 hint = hints.setdefault(
                     key, Hint(work_id, signal.kind, signal.family, key[3])
@@ -561,10 +616,11 @@ def build(
             for hint, score in scored:
                 cursor = connection.execute(
                     "INSERT INTO research_hints(work_id,hint_kind,semantic_family,dedup_key,"
-                    "display_value,normalized_value,vocabulary_id,lead_kind,source_url,"
+                    "display_value,normalized_value,vocabulary_id,term_kind,"
+                    "authority_ids_json,lead_kind,source_url,"
                     "quality_class,specificity,candidate_tag_weight,signal_quality,"
                     "independent_origins,research_priority) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         hint.work_id,
                         hint.kind,
@@ -573,6 +629,8 @@ def build(
                         score["display_value"],
                         score["normalized_value"],
                         score["vocabulary_id"],
+                        score["term_kind"],
+                        canonical_json(score["authority_ids"]),
                         score["lead_kind"],
                         score["source_url"],
                         score["quality_class"],
@@ -638,6 +696,9 @@ def build(
         "under_mined_works": len(works),
         "under_mined_works_with_useful_hint": with_useful,
         "hints": len(scored),
+        "authority_resolved_hints": sum(
+            1 for _hint, score in scored if score["term_kind"] is not None
+        ),
         "signals": sum(len(hint.signals) for hint in hints.values()),
         "skipped_signals": {
             reason: dict(sorted(counts.items())) for reason, counts in sorted(skipped.items())
@@ -708,6 +769,8 @@ def work_hints(path: Path, work_id: str, limit: int = 20) -> dict[str, Any]:
                         "family": hint["semantic_family"],
                         "value": hint["display_value"],
                         "vocabulary_id": hint["vocabulary_id"],
+                        "term_kind": hint["term_kind"],
+                        "authority_ids": json.loads(hint["authority_ids_json"]),
                         "lead_kind": hint["lead_kind"],
                         "url": hint["source_url"],
                         "quality_class": hint["quality_class"],
@@ -744,9 +807,10 @@ def render_work(value: Mapping[str, Any]) -> str:
     ]
     for hint in value["hints"]:
         label = hint["value"]
+        vocabulary = f"; {hint['vocabulary_id']}" if hint["vocabulary_id"] else ""
         lines.append(
-            f"  {label}  [{hint['family']}; class {hint['quality_class']}; "
-            f"priority {hint['research_priority']:.3f}]"
+            f"  {label}  [{hint['family']}; class {hint['quality_class']}"
+            f"{vocabulary}; priority {hint['research_priority']:.3f}]"
         )
         for signal in hint["signals"]:
             detail = signal["signal_type"]
@@ -773,6 +837,11 @@ def parser() -> argparse.ArgumentParser:
     build_command.add_argument("--product", type=Path, required=True)
     build_command.add_argument("--output", type=Path, required=True)
     build_command.add_argument("--manual-signals", type=Path)
+    build_command.add_argument(
+        "--vocabulary",
+        type=Path,
+        help="reviewed hint_vocabulary_v1 authority concordance",
+    )
     build_command.add_argument(
         "--allow-restricted-signal",
         action="append",
@@ -804,6 +873,11 @@ def main() -> int:
                     else None
                 ),
                 allow_restricted=arguments.allow_restricted_signal,
+                vocabulary_path=(
+                    arguments.vocabulary.resolve(strict=True)
+                    if arguments.vocabulary
+                    else None
+                ),
             )
             print(canonical_json(output))
         elif arguments.command == "work":
@@ -811,7 +885,13 @@ def main() -> int:
             print(render_work(value) if arguments.format == "text" else canonical_json(value))
         else:
             print(canonical_json(work_queue(arguments.hints, arguments.limit)))
-    except (OSError, sqlite3.Error, ResearchHintError, ValueError) as error:
+    except (
+        OSError,
+        sqlite3.Error,
+        HintVocabularyError,
+        ResearchHintError,
+        ValueError,
+    ) as error:
         print(f"research_hints: {error}", file=sys.stderr)
         return 2
     return 0

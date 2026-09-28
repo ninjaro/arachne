@@ -157,6 +157,55 @@ Planned files are ordinary `fetch_plan_v1` inputs for `arachne fetch plan`; the
 translated controls retain provider license and redistribution policy. An
 optional-provider failure does not change the required Wikidata workflow state.
 
+Translate every planned provider in one step. Each plan is validated and then
+handed to the operations CLI, which resolves the configured door and endpoint
+and writes the concrete `fetch_request_v1` controls Pheidippides executes:
+
+```sh
+python3 scripts/translate_provider_plans.py \
+  --plans /run/optional-provider-plans \
+  --config /run/arachne.json \
+  --output-directory /run/optional-provider-controls \
+  --report /run/optional-provider-translation.json
+```
+
+Controls land in one directory per provider. A provider whose plan is rejected
+at the boundary is reported as `failed` and the remaining providers continue;
+no transport happens here.
+
+## Authority bridges and optional research hints
+
+GND resolves only around entities the product already holds, so no authority
+corpus is materialized:
+
+```sh
+python3 scripts/resolve_gnd_identities.py \
+  --product arachne-data/database/art-islands.sqlite \
+  --gnd /acquired/gnd-authority.jsonl.gz \
+  --output /run/gnd-selection.jsonl
+python3 scripts/ingest_provider_dump.py \
+  --graph /run/provider-observations.sqlite \
+  --provider gnd --kind entities --input /run/gnd-selection.jsonl
+```
+
+MovieLens Tag Genome stays optional and research-only. The importer requires an
+explicit acknowledgement, keeps a bounded selection rather than the tag matrix,
+and its relevance is hint strength only; the hint build still needs
+`--allow-restricted-signal movielens_tag`:
+
+```sh
+python3 scripts/import_movielens_tag_hints.py \
+  --product arachne-data/database/art-islands.sqlite \
+  --links /acquired/ml/links.csv \
+  --tags /acquired/ml/genome-tags.csv \
+  --scores /acquired/ml/genome-scores.csv \
+  --output /run/movielens-hints.jsonl \
+  --acknowledge-research-only
+```
+
+Hint semantics, the reviewed licence policy, and the authority concordance are
+documented in [Research hints](RESEARCH_HINTS.md).
+
 ## Workflow credentials and serialization
 
 | Setting | Kind | Scope |

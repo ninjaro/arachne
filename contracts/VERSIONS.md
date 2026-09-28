@@ -91,6 +91,12 @@ members of the C++ `contract_name` enumeration:
   exact conflicts, no-QID candidates found by normalized names or strong
   external-ID crosswalks, and budget-deferred rows. Its compact cache and
   fingerprints remain non-canonical operational state.
+- `hint_vocabulary_v1` is the reviewed authority concordance used to normalize
+  and deduplicate research hints. It records authority terms, their exact
+  labels and aliases, and their GND/LCSH/RAMEAU/LCGFT/AAT/Iconclass crosswalks,
+  keeping genre/form terms separate from topical subject terms. It orders and
+  merges research leads only: it never creates a canonical concept, assertion,
+  or evidence row, and the shipped example's identifiers are illustrative.
 - `external_enrichment_review_v1` is a disposable, snapshot-bound comparison
   of canonical entities and relations with one provider's normalized point
   observations. It preserves redirects, identity signals, field and relation

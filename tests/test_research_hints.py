@@ -12,12 +12,20 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree
 
+from scripts.hint_vocabulary import (
+    AuthorityTerm,
+    Concordance,
+    HintVocabularyError,
+    normalize_vocabulary_id,
+)
 from scripts.provider_fixture_adapters import (
     expand_discogs_release,
+    expand_musicbrainz_release,
     expand_open_library_edition,
     normalize_discogs_artist,
     normalize_discogs_label,
     normalize_discogs_master,
+    normalize_gnd_entity,
     normalize_imdb_title_aka,
     normalize_imdb_title_basics,
     normalize_imdb_title_crew,
@@ -27,6 +35,7 @@ from scripts.provider_fixture_adapters import (
     normalize_open_library_redirect,
     normalize_open_library_work,
 )
+from scripts.provider_fixture_adapters import ProviderAdapterError
 from scripts.provider_observation_graph import ObservationGraph, ObservationGraphError
 from scripts.research_hints import (
     ResearchHintError,
@@ -237,6 +246,155 @@ class SignalAdapterTests(unittest.TestCase):
         self.assertEqual(label["edges"][0]["relation_type"], "subsidiary_of")
 
 
+    def test_discogs_pages_keep_useful_third_party_links_only(self) -> None:
+        artist = normalize_discogs_artist(
+            ElementTree.fromstring(
+                "<artist><id>9</id><name>Band</name><urls>"
+                "<url>https://en.wikipedia.org/wiki/Band</url>"
+                "<url>https://www.facebook.com/band</url>"
+                "<url>https://www.discogs.com/artist/9</url>"
+                "<url>http://band.example.org/press</url>"
+                "<url>not-a-url</url></urls></artist>"
+            )
+        )
+        self.assertEqual(
+            [(s["kind"], s["type"], s["metadata"].get("lead_kind")) for s in artist["signals"]],
+            [
+                ("source_lead", "discogs_url", "article"),
+                ("search_lead", "discogs_url", None),
+            ],
+        )
+        label = normalize_discogs_label(
+            ElementTree.fromstring(
+                "<label><id>3</id><name>Imprint</name>"
+                "<urls><url>https://www.allmusic.com/label/imprint</url></urls></label>"
+            )
+        )
+        self.assertEqual(label["signals"][0]["metadata"]["lead_kind"], "catalogue")
+
+    def test_musicbrainz_releases_sharpen_dates_and_label_topology(self) -> None:
+        records = expand_musicbrainz_release(
+            {
+                "id": "release-1",
+                "status": "Official",
+                "date": "1980-06-21",
+                "release-events": [{"date": "1979-11"}],
+                "release-group": {"id": "rg1", "primary-type": "Album"},
+                "label-info": [{"label": {"id": "l1"}, "catalog-number": "X-1"}],
+                "media": [],
+            }
+        )
+        self.assertEqual(records[0]["id"], identity("musicbrainz", "release_group", "rg1"))
+        self.assertEqual(
+            records[0]["facts"],
+            [
+                {"field": "original_date", "value": "1980-06-21"},
+                {"field": "original_date", "value": "1979-11"},
+                {"field": "work_type", "value": "album"},
+            ],
+        )
+        self.assertEqual(records[0]["edges"][0]["relation_type"], "record_label")
+        # A bootleg's date must not compete for the earliest original date.
+        self.assertEqual(
+            expand_musicbrainz_release(
+                {"id": "r2", "status": "Bootleg", "date": "1970",
+                 "release-group": {"id": "rg1"}}
+            ),
+            [],
+        )
+
+    def test_gnd_records_bridge_identity_and_keep_subject_ids(self) -> None:
+        record = normalize_gnd_entity(
+            {
+                "gnd_id": "118540238",
+                "entity_type": "differentiated person",
+                "preferred_name": "Goethe, Johann Wolfgang von",
+                "variant_names": ["Goethe, J. W. von"],
+                "dates": {"birth": "1749-08-28"},
+                "crosswalks": {"wikidata": "Q5879", "viaf": "24602065"},
+                "subjects": [
+                    {"gnd_id": "4074195-3", "label": "Lyrik"},
+                    {"label": "dropped without an ID"},
+                ],
+            }
+        )
+        self.assertEqual(record["id"], identity("gnd", "entity", "118540238"))
+        self.assertEqual(record["entity_type"], "person")
+        self.assertEqual(
+            record["identifiers"],
+            [identity("wikidata", "item", "Q5879"), identity("viaf", "entity", "24602065")],
+        )
+        self.assertEqual(
+            [(s["type"], s["vocabulary_id"]) for s in record["signals"]],
+            [("gnd_subject", "gnd:4074195-3")],
+        )
+        with self.assertRaises(ProviderAdapterError):
+            normalize_gnd_entity({"gnd_id": "not-a-gnd", "preferred_name": "X"})
+
+
+class HintVocabularyTests(unittest.TestCase):
+    def concordance(self) -> Concordance:
+        return Concordance(
+            (
+                AuthorityTerm(
+                    "topical",
+                    "Alienation (Social psychology)",
+                    {"lcsh": "sh85003435", "gnd": "4014670-1"},
+                    ("Entfremdung",),
+                ),
+                AuthorityTerm("genre_form", "Film noir", {"lcgft": "gf2011026321"}),
+            )
+        )
+
+    def test_exact_resolution_order_never_crosses_term_kinds(self) -> None:
+        vocabulary = self.concordance()
+        # An authority ID resolves before any label, including across languages.
+        by_id = vocabulary.resolve("keyword", "Entfremdung", "https://d-nb.info/gnd/4014670-1")
+        self.assertEqual(by_id.vocabulary_id, "lcsh:sh85003435")
+        self.assertEqual(
+            vocabulary.resolve("keyword", "entfremdung", None).vocabulary_id,
+            "lcsh:sh85003435",
+        )
+        # A topical term never answers a genre/form hint, and vice versa.
+        self.assertIsNone(vocabulary.resolve("genre", "Entfremdung", None))
+        self.assertIsNone(vocabulary.resolve("theme", "Film noir", None))
+        self.assertEqual(
+            vocabulary.resolve("style", "film noir", None).term_kind, "genre_form"
+        )
+        # An unknown authority ID still identifies its own term; a crosswalk hub
+        # such as Wikidata is not an authority vocabulary.
+        unmapped = vocabulary.resolve("genre", "Folk horror", "lcgft:gf2014026363")
+        self.assertEqual((unmapped.term_kind, unmapped.label), ("genre_form", "Folk horror"))
+        self.assertIsNone(normalize_vocabulary_id("wikidata:Q1"))
+        self.assertIsNone(vocabulary.resolve("keyword", "Unmapped label", None))
+
+    def test_reviewed_concordance_artifact_is_closed(self) -> None:
+        shipped = Concordance.load(ROOT / "contracts/artifacts/hint_vocabulary_v1.example.json")
+        self.assertEqual(len(shipped.terms), 2)
+        with tempfile.TemporaryDirectory() as temporary:
+            for document in (
+                {"artifact_type": "other", "format_version": 1, "terms": []},
+                {"artifact_type": "hint_vocabulary_v1", "format_version": 1,
+                 "terms": [{"term_kind": "topical", "label": "A", "ids": {"nope": "1"}}]},
+                {"artifact_type": "hint_vocabulary_v1", "format_version": 1,
+                 "terms": [{"term_kind": "vibe", "label": "A", "ids": {"lcsh": "1"}}]},
+                {"artifact_type": "hint_vocabulary_v1", "format_version": 1,
+                 "terms": [{"term_kind": "topical", "label": "A", "ids": {"lcsh": "1"},
+                            "unknown": True}]},
+            ):
+                path = Path(temporary) / "vocabulary.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaises(HintVocabularyError):
+                    Concordance.load(path)
+        with self.assertRaises(HintVocabularyError):
+            Concordance(
+                (
+                    AuthorityTerm("topical", "A", {"lcsh": "sh1"}),
+                    AuthorityTerm("topical", "B", {"lcsh": "sh1"}),
+                )
+            )
+
+
 class WikidataSignalTests(unittest.TestCase):
     def test_movement_and_genre_profiles_become_vocabulary_signals(self) -> None:
         spec = importlib.util.spec_from_file_location(
@@ -246,15 +404,23 @@ class WikidataSignalTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(module)
         signals = module.profile_signals(
-            {"genres": ["Q130232", "bad"], "movements": ["Q37068"], "classes": ["Q11424"]}
+            {
+                "genres": ["Q130232", "bad"],
+                "movements": ["Q37068"],
+                "main_subjects": ["Q131691"],
+                "classes": ["Q11424"],
+            }
         )
         self.assertEqual(
-            [(s["type"], s["vocabulary_id"], s["metadata"]["property_id"]) for s in signals],
+            [(s["type"], s["family"], s["vocabulary_id"], s["metadata"]["property_id"])
+             for s in signals],
             [
-                ("wikidata_movement", "wikidata:Q37068", "P135"),
-                ("wikidata_genre", "wikidata:Q130232", "P136"),
+                ("wikidata_movement", "movement", "wikidata:Q37068", "P135"),
+                ("wikidata_genre", "genre", "wikidata:Q130232", "P136"),
+                ("wikidata_main_subject", "theme", "wikidata:Q131691", "P921"),
             ],
         )
+        self.assertEqual(module.PROFILE_ITEM_PROPERTIES["P921"], "main_subjects")
 
 
 class ResearchHintBuildTests(unittest.TestCase):
@@ -515,6 +681,104 @@ class ResearchHintBuildTests(unittest.TestCase):
         )
         with self.assertRaises(ResearchHintError):
             build(self.graph_path, self.product_path, self.root / "x.sqlite", manual_path=bad)
+
+    def test_authority_terms_dedupe_multilingual_subjects_without_fuzzy_matching(
+        self,
+    ) -> None:
+        self.graph.ingest(
+            "gnd",
+            [
+                work_record(
+                    "gnd", "entity", "4000001-1",
+                    identifiers=[identity("wikidata", "item", "Q1")],
+                    signals=[concept("Entfremdung", "keyword", "gnd_subject",
+                                     vocabulary_id="gnd:4014670-1")],
+                )
+            ],
+        )
+        self.graph.ingest(
+            "open-library",
+            [
+                work_record(
+                    "open-library", "work", "OL9W",
+                    identifiers=[identity("wikidata", "item", "Q1")],
+                    signals=[concept("Alienation (Social psychology)", "keyword",
+                                     "open_library_subject")],
+                )
+            ],
+        )
+        vocabulary = ROOT / "contracts/artifacts/hint_vocabulary_v1.example.json"
+
+        # Without the concordance the two spellings stay separate leads.
+        plain = self.root / "plain.sqlite"
+        build(self.graph_path, self.product_path, plain)
+        with sqlite3.connect(plain) as connection:
+            self.assertEqual(
+                {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT dedup_key FROM research_hints WHERE semantic_family='keyword'"
+                    )
+                },
+                {"id:gnd:4014670-1", "label:alienation social psychology"},
+            )
+
+        report = build(
+            self.graph_path, self.product_path, self.hints_path, vocabulary_path=vocabulary
+        )
+        self.assertEqual(report["authority_resolved_hints"], 1)
+        hint = self.hints()[("id:lcsh:sh85003435", "concept")]
+        self.assertEqual(hint["independent_origins"], 2)
+        self.assertEqual(hint["quality_class"], "A")
+        self.assertEqual(hint["term_kind"], "topical")
+        self.assertEqual(
+            json.loads(hint["authority_ids_json"]),
+            {"gnd": "4014670-1", "lcsh": "sh85003435", "rameau": "FRBNF11930652"},
+        )
+        self.assertEqual(hint["display_value"], "Alienation (Social psychology)")
+        work = work_hints(self.hints_path, "work-000001")
+        resolved = next(item for item in work["hints"] if item["value"].startswith("Alienation"))
+        # Every provider-native value stays visible to the miner.
+        self.assertEqual(
+            sorted((signal["provider"], signal["raw_value"]) for signal in resolved["signals"]),
+            [("gnd", "Entfremdung"), ("open-library", "Alienation (Social psychology)")],
+        )
+        self.assertIn("lcsh:sh85003435", render_work(work))
+
+    def test_movielens_relevance_is_licence_gated_hint_strength(self) -> None:
+        manual = self.root / "movielens.jsonl"
+        manual.write_text(
+            json.dumps(
+                {
+                    "work_id": "work-000001",
+                    "kind": "concept",
+                    "family": "keyword",
+                    "type": "movielens_tag",
+                    "value": "thought-provoking",
+                    "strength": 0.93,
+                    "metadata": {"dataset": "movielens-tag-genome", "movielens_movie_id": "1"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        gated = build(self.graph_path, self.product_path, self.root / "gated.sqlite",
+                      manual_path=manual)
+        self.assertEqual(gated["skipped_signals"]["license_restricted"]["movielens_tag"], 1)
+
+        build(self.graph_path, self.product_path, self.hints_path, manual_path=manual,
+              allow_restricted=["movielens_tag"])
+        hint = self.hints()[("label:thought provoking", "concept")]
+        self.assertEqual(hint["quality_class"], "D")
+        work = work_hints(self.hints_path, "work-000001")
+        signal = next(
+            signal
+            for item in work["hints"]
+            for signal in item["signals"]
+            if signal["signal_type"] == "movielens_tag"
+        )
+        # Relevance is provider strength only; it never becomes confidence.
+        self.assertEqual((signal["provider"], signal["strength"]), ("movielens", 0.93))
 
     def test_cli_build_and_query(self) -> None:
         script = ROOT / "scripts/research_hints.py"

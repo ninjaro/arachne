@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/hint_vocabulary_v1.schema.json",
+  "title": "Hint authority-vocabulary concordance v1",
+  "description": "Reviewed authority terms and crosswalks used to normalize and deduplicate research hints. It never creates canonical concepts, and genre/form terms stay separate from topical subject terms.",
+  "type": "object",
+  "required": ["artifact_type", "format_version", "terms"],
+  "properties": {
+    "artifact_type": {"const": "hint_vocabulary_v1"},
+    "format_version": {"const": 1},
+    "source": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+    "terms": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": {"$ref": "#/$defs/term"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "term": {
+      "type": "object",
+      "required": ["term_kind", "label", "ids"],
+      "properties": {
+        "term_kind": {"enum": ["genre_form", "topical"]},
+        "label": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"}
+        },
+        "ids": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"enum": ["aat", "gnd", "iconclass", "lcgft", "lcsh", "rameau"]},
+          "additionalProperties": {
+            "$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

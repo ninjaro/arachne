@@ -75,6 +75,7 @@ PROFILE_ITEM_PROPERTIES = {
     "P106": "occupations",
     "P135": "movements",
     "P136": "genres",
+    "P921": "main_subjects",
     "P1412": "languages",
 }
 ORIGINAL_DATE_PROPERTIES = ("P571", "P577", "P1191", "P1619")
@@ -2605,11 +2606,13 @@ def profile_media(value: Mapping[str, Any], family: str) -> list[dict[str, Any]]
 
 # Selected semantic work-profile values become hint-only signals for the
 # separate research-hint artifact; they never become product general facts.
-# Values are QIDs, kept as stable vocabulary IDs. P921 (main subject) is not
-# emitted until testing shows it is a useful mining lead.
+# Values are QIDs, kept as stable vocabulary IDs. P921 (main subject) earns its
+# place as a topical lead: unlike broad P136 genres it names what a work is
+# about, and generic items still fall to negligible research priority.
 WIKIDATA_HINT_PROFILE_FIELDS = (
     ("movements", "movement", "wikidata_movement", "P135"),
     ("genres", "genre", "wikidata_genre", "P136"),
+    ("main_subjects", "theme", "wikidata_main_subject", "P921"),
 )
 
 
