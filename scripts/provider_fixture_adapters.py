@@ -546,11 +546,94 @@ def normalize_musicbrainz_recording(record: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
+# Release statuses whose dates must not compete for a release group's earliest
+# original date. A bootleg or pseudo-release can predate or misdate the work.
+MUSICBRAINZ_DATED_STATUSES = {"official", "promotion"}
+
+
+def _musicbrainz_release_group_facts(
+    record: Mapping[str, Any], release_group: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Derive release-group date and type facts from one release row.
+
+    The release itself stays structural: only its date and its release group's
+    declared type reach the graph, so the materializer can keep the earliest
+    relevant original date without any manifestation entity.
+    """
+
+    facts: list[dict[str, Any]] = []
+    status = record.get("status")
+    dated = not isinstance(status, str) or status.strip().lower() in (
+        MUSICBRAINZ_DATED_STATUSES
+    )
+    if dated:
+        dates = [record.get("date")]
+        events = record.get("release-events", [])
+        if isinstance(events, list):
+            dates.extend(
+                event.get("date") for event in events if isinstance(event, Mapping)
+            )
+        dates.append(release_group.get("first-release-date"))
+        seen: set[str] = set()
+        for value in dates:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip()
+            if value not in seen:
+                seen.add(value)
+                facts.append({"field": "original_date", "value": value})
+    primary_type = release_group.get("primary-type")
+    if isinstance(primary_type, str) and primary_type.strip():
+        facts.append(
+            {
+                "field": "work_type",
+                "value": primary_type.strip().lower().replace(" ", "_"),
+            }
+        )
+    return facts
+
+
+def _musicbrainz_label_credits(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return label credits for a release group from one release row."""
+
+    edges: list[dict[str, Any]] = []
+    label_info = record.get("label-info", [])
+    if not isinstance(label_info, list):
+        return edges
+    seen: set[str] = set()
+    for entry in label_info:
+        label = entry.get("label") if isinstance(entry, Mapping) else None
+        label_id = label.get("id") if isinstance(label, Mapping) else None
+        if not isinstance(label_id, str) or not label_id.strip():
+            continue
+        label_id = label_id.strip()
+        if label_id in seen:
+            continue
+        seen.add(label_id)
+        catalog_number = entry.get("catalog-number")
+        edges.append(
+            {
+                "target": _identity("musicbrainz", "label", label_id),
+                "target_entity_type": "organization",
+                "relation_family": "credit",
+                "relation_type": "record_label",
+                "metadata": {
+                    "catalog_number": (
+                        catalog_number if isinstance(catalog_number, str) else None
+                    )
+                },
+            }
+        )
+    return edges
+
+
 def expand_musicbrainz_release(record: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Recover recording-to-release-group membership from one release row.
+    """Recover release-group topology and dates from one release row.
 
     Release editions are not promoted to product works.  The explicit release
-    group and recording MBIDs instead supply the canonical album/track graph.
+    group and recording MBIDs instead supply the canonical album/track graph,
+    while the release's own date and label credits only sharpen the release
+    group's earliest original date and topology.
     """
 
     record = _record(record, "MusicBrainz release")
@@ -563,6 +646,20 @@ def expand_musicbrainz_release(record: Mapping[str, Any]) -> list[dict[str, Any]
     release_group_id = release_group_id.strip()
 
     result: list[dict[str, Any]] = []
+    facts = _musicbrainz_release_group_facts(record, release_group)
+    edges = _musicbrainz_label_credits(record)
+    if facts or edges:
+        result.append(
+            {
+                "id": _identity("musicbrainz", "release_group", release_group_id),
+                "entity_type": "work",
+                "identifiers": [],
+                "names": [],
+                "facts": facts,
+                "media": [],
+                "edges": edges,
+            }
+        )
     media = record.get("media", [])
     if not isinstance(media, list):
         return result
@@ -1024,6 +1121,113 @@ def normalize_open_library_redirect(record: Mapping[str, Any]) -> dict[str, Any]
     return None
 
 
+GND_ID = re.compile(r"[0-9]{1,12}(?:-[0-9X])?\Z")
+# GND entity kinds Arachne can use. Anything else stays untyped rather than
+# guessing a product entity type.
+GND_ENTITY_TYPES = {
+    "person": "person",
+    "differentiated_person": "person",
+    "corporate_body": "organization",
+    "organization": "organization",
+    "family": "group",
+    "group": "group",
+    "conference_or_event": "organization",
+    "work": "work",
+}
+# Exact crosswalks a GND record may assert. Fuzzy name matching is never used.
+GND_CROSSWALKS = {
+    "wikidata": ("wikidata", "item"),
+    "viaf": ("viaf", "entity"),
+    "isni": ("isni", "entity"),
+    "lcnaf": ("lcnaf", "entity"),
+    "ulan": ("ulan", "entity"),
+}
+
+
+def normalize_gnd_entity(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize one GND authority record kept by the identity resolver.
+
+    GND is an identity and subject-vocabulary bridge. Only records that
+    ``scripts/resolve_gnd_identities.py`` has already tied to a known Arachne
+    entity reach this adapter, so nothing here materializes unrelated authority
+    entities. Subject terms stay hint-only signals with their stable GND IDs.
+    """
+
+    record = _record(record, "GND entity")
+    external_id = _required_text(record.get("gnd_id"), "GND entity.gnd_id")
+    if not GND_ID.fullmatch(external_id):
+        raise ProviderAdapterError("GND entity.gnd_id is invalid")
+    name = _required_text(record.get("preferred_name"), "GND entity.preferred_name")
+    entity_type = record.get("entity_type")
+    if entity_type is not None and not isinstance(entity_type, str):
+        raise ProviderAdapterError("GND entity.entity_type must be a string")
+
+    names: list[dict[str, Any]] = [{"type": "label", "value": name}]
+    variants = record.get("variant_names", [])
+    if isinstance(variants, list):
+        for variant in variants:
+            if isinstance(variant, str) and variant.strip() and variant.strip() != name:
+                names.append({"type": "alias", "value": variant.strip()})
+
+    facts: list[dict[str, Any]] = []
+    dates = record.get("dates")
+    if isinstance(dates, Mapping):
+        for source, field in (("birth", "birth_date"), ("death", "death_date")):
+            value = dates.get(source)
+            if isinstance(value, str) and value.strip():
+                facts.append({"field": field, "value": value.strip()})
+
+    identifiers: list[dict[str, str]] = []
+    crosswalks = record.get("crosswalks")
+    if isinstance(crosswalks, Mapping):
+        for scheme, (provider, namespace) in GND_CROSSWALKS.items():
+            value = crosswalks.get(scheme)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip()
+            if scheme == "wikidata" and not QID.fullmatch(value):
+                raise ProviderAdapterError("GND entity.crosswalks.wikidata is invalid")
+            identifiers.append(_identity(provider, namespace, value))
+
+    signals: list[dict[str, Any]] = []
+    subjects = record.get("subjects", [])
+    if isinstance(subjects, list):
+        for subject in subjects:
+            if not isinstance(subject, Mapping):
+                continue
+            subject_id = subject.get("gnd_id")
+            label = subject.get("label")
+            if not isinstance(label, str) or not label.strip():
+                continue
+            if not isinstance(subject_id, str) or not GND_ID.fullmatch(subject_id):
+                continue
+            signals.append(
+                {
+                    "kind": "concept",
+                    "family": "keyword",
+                    "type": "gnd_subject",
+                    "value": label.strip(),
+                    "vocabulary_id": f"gnd:{subject_id}",
+                }
+            )
+
+    return {
+        "id": _identity("gnd", "entity", external_id),
+        "entity_type": GND_ENTITY_TYPES.get(
+            _stable_token(entity_type, "GND entity.entity_type")
+            if isinstance(entity_type, str) and entity_type.strip()
+            else "unknown",
+            "unknown",
+        ),
+        "identifiers": identifiers,
+        "names": names,
+        "facts": facts,
+        "media": [],
+        "edges": [],
+        "signals": signals,
+    }
+
+
 DISCOGS_DISAMBIGUATION = re.compile(r"\s+\([0-9]+\)\Z")
 DISCOGS_VARIOUS_ARTIST_IDS = {"0", "194"}
 DISCOGS_RELEASED = re.compile(r"([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?\Z")
@@ -1085,6 +1289,108 @@ def _discogs_artist_credits(element: Element) -> list[dict[str, Any]]:
     return edges
 
 
+# Hosts listed on Discogs artist/label pages that are not research leads:
+# Discogs itself, identity crosswalks resolved elsewhere, social profiles,
+# stores, and streaming services. Matching covers subdomains.
+DISCOGS_IGNORED_LEAD_HOSTS = (
+    "amazon.com",
+    "apple.com",
+    "bandcamp.com",
+    "beatport.com",
+    "discogs.com",
+    "facebook.com",
+    "imdb.com",
+    "instagram.com",
+    "junodownload.com",
+    "last.fm",
+    "linktr.ee",
+    "mixcloud.com",
+    "myspace.com",
+    "patreon.com",
+    "soundcloud.com",
+    "spotify.com",
+    "t.me",
+    "tiktok.com",
+    "traxsource.com",
+    "twitter.com",
+    "vimeo.com",
+    "vk.com",
+    "weibo.com",
+    "wikidata.org",
+    "x.com",
+    "youtu.be",
+    "youtube.com",
+)
+# Reference hosts whose pages are typed source leads rather than bare search
+# leads. Everything else stays an untyped search lead.
+DISCOGS_LEAD_HOSTS = {
+    "allmusic.com": "catalogue",
+    "rateyourmusic.com": "catalogue",
+    "wikipedia.org": "article",
+}
+# Discogs pages may list long link collections; hints stay cheap.
+DISCOGS_MAX_URL_LEADS = 8
+
+
+def _discogs_host(value: str) -> str | None:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower().removeprefix("www.")
+    if any(
+        host == ignored or host.endswith(f".{ignored}")
+        for ignored in DISCOGS_IGNORED_LEAD_HOSTS
+    ):
+        return None
+    return host
+
+
+def _discogs_url_leads(element: Element) -> list[dict[str, Any]]:
+    """Keep useful third-party links from one artist or label element.
+
+    A link is a lead only: the page is never fetched here and never becomes
+    evidence. Known reference hosts become typed source leads; any other
+    surviving host stays an untyped search lead for a miner to judge.
+    """
+
+    signals: list[dict[str, Any]] = []
+    urls = element.find("urls")
+    if urls is None:
+        return signals
+    seen: set[str] = set()
+    for item in urls.findall("url"):
+        value = _xml_text(item)
+        if value is None:
+            continue
+        host = _discogs_host(value)
+        if host is None or value in seen:
+            continue
+        seen.add(value)
+        lead_kind = next(
+            (
+                kind
+                for reference, kind in DISCOGS_LEAD_HOSTS.items()
+                if host == reference or host.endswith(f".{reference}")
+            ),
+            None,
+        )
+        metadata: dict[str, Any] = {"host": host}
+        if lead_kind is not None:
+            metadata["lead_kind"] = lead_kind
+        signals.append(
+            {
+                "kind": "source_lead" if lead_kind is not None else "search_lead",
+                "type": "discogs_url",
+                "value": value,
+                "url": value,
+                "metadata": metadata,
+            }
+        )
+        if len(signals) == DISCOGS_MAX_URL_LEADS:
+            break
+    return signals
+
+
 def normalize_discogs_artist(element: Element) -> dict[str, Any]:
     """Normalize one ``<artist>`` element from the Discogs artists dump."""
 
@@ -1130,6 +1436,7 @@ def normalize_discogs_artist(element: Element) -> dict[str, Any]:
         "facts": [],
         "media": [],
         "edges": edges,
+        "signals": _discogs_url_leads(element),
     }
 
 
@@ -1161,6 +1468,7 @@ def normalize_discogs_label(element: Element) -> dict[str, Any]:
         "facts": [],
         "media": [],
         "edges": edges,
+        "signals": _discogs_url_leads(element),
     }
 
 

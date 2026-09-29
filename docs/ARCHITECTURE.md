@@ -96,6 +96,7 @@ falls back to stale bytes.
 | Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
 | Provider observation graph | Ariadne | Disposable normalized provider facts and topology; never canonical state or human evidence |
 | Research hints | Ariadne | Disposable `research_hint_v1` SQLite built from provider signals for under-mined works only; read-only over the product, never evidence and never canonical tags (`docs/RESEARCH_HINTS.md`) |
+| Hint authority vocabulary | Reviewed input | `hint_vocabulary_v1` concordance of authority terms and GND/LCSH/RAMEAU/LCGFT crosswalks; it normalizes and deduplicates research leads only and never creates a concept or assertion |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
 
 Arachne's own `paths.queue` is not an immutable inbox. Fully transferred raw queue

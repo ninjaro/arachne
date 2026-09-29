@@ -33,6 +33,9 @@ CREATE TABLE hint_works (
 
 -- One deduplicated lead per work. Signals with the same exact vocabulary ID,
 -- or the same normalized label when no ID exists, collapse into one hint.
+-- `vocabulary_id` prefers a resolved authority ID; `authority_ids_json` keeps
+-- every crosswalked authority ID for the same term, and `term_kind` keeps
+-- genre/form terms separate from topical subject terms.
 CREATE TABLE research_hints (
     id INTEGER PRIMARY KEY,
     work_id TEXT NOT NULL REFERENCES hint_works(work_id) ON DELETE CASCADE,
@@ -45,6 +48,10 @@ CREATE TABLE research_hints (
     display_value TEXT NOT NULL CHECK (length(display_value) > 0),
     normalized_value TEXT,
     vocabulary_id TEXT,
+    term_kind TEXT CHECK (term_kind IS NULL OR term_kind IN ('genre_form','topical')),
+    authority_ids_json TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(authority_ids_json)
+               AND json_type(authority_ids_json) = 'object'),
     lead_kind TEXT CHECK (lead_kind IS NULL OR lead_kind IN
         ('article','review','interview','catalogue','book','essay','blog',
          'bibliography_entry')),

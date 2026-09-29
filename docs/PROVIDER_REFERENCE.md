@@ -24,6 +24,15 @@ useful leads not otherwise recorded there:
 | [Smithsonian Open Access](https://www.si.edu/openaccess/devtools) | Cross-domain museum and archive records plus eligible media | Published dataset for broad work; keyed API for lookup | Rights vary; distinguish explicitly designated open assets |
 | [Europeana APIs](https://europeana.atlassian.net/wiki/spaces/EF/pages/2462351393/Accessing+the+APIs) | Cross-provider European museum, library, and archive discovery | OAI-PMH/SPARQL where suitable; record APIs for lookup | Aggregated records vary and may duplicate original providers |
 
+Two further sources have reviewed policy records in
+`scripts/provider_policy.py` but deliberately no configured transport door, so
+their acquisition stays out of band and provider-specific:
+
+| Source | Use | Acquisition | Caveat |
+|---|---|---|---|
+| [DNB/GND open data](https://data.dnb.de/opendata/) | Agent identity bridge and controlled subject IDs for hints | Local authority export, resolved only around entities Arachne already knows | Core data is largely CC0; individual concordances may add CC BY attribution |
+| [MovieLens Tag Genome](https://grouplens.org/datasets/movielens/tag-genome-2021/) | Optional film descriptors as licence-gated hints | Manual import of a bounded, relevance-filtered selection | Research/non-commercial; the tag matrix is never published as Arachne data and relevance is hint strength only |
+
 Official dumps, snapshots, OAI-PMH, or event streams are preferable for
 periodic corpus processing; point APIs are for targeted enrichment. Listing a
 source here creates no requirement to implement or activate it.

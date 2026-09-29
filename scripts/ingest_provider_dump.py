@@ -27,6 +27,7 @@ from scripts.provider_fixture_adapters import (
     normalize_discogs_artist,
     normalize_discogs_label,
     normalize_discogs_master,
+    normalize_gnd_entity,
     normalize_imdb_name_basics,
     normalize_imdb_title_aka,
     normalize_imdb_title_basics,
@@ -81,11 +82,17 @@ DISCOGS_ADAPTERS: dict[str, tuple[str, Adapter]] = {
     "masters": ("master", normalize_discogs_master),
     "releases": ("release", expand_discogs_release),
 }
+# GND records reach this ingester only after the identity resolver has bound
+# them to entities Arachne already knows.
+GND_ADAPTERS: dict[str, Adapter] = {
+    "entities": normalize_gnd_entity,
+}
 PROVIDER_KINDS = {
     "imdb": IMDb_ADAPTERS,
     "musicbrainz": MUSICBRAINZ_ADAPTERS,
     "open-library": OPEN_LIBRARY_ADAPTERS,
     "discogs": DISCOGS_ADAPTERS,
+    "gnd": GND_ADAPTERS,
 }
 
 
@@ -93,6 +100,12 @@ def _emit(value: dict[str, Any] | list[dict[str, Any]] | None) -> Iterable[dict[
     if value is None:
         return ()
     return value if isinstance(value, list) else (value,)
+
+
+def _binary_stream(path: Path) -> BinaryIO:
+    if path.suffix == ".gz":
+        return gzip.open(path, "rb")
+    return path.open("rb")
 
 
 def _text_stream(path: Path) -> TextIO:
@@ -178,6 +191,15 @@ def open_library_records(path: Path, kind: str) -> Iterator[dict[str, Any]]:
             yield from _emit(adapter(value))
 
 
+def gnd_records(path: Path, kind: str) -> Iterator[dict[str, Any]]:
+    """Stream the resolver's filtered GND JSONL selection."""
+
+    adapter = GND_ADAPTERS[kind]
+    with _binary_stream(path) as stream:
+        for record in _json_lines(stream, f"GND {kind}"):
+            yield from _emit(adapter(record))
+
+
 def discogs_records(path: Path, kind: str) -> Iterator[dict[str, Any]]:
     """Stream top-level records from a Discogs XML dump in bounded memory."""
 
@@ -222,6 +244,8 @@ def records_for(provider: str, kind: str, path: Path) -> Iterator[dict[str, Any]
         return musicbrainz_records(path, kind)
     if provider == "open-library":
         return open_library_records(path, kind)
+    if provider == "gnd":
+        return gnd_records(path, kind)
     return discogs_records(path, kind)
 
 

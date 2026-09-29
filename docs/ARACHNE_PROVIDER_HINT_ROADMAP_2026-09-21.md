@@ -70,6 +70,11 @@ Relevant code:
 - Bulk provider planner: https://github.com/ninjaro/arachne/blob/master/scripts/optional_bulk_provider_plans.py
 - Wikidata HPC worker: https://github.com/ninjaro/arachne/blob/master/hpc/wikidata/build_external_graph.py
 - Provider graph design: https://github.com/ninjaro/arachne/blob/master/docs/PROVIDER_OBSERVATION_GRAPH.md
+- Research hints: https://github.com/ninjaro/arachne/blob/master/docs/RESEARCH_HINTS.md
+- Hint authority vocabularies: https://github.com/ninjaro/arachne/blob/master/scripts/hint_vocabulary.py
+- GND identity resolver: https://github.com/ninjaro/arachne/blob/master/scripts/resolve_gnd_identities.py
+- Provider plan translation: https://github.com/ninjaro/arachne/blob/master/scripts/translate_provider_plans.py
+- MovieLens hint importer: https://github.com/ninjaro/arachne/blob/master/scripts/import_movielens_tag_hints.py
 
 The major missing provider feature is **operational multi-provider ingestion/orchestration**, not a new candidate/materialization architecture.
 
@@ -346,7 +351,8 @@ Tasks:
 - [x] Emit selected semantic values to the hint artifact, not the product materializer.
 - [x] Give generic `P136` genres negligible priority.
 - [x] Prefer more specific values only when they are useful as mining leads.
-- [ ] Consider `P921` (main subject) later as a hint-only property if testing shows value.
+- [x] Emit `P921` (main subject) as a hint-only topical property; like `P136`,
+      generic items keep negligible research priority.
 - [x] Keep Wikidata references out of canonical evidence; optionally expose them later as source leads.
 
 Wikidata property pages:
@@ -413,7 +419,9 @@ License warning: IMDb public datasets are personal/non-commercial and website sc
 - [x] Add `work` ingestion.
 - [x] Add `label` ingestion if useful for identity/topology.
 - [x] Continue using release rows structurally without materializing manifestations.
-- [ ] Use release data to improve earliest date/topology where useful.
+- [x] Use release data to improve earliest date/topology where useful: release
+      dates, the release group's declared type, and label credits, with bootleg
+      and pseudo-release dates excluded.
 
 #### Open Library
 
@@ -434,7 +442,9 @@ Implement in this order:
 - [x] broad `genres` as low-value hints;
 - [x] releases only as structural/date input where needed, not as product manifestations;
 - [x] derive earliest useful original date for a master/work from release data when it improves precision;
-- [ ] preserve useful third-party URL links as source/search leads when warranted.
+- [x] preserve useful third-party URL links from artist/label pages as
+      source/search leads; Discogs itself, identity crosswalks, social
+      profiles, stores, and streaming services are dropped.
 
 Discogs explicitly distinguishes broad `genre` from `style`, with style functioning roughly as subgenre. This makes `style` more valuable for Arachne hints.
 
@@ -461,7 +471,10 @@ Discogs ────────┘
 
 Tasks:
 
-- [ ] Translate each enabled provider plan through the existing Pheidippides acquisition boundary.
+- [x] Translate each enabled provider plan through the existing Pheidippides
+      acquisition boundary (`scripts/translate_provider_plans.py` drives
+      `arachne fetch plan` per planned provider; a rejected plan is reported
+      and the remaining providers continue).
 - [x] Stream each acquired dump into the same provider observation graph.
 - [x] Make optional-provider failure explicit and non-fatal when the required source succeeded.
 - [x] Materialize only once after all available provider inputs are ingested.
@@ -483,9 +496,11 @@ DNB publishes GND as open dumps under CC0 and also publishes curated mappings be
 
 Tasks:
 
-- [ ] Add GND identity resolver around already-known Arachne entities; do not bulk-materialize millions of unrelated GND entities.
-- [ ] Preserve GND subject IDs in hints when available.
-- [ ] Use GND/LCSH/RAMEAU concordance before fuzzy-string matching multilingual subjects.
+- [x] Add GND identity resolver around already-known Arachne entities; do not bulk-materialize millions of unrelated GND entities.
+- [x] Preserve GND subject IDs in hints when available.
+- [x] Use GND/LCSH/RAMEAU concordance before fuzzy-string matching multilingual
+      subjects. Fuzzy matching remains unimplemented: an unresolved value stays
+      a provider-native hint.
 
 ### Library of Congress / LCGFT
 
@@ -496,8 +511,8 @@ LCGFT is useful because genre/form vocabulary is separate from topical subject v
 
 Tasks:
 
-- [ ] Use LCGFT IDs as normalized hint vocabulary IDs when encountered.
-- [ ] Keep LCSH-like subject hints separate from genre/form hints.
+- [x] Use LCGFT IDs as normalized hint vocabulary IDs when encountered.
+- [x] Keep LCSH-like subject hints separate from genre/form hints.
 
 ### Getty AAT / ULAN
 
@@ -592,10 +607,11 @@ MovieLens Tag Genome is conceptually excellent for hints because it provides mov
 
 However, GroupLens datasets are research/non-commercial and impose redistribution/use conditions. Therefore:
 
-- [ ] keep MovieLens optional and research-only;
-- [ ] never publish its tag matrix as Arachne data;
-- [ ] use only if the project mode is compatible with the license;
-- [ ] treat relevance as hint strength, never Arachne confidence/evidence.
+- [x] keep MovieLens optional and research-only;
+- [x] never publish its tag matrix as Arachne data;
+- [x] use only if the project mode is compatible with the license
+      (`--acknowledge-research-only`, plus the licence-restricted opt-in);
+- [x] treat relevance as hint strength, never Arachne confidence/evidence.
 
 References:
 

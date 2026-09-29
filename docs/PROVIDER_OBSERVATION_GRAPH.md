@@ -25,17 +25,27 @@ The narrow fixture adapters in `scripts/provider_fixture_adapters.py` cover:
   only original or language-tagged akas are kept;
 - MusicBrainz artist, label, recording, release, release-group, and work JSON
   rows, including Wikidata URL crosswalks, artist/writer credits, and
-  recording-to-album membership;
+  recording-to-album membership. A release additionally contributes its own
+  date, its release group's declared type, and its label credits to that
+  release group, so the earliest original date and album topology improve
+  without any manifestation entity; bootleg and pseudo-release dates are
+  excluded;
 - Open Library author, work, edition, and redirect rows, including remote-ID
   crosswalks, authorship, image keys, merged-key identity, and edition dates
   attached to their work (editions never become manifestations);
 - Discogs artist, label, master, and release XML elements. Masters are work
   identities (matching Wikidata P1954); releases only contribute the earliest
-  date and main-release album/single type to their master.
+  date and main-release album/single type to their master. Artist and label
+  pages also contribute their useful third-party links as leads, with Discogs
+  itself, identity crosswalks, social profiles, stores, and streaming services
+  dropped;
+- GND authority records that `scripts/resolve_gnd_identities.py` has already
+  bound to an entity Arachne knows, supplying agent identity crosswalks and
+  hint-only subject terms with their GND IDs.
 
 `scripts/ingest_provider_dump.py` is the streaming entrypoint for the supported
-IMDb TSV, MusicBrainz core JSON archive, Open Library tab/JSON, and Discogs
-XML dump families. Reuse one graph path across calls; only the first call uses
+IMDb TSV, MusicBrainz core JSON archive, Open Library tab/JSON, Discogs XML,
+and resolved GND JSONL dump families. Reuse one graph path across calls; only the first call uses
 `--create`:
 
 ```sh
@@ -79,13 +89,15 @@ rather than accumulating stale rows.
 ## Hint-only signals
 
 `provider_signals` holds semantic provider values that are research leads, not
-general information: IMDb genres, Wikidata P135/P136 values (as
+general information: IMDb genres, Wikidata P135/P136/P921 values (as
 `wikidata:Q…` vocabulary IDs), Open Library subjects, Discogs styles and
-genres, and useful MusicBrainz URL relations (review, interview, biography,
-discography entry, Wikipedia) as source leads. The product materializer never
-reads this table. The separate research-hint builder (`docs/RESEARCH_HINTS.md`)
-is its only consumer. Graphs built before this table existed yield no hints
-and must be rebuilt.
+genres, GND subject terms (as `gnd:…` vocabulary IDs), and useful URL
+relations as leads — MusicBrainz review, interview, biography, discography
+entry, and Wikipedia relations, plus the third-party links Discogs artist and
+label pages list. The product materializer never reads this table. The
+separate research-hint builder (`docs/RESEARCH_HINTS.md`) is its only
+consumer. Graphs built before this table existed yield no hints and must be
+rebuilt.
 
 ## One multi-provider pass
 
@@ -110,6 +122,7 @@ and then builds research hints from the same graph:
 
 Each input is ingested atomically. A failed optional input is recorded in the
 pass report and the pass continues; an input marked `"required": true` aborts
-before materialization. Each ingested provider gets one `provider_sources` row
+before materialization. `--vocabulary` passes the reviewed authority
+concordance to the hint build. Each ingested provider gets one `provider_sources` row
 whose digest covers the sorted `(kind, sha256)` list of its files. Acquisition
 stays behind the Pheidippides boundary; the pass consumes acquired artifacts.

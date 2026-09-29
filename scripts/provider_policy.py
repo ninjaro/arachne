@@ -116,6 +116,34 @@ PROVIDER_POLICIES: dict[str, ProviderPolicy] = {
             "licence before enabling a new field.",
         ),
         ProviderPolicy(
+            "gnd",
+            "official-dump",
+            False,
+            True,
+            "CC0-1.0",
+            "CC0-1.0",
+            True,
+            False,
+            False,
+            "DNB open data. Used as an identity and subject-vocabulary bridge "
+            "around entities Arachne already knows; GND is never bulk-"
+            "materialized. Individual DNB concordances may add CC BY attribution.",
+        ),
+        ProviderPolicy(
+            "movielens",
+            "manual-import",
+            False,
+            True,
+            "GroupLens-Research-NonCommercial",
+            "GroupLens-Research-NonCommercial",
+            False,
+            True,
+            False,
+            "GroupLens research datasets. Research-only and optional: the tag "
+            "matrix is never published as Arachne data, and tag relevance is "
+            "hint strength, never confidence or evidence.",
+        ),
+        ProviderPolicy(
             "manual",
             "manual-import",
             False,
@@ -159,6 +187,15 @@ SIGNAL_POLICIES: dict[str, SignalPolicy] = {
             "CC0-1.0",
             False,
             "P135 movement.",
+        ),
+        SignalPolicy(
+            "wikidata_main_subject",
+            "wikidata",
+            "C",
+            "CC0-1.0",
+            False,
+            "P921 main subject. A hint-only topical lead; broad values fall to "
+            "class E and generic items carry negligible research priority.",
         ),
         SignalPolicy(
             "musicbrainz_url_relation",
@@ -216,6 +253,32 @@ SIGNAL_POLICIES: dict[str, SignalPolicy] = {
             "CC0-1.0",
             False,
             "Master genre: Discogs' deliberately broad top-level classification.",
+        ),
+        SignalPolicy(
+            "discogs_url",
+            "discogs",
+            "C",
+            "CC0-1.0",
+            False,
+            "Third-party link listed on a Discogs artist or label page, kept as "
+            "a cheap source or search lead. The linked page is never ingested.",
+        ),
+        SignalPolicy(
+            "gnd_subject",
+            "gnd",
+            "A",
+            "CC0-1.0",
+            False,
+            "GND subject term with a stable authority ID.",
+        ),
+        SignalPolicy(
+            "movielens_tag",
+            "movielens",
+            "D",
+            "GroupLens-Research-NonCommercial",
+            True,
+            "Tag Genome descriptor. Model-derived relevance is hint strength "
+            "only; research/non-commercial licence, so it is licence-gated.",
         ),
         SignalPolicy(
             "manual_concept",

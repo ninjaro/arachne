@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.hint_vocabulary import HintVocabularyError
 from scripts.ingest_provider_dump import PROVIDER_KINDS, DumpIngestError, records_for
 from scripts.materialize_provider_rebuild import (
     ProviderRebuildError,
@@ -141,6 +142,7 @@ def run_pass(
     *,
     manual_signals: Path | None = None,
     allow_restricted: list[str] | None = None,
+    vocabulary: Path | None = None,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     if graph_path.exists() or graph_path.is_symlink():
@@ -190,6 +192,7 @@ def run_pass(
         hints_path,
         manual_path=manual_signals,
         allow_restricted=allow_restricted or (),
+        vocabulary_path=vocabulary,
     )
     return {
         "format": "provider_pass_report",
@@ -213,6 +216,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--pass-report", type=Path, required=True)
     result.add_argument("--manual-signals", type=Path)
     result.add_argument("--allow-restricted-signal", action="append", default=[])
+    result.add_argument("--vocabulary", type=Path)
     return result
 
 
@@ -234,11 +238,17 @@ def main() -> int:
                 else None
             ),
             allow_restricted=arguments.allow_restricted_signal,
+            vocabulary=(
+                arguments.vocabulary.resolve(strict=True)
+                if arguments.vocabulary
+                else None
+            ),
         )
         write_json_atomic(arguments.pass_report.resolve(strict=False), report)
     except (
         OSError,
         sqlite3.Error,
+        HintVocabularyError,
         ProviderPassError,
         ProviderRebuildError,
         ResearchHintError,

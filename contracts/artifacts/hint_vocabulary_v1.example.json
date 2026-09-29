@@ -1,0 +1,19 @@
+{
+  "artifact_type": "hint_vocabulary_v1",
+  "format_version": 1,
+  "source": "illustrative rows; every identifier must be copied from the published authority file",
+  "terms": [
+    {
+      "term_kind": "genre_form",
+      "label": "Film noir",
+      "aliases": ["Films noirs", "Film Noir"],
+      "ids": {"lcgft": "gf2011026321", "gnd": "4154664-4"}
+    },
+    {
+      "term_kind": "topical",
+      "label": "Alienation (Social psychology)",
+      "aliases": ["Entfremdung", "Aliénation (psychologie sociale)"],
+      "ids": {"lcsh": "sh85003435", "gnd": "4014670-1", "rameau": "FRBNF11930652"}
+    }
+  ]
+}
