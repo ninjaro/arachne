@@ -2608,17 +2608,19 @@ def profile_media(value: Mapping[str, Any], family: str) -> list[dict[str, Any]]
 # separate research-hint artifact; they never become product general facts.
 # Values are QIDs, kept as stable vocabulary IDs. P921 (main subject) earns its
 # place as a topical lead: unlike broad P136 genres it names what a work is
-# about, and generic items still fall to negligible research priority.
+# about, and generic items are suppressed from the hint artifact. A main
+# subject may be a person, place, event, object, or concept, so its provider
+# category stays ``main_subject``; ``theme`` is only the analytical family.
 WIKIDATA_HINT_PROFILE_FIELDS = (
-    ("movements", "movement", "wikidata_movement", "P135"),
-    ("genres", "genre", "wikidata_genre", "P136"),
-    ("main_subjects", "theme", "wikidata_main_subject", "P921"),
+    ("movements", "movement", "movement", "wikidata_movement", "P135"),
+    ("genres", "genre", "genre", "wikidata_genre", "P136"),
+    ("main_subjects", "theme", "main_subject", "wikidata_main_subject", "P921"),
 )
 
 
 def profile_signals(value: Mapping[str, Any]) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
-    for field, family, signal_type, property_id in WIKIDATA_HINT_PROFILE_FIELDS:
+    for field, family, category, signal_type, property_id in WIKIDATA_HINT_PROFILE_FIELDS:
         values = value.get(field)
         if not isinstance(values, list):
             continue
@@ -2626,6 +2628,7 @@ def profile_signals(value: Mapping[str, Any]) -> list[dict[str, Any]]:
             {
                 "kind": "concept",
                 "family": family,
+                "category": category,
                 "type": signal_type,
                 "value": qid,
                 "vocabulary_id": f"wikidata:{qid}",
@@ -2731,16 +2734,14 @@ def emit_graph(
     try:
         graph = ObservationGraph.create(staging)
         graph.ingest("wikidata", wikidata_observation_records(connection))
+        graph.record_source_file(
+            "wikidata",
+            "dump",
+            str(source_snapshot["snapshot_id"]),
+            str(source_snapshot["storage_ref"]),
+            str(source_snapshot["sha256"]),
+        )
         with sqlite3.connect(staging) as output:
-            output.execute(
-                "INSERT INTO provider_sources(provider,snapshot_id,storage_ref,sha256) "
-                "VALUES('wikidata',?,?,?)",
-                (
-                    str(source_snapshot["snapshot_id"]),
-                    str(source_snapshot["storage_ref"]),
-                    str(source_snapshot["sha256"]),
-                ),
-            )
             if output.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise WorkerError("provider observation graph failed integrity_check")
             if output.execute("PRAGMA foreign_key_check").fetchall():
@@ -3069,7 +3070,7 @@ def run(
             "statistics": statistics,
         },
         "output": {
-            "artifact_type": "provider_observation_graph_v1",
+            "artifact_type": "provider_observation_graph",
             "path": str(output),
             "sha256": publication["graph_sha256"],
             "byte_length": publication["graph_bytes"],

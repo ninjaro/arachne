@@ -376,7 +376,7 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         with sqlite3.connect(self.output) as graph:
             self.assertEqual(
                 graph.execute(
-                    "SELECT sha256 FROM provider_sources WHERE provider='wikidata'"
+                    "SELECT sha256 FROM provider_source_files WHERE provider='wikidata'"
                 ).fetchone()[0],
                 digest(self.dump),
             )

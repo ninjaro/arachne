@@ -2,7 +2,8 @@
 """Resolve GND identities around entities Arachne already knows.
 
 GND is an identity and subject-vocabulary bridge, not a corpus. This resolver
-streams a GND authority export, keeps only records that an exact crosswalk ties
+streams the narrow GND JSONL produced from the official DNB export by
+``scripts/convert_gnd_marc.py``, keeps only records that an exact crosswalk ties
 to an entity already present in the product database, and writes just those
 records as an ingestible selection for the shared observation graph. Millions
 of unrelated GND entities are counted and dropped, never materialized.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import sqlite3
@@ -118,6 +120,14 @@ def matches(
     return found
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def resolve(
     product_path: Path, gnd_path: Path, output_path: Path
 ) -> dict[str, Any]:
@@ -172,9 +182,12 @@ def resolve(
         staging.unlink(missing_ok=True)
         raise
 
+    # The selection's digest is what ingestion registers in provider_sources;
+    # this report binds it to the converted input it was selected from.
     return {
         "format": "gnd_identity_resolution_report",
-        "format_version": 1,
+        "source": {"path": str(gnd_path), "sha256": sha256_file(gnd_path)},
+        "output_sha256": sha256_file(output_path),
         "records_read": read,
         "resolved": resolved,
         "skipped_unrelated": skipped,
@@ -189,7 +202,10 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--product", type=Path, required=True)
     result.add_argument(
-        "--gnd", type=Path, required=True, help="GND authority export (JSONL or .gz)"
+        "--gnd",
+        type=Path,
+        required=True,
+        help="narrow GND JSONL from scripts/convert_gnd_marc.py (or .gz)",
     )
     result.add_argument(
         "--output",

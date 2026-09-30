@@ -4,14 +4,14 @@
 -- an input to later selection/materialization; it is neither product state nor
 -- a historical provider archive. Integer cluster IDs are local implementation
 -- details. Exact provider identifiers, rather than those IDs, carry identity.
-PRAGMA user_version = 1;
+--
+-- Latest-only: the schema in the selected repository commit is the supported
+-- schema. A graph built by older code is rebuilt with current adapters, never
+-- migrated, so this file carries no format version.
 
-CREATE TABLE provider_graph_info (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    format_version INTEGER NOT NULL CHECK (format_version = 1)
-) STRICT;
-INSERT INTO provider_graph_info VALUES (1, 1);
-
+-- One logical snapshot per provider. `sha256` binds the provider snapshot to
+-- the sorted `(kind, sha256)` list of every input file recorded below, so a
+-- provider that ships several dump files still has one truthful identity.
 CREATE TABLE provider_sources (
     provider TEXT PRIMARY KEY CHECK (length(provider) > 0),
     snapshot_id TEXT NOT NULL CHECK (length(snapshot_id) > 0),
@@ -19,6 +19,19 @@ CREATE TABLE provider_sources (
     sha256 TEXT NOT NULL CHECK (
         length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'
     )
+) STRICT;
+
+-- Every acquired input file that contributed observations. All files of one
+-- provider must claim the same snapshot_id.
+CREATE TABLE provider_source_files (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL REFERENCES provider_sources(provider) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (length(kind) > 0),
+    storage_ref TEXT NOT NULL CHECK (length(storage_ref) > 0),
+    sha256 TEXT NOT NULL CHECK (
+        length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    UNIQUE (provider, kind, sha256)
 ) STRICT;
 
 CREATE TABLE entity_clusters (
@@ -38,6 +51,9 @@ CREATE TABLE provider_ids (
 ) STRICT;
 CREATE INDEX provider_ids_cluster_idx
 ON provider_ids(cluster_id, provider, namespace, external_id);
+-- Exact lookups of priority IDs and product external IDs without loading the
+-- whole identity table.
+CREATE INDEX provider_ids_external_idx ON provider_ids(external_id);
 
 -- Retain which provider record asserted each exact identity crosswalk even
 -- after the two identifiers have been unified into one cluster.
@@ -145,7 +161,12 @@ ON provider_edges(object_provider_id, relation_family, relation_type);
 -- Hint-only semantic signals and source/search leads. The product materializer
 -- never reads this table: a signal is a research lead for a miner, never a
 -- general fact, a canonical concept, or evidence. It feeds only the separate
--- disposable research-hint artifact (schema/research_hint_v1.sql).
+-- disposable research-hint artifact (schema/research_hint.sql).
+--
+-- `semantic_family` is the analytical family an adapter assigned, while
+-- `provider_category` keeps the provider-native classification it came from
+-- (for example Wikidata `main_subject` analysed as `theme`). A multi-provider
+-- pass persists signals only for subjects that can reach an under-mined work.
 CREATE TABLE provider_signals (
     id INTEGER PRIMARY KEY,
     subject_provider_id INTEGER NOT NULL
@@ -156,6 +177,8 @@ CREATE TABLE provider_signals (
     semantic_family TEXT CHECK (semantic_family IS NULL OR semantic_family IN
         ('genre','style','theme','keyword','motif','trope','phobia','taboo',
          'technique','movement','setting','mood','content_warning')),
+    provider_category TEXT
+        CHECK (provider_category IS NULL OR length(provider_category) > 0),
     signal_type TEXT NOT NULL CHECK (length(signal_type) > 0),
     value TEXT NOT NULL CHECK (length(value) > 0),
     vocabulary_id TEXT CHECK (vocabulary_id IS NULL OR length(vocabulary_id) > 0),
@@ -173,6 +196,7 @@ CREATE UNIQUE INDEX provider_signals_logical_unique ON provider_signals(
     observation_provider,
     signal_kind,
     COALESCE(semantic_family, ''),
+    COALESCE(provider_category, ''),
     signal_type,
     value,
     COALESCE(vocabulary_id, ''),
@@ -242,6 +266,7 @@ SELECT i.cluster_id,
        s.observation_provider,
        s.signal_kind,
        s.semantic_family,
+       s.provider_category,
        s.signal_type,
        s.value,
        s.vocabulary_id,

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ninjaro/arachne/contracts/artifacts/hint_vocabulary.schema.json",
+  "title": "Hint authority-vocabulary concordance",
+  "description": "Reviewed authority terms and crosswalks used to normalize and deduplicate research hints. Latest-only: the shape in the selected commit is the supported shape. Only exact `ids` identify a term; weaker `related_ids` are analytical context and never drive dedup. It never creates canonical concepts, and genre/form terms stay separate from topical subject terms. Larger authority subsets are compiled to the indexed SQLite form instead of growing this document.",
+  "type": "object",
+  "required": ["artifact_type", "terms"],
+  "properties": {
+    "artifact_type": {"const": "hint_vocabulary"},
+    "source": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+    "generic_ids": {
+      "description": "Reviewed non-authority vocabulary IDs (for example Wikidata QIDs) whose hints are broad and suppressed.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*:\\S+$"}
+    },
+    "terms": {
+      "type": "array",
+      "maxItems": 50000,
+      "items": {"$ref": "#/$defs/term"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "scheme": {"enum": ["aat", "gnd", "iconclass", "lcgft", "lcsh", "rameau"]},
+    "term": {
+      "type": "object",
+      "required": ["term_kind", "label", "ids"],
+      "properties": {
+        "term_kind": {"enum": ["genre_form", "topical"]},
+        "label": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"}
+        },
+        "ids": {
+          "description": "Exact crosswalks only.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/scheme"},
+          "additionalProperties": {
+            "$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"
+          }
+        },
+        "related_ids": {
+          "description": "Weaker reviewed mappings; never used to resolve or deduplicate.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["scheme", "id", "match"],
+            "properties": {
+              "scheme": {"$ref": "#/$defs/scheme"},
+              "id": {"$ref": "../schemas/common_v1.schema.json#/$defs/non_empty_string"},
+              "match": {"enum": ["close", "broader", "narrower", "related"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "generic": {
+          "description": "A reviewed broad term: hints resolving to it are suppressed as generic.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -370,7 +370,10 @@ Tasks:
 - [x] Preserve useful URL relations as `source_lead` hints, especially review/interview/biography-like links.
 - [x] Do not ingest the linked page as evidence automatically.
 - [x] Keep URL leads cheap: URL + relation type + MusicBrainz entity ID is sufficient.
-- [x] Treat MusicBrainz user tags/genre associations as optional, license-gated hints.
+- [ ] Treat MusicBrainz user tags/genre associations as optional, license-gated hints.
+      Only the reviewed `musicbrainz_tag` policy record exists; no acquisition
+      or adapter path brings supplementary tag bytes to the hint builder yet
+      (corrected by the 2026-09-29 audit).
 
 Important licensing boundary: MusicBrainz core data is CC0; user tags, including genre associations, are supplementary data under CC BY-NC-SA 3.0.
 
@@ -420,8 +423,9 @@ License warning: IMDb public datasets are personal/non-commercial and website sc
 - [x] Add `label` ingestion if useful for identity/topology.
 - [x] Continue using release rows structurally without materializing manifestations.
 - [x] Use release data to improve earliest date/topology where useful: release
-      dates, the release group's declared type, and label credits, with bootleg
-      and pseudo-release dates excluded.
+      dates and the release group's declared type, from releases with an
+      explicitly accepted status only. Release-specific label credits were
+      removed by the 2026-09-29 audit: they describe an edition, not the work.
 
 #### Open Library
 
@@ -497,6 +501,8 @@ DNB publishes GND as open dumps under CC0 and also publishes curated mappings be
 Tasks:
 
 - [x] Add GND identity resolver around already-known Arachne entities; do not bulk-materialize millions of unrelated GND entities.
+      The official-DNB-to-narrow-shape converter (`scripts/convert_gnd_marc.py`)
+      was missing until the 2026-09-29 audit.
 - [x] Preserve GND subject IDs in hints when available.
 - [x] Use GND/LCSH/RAMEAU concordance before fuzzy-string matching multilingual
       subjects. Fuzzy matching remains unimplemented: an unresolved value stays
@@ -612,6 +618,10 @@ However, GroupLens datasets are research/non-commercial and impose redistributio
 - [x] use only if the project mode is compatible with the license
       (`--acknowledge-research-only`, plus the licence-restricted opt-in);
 - [x] treat relevance as hint strength, never Arachne confidence/evidence.
+
+The implemented importer supports the MovieLens 25M (`ml-25m`) Tag Genome
+layout only, not the Tag Genome 2021 release referenced below (corrected by the
+2026-09-29 audit).
 
 References:
 

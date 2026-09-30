@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.convert_gnd_marc import GndConversionError, convert
 from scripts.ingest_provider_dump import records_for
 from scripts.provider_observation_graph import ObservationGraph
 from scripts.resolve_gnd_identities import GndResolutionError, resolve
@@ -143,6 +144,118 @@ class GndIdentityResolverTests(unittest.TestCase):
             self.assertEqual(
                 product.execute("SELECT count(*) FROM external_ids").fetchone()[0], 2
             )
+
+
+MARC_EXPORT = """<?xml version="1.0" encoding="UTF-8"?>
+<collection xmlns="http://www.loc.gov/MARC21/slim">
+  <record type="Authority">
+    <controlfield tag="001">999999999</controlfield>
+    <datafield tag="024" ind1="7" ind2=" ">
+      <subfield code="a">118540238</subfield><subfield code="2">gnd</subfield>
+    </datafield>
+    <datafield tag="024" ind1="7" ind2=" ">
+      <subfield code="a">Q5879</subfield>
+      <subfield code="0">http://www.wikidata.org/entity/Q5879</subfield>
+      <subfield code="2">wikidata</subfield>
+    </datafield>
+    <datafield tag="024" ind1="7" ind2=" ">
+      <subfield code="a">24602065</subfield><subfield code="2">viaf</subfield>
+    </datafield>
+    <datafield tag="024" ind1="7" ind2=" ">
+      <subfield code="a">x-1</subfield><subfield code="2">orcid</subfield>
+    </datafield>
+    <datafield tag="075" ind1=" " ind2=" ">
+      <subfield code="b">p</subfield><subfield code="2">gndgen</subfield>
+    </datafield>
+    <datafield tag="075" ind1=" " ind2=" ">
+      <subfield code="b">piz</subfield><subfield code="2">gndspec</subfield>
+    </datafield>
+    <datafield tag="100" ind1="1" ind2=" ">
+      <subfield code="a">Goethe, Johann Wolfgang von</subfield>
+    </datafield>
+    <datafield tag="400" ind1="1" ind2=" ">
+      <subfield code="a">Goethe, J. W. von</subfield>
+    </datafield>
+    <datafield tag="548" ind1=" " ind2=" ">
+      <subfield code="a">1749-1832</subfield><subfield code="4">datl</subfield>
+    </datafield>
+    <datafield tag="548" ind1=" " ind2=" ">
+      <subfield code="a">28.08.1749-22.03.1832</subfield><subfield code="4">datx</subfield>
+    </datafield>
+    <datafield tag="550" ind1=" " ind2=" ">
+      <subfield code="0">(DE-588)4074195-3</subfield><subfield code="a">Lyrik</subfield>
+      <subfield code="4">them</subfield>
+    </datafield>
+    <datafield tag="550" ind1=" " ind2=" ">
+      <subfield code="0">(DE-588)4053309-8</subfield><subfield code="a">Schriftsteller</subfield>
+      <subfield code="4">berc</subfield>
+    </datafield>
+  </record>
+  <record type="Authority">
+    <datafield tag="035" ind1=" " ind2=" "><subfield code="a">(DE-588)2000001-2</subfield></datafield>
+    <datafield tag="075" ind1=" " ind2=" ">
+      <subfield code="b">f</subfield><subfield code="2">gndgen</subfield>
+    </datafield>
+    <datafield tag="111" ind1="2" ind2=" "><subfield code="a">Example Congress</subfield></datafield>
+  </record>
+  <record type="Authority">
+    <datafield tag="035" ind1=" " ind2=" "><subfield code="a">(DE-588)4074195-3</subfield></datafield>
+    <datafield tag="075" ind1=" " ind2=" ">
+      <subfield code="b">s</subfield><subfield code="2">gndgen</subfield>
+    </datafield>
+    <datafield tag="150" ind1=" " ind2=" "><subfield code="a">Lyrik</subfield></datafield>
+  </record>
+  <record type="Authority">
+    <datafield tag="035" ind1=" " ind2=" "><subfield code="a">(DE-588)1000000-1</subfield></datafield>
+    <datafield tag="075" ind1=" " ind2=" ">
+      <subfield code="b">p</subfield><subfield code="2">gndgen</subfield>
+    </datafield>
+    <datafield tag="100" ind1="1" ind2=" "><subfield code="a">Müller, Hans</subfield></datafield>
+  </record>
+</collection>
+"""
+
+
+class GndMarcConversionTests(unittest.TestCase):
+    def test_official_marc_records_become_the_narrow_resolver_shape(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="arachne-gnd-marc-") as temporary:
+            root = Path(temporary)
+            export = root / "authorities-gnd.mrc.xml"
+            export.write_text(MARC_EXPORT, encoding="utf-8")
+            output = root / "gnd.jsonl"
+            report = convert(export, output)
+            records = [json.loads(line) for line in output.read_text("utf-8").splitlines()]
+            self.assertEqual(
+                records[0],
+                {
+                    # The GND number, never the local IDN in 001.
+                    "gnd_id": "118540238",
+                    "entity_type": "differentiated_person",
+                    "preferred_name": "Goethe, Johann Wolfgang von",
+                    "variant_names": ["Goethe, J. W. von"],
+                    "dates": {"birth": "1749-08-28", "death": "1832-03-22"},
+                    "crosswalks": {"viaf": "24602065", "wikidata": "Q5879"},
+                    "subjects": [{"gnd_id": "4074195-3", "label": "Lyrik"}],
+                },
+            )
+            # A conference keeps its provider-native type; the adapter leaves
+            # it unknown. An undifferentiated person is never typed person.
+            self.assertEqual(
+                [(record["gnd_id"], record["entity_type"]) for record in records[1:]],
+                [("2000001-2", "conference_or_event"), ("1000000-1", "person_other")],
+            )
+            self.assertEqual(report["counts"]["dropped_subject_heading"], 1)
+            self.assertEqual(report["counts"]["unmapped_crosswalk:orcid"], 1)
+            self.assertEqual(report["counts"]["unconverted_relation:550:berc"], 1)
+            self.assertEqual(report["counts"]["records_read"], 4)
+
+            adapted = list(records_for("gnd", "entities", output))
+            self.assertEqual(
+                [record["entity_type"] for record in adapted],
+                ["person", "unknown", "unknown"],
+            )
+            with self.assertRaises(GndConversionError):
+                convert(export, output)
 
 
 if __name__ == "__main__":

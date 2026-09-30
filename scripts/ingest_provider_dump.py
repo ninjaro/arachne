@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
-"""Stream one supported foreign dump family into a provider observation graph."""
+"""Stream one supported foreign dump family into a provider observation graph.
+
+Every ingested file is registered with its provider snapshot and SHA-256, so
+signals and facts can always name the exact bytes that produced them.
+
+Detection and persistence are separate. ``--signals none`` stores general
+information only and counts hint-only signals; a second scan with
+``--signals-only-for PRODUCT`` stores just the signals whose subject can reach
+an under-mined work of that product snapshot.
+"""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import gzip
+import hashlib
 import json
+import sqlite3
 import sys
 import tarfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -43,6 +54,7 @@ from scripts.provider_fixture_adapters import (
     normalize_open_library_work,
 )
 from scripts.provider_observation_graph import ObservationGraph, ObservationGraphError
+from scripts.research_hints import ResearchHintError, relevant_signal_subjects
 
 
 class DumpIngestError(RuntimeError):
@@ -94,6 +106,31 @@ PROVIDER_KINDS = {
     "discogs": DISCOGS_ADAPTERS,
     "gnd": GND_ADAPTERS,
 }
+
+
+# Dump families whose adapters can emit hint-only signals. Only these are
+# rescanned by the signal pass of a multi-provider run.
+SIGNAL_INPUTS = {
+    ("imdb", "title-basics"),
+    ("musicbrainz", "artist"),
+    ("musicbrainz", "label"),
+    ("musicbrainz", "recording"),
+    ("musicbrainz", "release-group"),
+    ("musicbrainz", "work"),
+    ("open-library", "works"),
+    ("discogs", "artists"),
+    ("discogs", "labels"),
+    ("discogs", "masters"),
+    ("gnd", "entities"),
+}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _emit(value: dict[str, Any] | list[dict[str, Any]] | None) -> Iterable[dict[str, Any]]:
@@ -258,6 +295,25 @@ def parser() -> argparse.ArgumentParser:
         "--provider", choices=tuple(PROVIDER_KINDS), required=True
     )
     result.add_argument("--kind", required=True)
+    result.add_argument(
+        "--snapshot-id",
+        required=True,
+        help="provider snapshot the input belongs to (for example the dump date)",
+    )
+    signals = result.add_mutually_exclusive_group()
+    signals.add_argument(
+        "--signals",
+        choices=("all", "none"),
+        default="all",
+        help="store every hint-only signal, or count and drop them (general pass)",
+    )
+    signals.add_argument(
+        "--signals-only-for",
+        type=Path,
+        metavar="PRODUCT",
+        help="signal pass: store only signals that can reach an under-mined work "
+        "of this product snapshot; general observations are not re-ingested",
+    )
     return result
 
 
@@ -269,23 +325,48 @@ def main() -> int:
             raise DumpIngestError("input must be a regular non-symlink file")
         records = records_for(arguments.provider, arguments.kind, path)
         graph_path = arguments.graph.resolve(strict=False)
-        graph = (
-            ObservationGraph.create(graph_path)
-            if arguments.create
-            else ObservationGraph(graph_path)
+        if arguments.signals_only_for is not None:
+            if arguments.create:
+                raise DumpIngestError("a signal pass needs an existing general graph")
+            graph = ObservationGraph(graph_path)
+            relevant = relevant_signal_subjects(
+                graph_path, arguments.signals_only_for.resolve(strict=True)
+            )
+            stats = graph.ingest_signals(arguments.provider, records, relevant)
+        else:
+            graph = (
+                ObservationGraph.create(graph_path)
+                if arguments.create
+                else ObservationGraph(graph_path)
+            )
+            stats = graph.ingest(
+                arguments.provider, records, signals=arguments.signals == "all"
+            )
+        graph.record_source_file(
+            arguments.provider,
+            arguments.kind,
+            arguments.snapshot_id,
+            path.name,
+            sha256_file(path),
         )
-        graph.ingest(arguments.provider, records)
         counts = graph.counts()
     except (
         OSError,
+        sqlite3.Error,
         tarfile.TarError,
         ProviderAdapterError,
         ObservationGraphError,
         DumpIngestError,
+        ResearchHintError,
     ) as error:
         print(f"ingest_provider_dump: {error}", file=sys.stderr)
         return 2
-    print(json.dumps({"provider": arguments.provider, "counts": counts}, sort_keys=True))
+    print(
+        json.dumps(
+            {"provider": arguments.provider, "ingest": stats, "counts": counts},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

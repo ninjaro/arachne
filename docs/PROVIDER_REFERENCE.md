@@ -30,8 +30,8 @@ their acquisition stays out of band and provider-specific:
 
 | Source | Use | Acquisition | Caveat |
 |---|---|---|---|
-| [DNB/GND open data](https://data.dnb.de/opendata/) | Agent identity bridge and controlled subject IDs for hints | Local authority export, resolved only around entities Arachne already knows | Core data is largely CC0; individual concordances may add CC BY attribution |
-| [MovieLens Tag Genome](https://grouplens.org/datasets/movielens/tag-genome-2021/) | Optional film descriptors as licence-gated hints | Manual import of a bounded, relevance-filtered selection | Research/non-commercial; the tag matrix is never published as Arachne data and relevance is hint strength only |
+| [DNB/GND open data](https://data.dnb.de/opendata/) | Agent identity bridge and controlled subject IDs for hints | Official MARC 21 Authority (MARC-XML) export, converted by `scripts/convert_gnd_marc.py` and resolved only around entities Arachne already knows | Core data is largely CC0; individual concordances may add CC BY attribution; re-check the converter's MARC tables against current DNB documentation |
+| [MovieLens 25M](https://grouplens.org/datasets/movielens/25m/) (`ml-25m`) | Optional film descriptors from its Tag Genome (`genome-tags.csv`, `genome-scores.csv`) as licence-gated hints | Manual import of a verified distribution, bounded top-K per known film | Research/non-commercial; the tag matrix is never published as Arachne data and relevance is hint strength only. Tag Genome 2021 is a different, unsupported layout |
 
 Official dumps, snapshots, OAI-PMH, or event streams are preferable for
 periodic corpus processing; point APIs are for targeted enrichment. Listing a

@@ -16,11 +16,15 @@ from scripts.hint_vocabulary import (
     AuthorityTerm,
     Concordance,
     HintVocabularyError,
+    SqliteConcordance,
+    compile_vocabulary,
+    load_concordance,
     normalize_vocabulary_id,
 )
 from scripts.provider_fixture_adapters import (
     expand_discogs_release,
     expand_musicbrainz_release,
+    musicbrainz_release_labels,
     expand_open_library_edition,
     normalize_discogs_artist,
     normalize_discogs_label,
@@ -272,18 +276,22 @@ class SignalAdapterTests(unittest.TestCase):
         )
         self.assertEqual(label["signals"][0]["metadata"]["lead_kind"], "catalogue")
 
-    def test_musicbrainz_releases_sharpen_dates_and_label_topology(self) -> None:
-        records = expand_musicbrainz_release(
-            {
-                "id": "release-1",
-                "status": "Official",
-                "date": "1980-06-21",
-                "release-events": [{"date": "1979-11"}],
-                "release-group": {"id": "rg1", "primary-type": "Album"},
-                "label-info": [{"label": {"id": "l1"}, "catalog-number": "X-1"}],
-                "media": [],
-            }
-        )
+    def test_musicbrainz_releases_sharpen_dates_without_edition_labels(self) -> None:
+        release = {
+            "id": "release-1",
+            "status": "Official",
+            "date": "1980-06-21",
+            "release-events": [{"date": "1979-11"}],
+            "release-group": {
+                "id": "rg1",
+                "primary-type": "Album",
+                # The aggregate may include excluded statuses; never copied.
+                "first-release-date": "1970",
+            },
+            "label-info": [{"label": {"id": "l1"}, "catalog-number": "X-1"}],
+            "media": [],
+        }
+        records = expand_musicbrainz_release(release)
         self.assertEqual(records[0]["id"], identity("musicbrainz", "release_group", "rg1"))
         self.assertEqual(
             records[0]["facts"],
@@ -293,15 +301,26 @@ class SignalAdapterTests(unittest.TestCase):
                 {"field": "work_type", "value": "album"},
             ],
         )
-        self.assertEqual(records[0]["edges"][0]["relation_type"], "record_label")
-        # A bootleg's date must not compete for the earliest original date.
+        # Release-specific labels never become release-group (work) credits.
+        self.assertEqual(records[0]["edges"], [])
+        self.assertEqual(records[0]["unpersisted"], ["release_label"])
         self.assertEqual(
-            expand_musicbrainz_release(
-                {"id": "r2", "status": "Bootleg", "date": "1970",
-                 "release-group": {"id": "rg1"}}
-            ),
-            [],
+            musicbrainz_release_labels(release),
+            [{"label_id": "l1", "catalog_number": "X-1"}],
         )
+        # Bootleg, unknown, and missing statuses are fail-closed: no dates.
+        for status in ("Bootleg", "Pseudo-Release", None, 7):
+            dated = expand_musicbrainz_release(
+                {"id": "r2", "status": status, "date": "1970",
+                 "release-group": {"id": "rg1"}}
+            )
+            self.assertEqual([record["facts"] for record in dated], [[]])
+            self.assertEqual(dated[0]["unpersisted"], ["excluded_status_release_date"])
+        group = normalize_musicbrainz_release_group(
+            {"id": "rg1", "title": "Album", "first-release-date": "1970"}
+        )
+        self.assertNotIn("original_date", {fact["field"] for fact in group["facts"]})
+        self.assertEqual(group["unpersisted"], ["first_release_date"])
 
     def test_gnd_records_bridge_identity_and_keep_subject_ids(self) -> None:
         record = normalize_gnd_entity(
@@ -330,6 +349,14 @@ class SignalAdapterTests(unittest.TestCase):
         )
         with self.assertRaises(ProviderAdapterError):
             normalize_gnd_entity({"gnd_id": "not-a-gnd", "preferred_name": "X"})
+        # Types the product cannot represent safely stay unknown.
+        for native in ("conference_or_event", "family", "person_other", "place"):
+            self.assertEqual(
+                normalize_gnd_entity(
+                    {"gnd_id": "1234", "entity_type": native, "preferred_name": "X"}
+                )["entity_type"],
+                "unknown",
+            )
 
 
 class HintVocabularyTests(unittest.TestCase):
@@ -369,18 +396,36 @@ class HintVocabularyTests(unittest.TestCase):
         self.assertIsNone(vocabulary.resolve("keyword", "Unmapped label", None))
 
     def test_reviewed_concordance_artifact_is_closed(self) -> None:
-        shipped = Concordance.load(ROOT / "contracts/artifacts/hint_vocabulary_v1.example.json")
-        self.assertEqual(len(shipped.terms), 2)
+        shipped = Concordance.load(ROOT / "contracts/artifacts/hint_vocabulary.example.json")
+        self.assertEqual(len(shipped.terms), 3)
+        self.assertEqual(shipped.generic_ids, frozenset({"wikidata:Q11424"}))
+        # A weaker mapping is context only: the AAT ID identifies its own term,
+        # never the concordance term it is only related to.
+        self.assertEqual(
+            shipped.resolve("keyword", "x", "aat:300055520").vocabulary_ids,
+            {"aat": "300055520"},
+        )
+        self.assertEqual(
+            shipped.resolve("keyword", "Entfremdung", None).related_ids,
+            [{"scheme": "aat", "id": "300055520", "match": "related"}],
+        )
         with tempfile.TemporaryDirectory() as temporary:
             for document in (
-                {"artifact_type": "other", "format_version": 1, "terms": []},
-                {"artifact_type": "hint_vocabulary_v1", "format_version": 1,
+                {"artifact_type": "other", "terms": []},
+                # Latest-only: an old versioned document is rebuilt, not read.
+                {"artifact_type": "hint_vocabulary_v1", "format_version": 1, "terms": []},
+                {"artifact_type": "hint_vocabulary", "format_version": 1, "terms": []},
+                {"artifact_type": "hint_vocabulary",
                  "terms": [{"term_kind": "topical", "label": "A", "ids": {"nope": "1"}}]},
-                {"artifact_type": "hint_vocabulary_v1", "format_version": 1,
+                {"artifact_type": "hint_vocabulary",
                  "terms": [{"term_kind": "vibe", "label": "A", "ids": {"lcsh": "1"}}]},
-                {"artifact_type": "hint_vocabulary_v1", "format_version": 1,
+                {"artifact_type": "hint_vocabulary",
                  "terms": [{"term_kind": "topical", "label": "A", "ids": {"lcsh": "1"},
                             "unknown": True}]},
+                {"artifact_type": "hint_vocabulary",
+                 "terms": [{"term_kind": "topical", "label": "A", "ids": {"lcsh": "1"},
+                            "related_ids": [{"scheme": "gnd", "id": "2",
+                                             "match": "exact"}]}]},
             ):
                 path = Path(temporary) / "vocabulary.json"
                 path.write_text(json.dumps(document), encoding="utf-8")
@@ -412,12 +457,14 @@ class WikidataSignalTests(unittest.TestCase):
             }
         )
         self.assertEqual(
-            [(s["type"], s["family"], s["vocabulary_id"], s["metadata"]["property_id"])
-             for s in signals],
+            [(s["type"], s["family"], s["category"], s["vocabulary_id"],
+              s["metadata"]["property_id"]) for s in signals],
             [
-                ("wikidata_movement", "movement", "wikidata:Q37068", "P135"),
-                ("wikidata_genre", "genre", "wikidata:Q130232", "P136"),
-                ("wikidata_main_subject", "theme", "wikidata:Q131691", "P921"),
+                ("wikidata_movement", "movement", "movement", "wikidata:Q37068", "P135"),
+                ("wikidata_genre", "genre", "genre", "wikidata:Q130232", "P136"),
+                # P921 keeps its provider-native category; theme is analytical.
+                ("wikidata_main_subject", "theme", "main_subject", "wikidata:Q131691",
+                 "P921"),
             ],
         )
         self.assertEqual(module.PROFILE_ITEM_PROPERTIES["P921"], "main_subjects")
@@ -584,20 +631,36 @@ class ResearchHintBuildTests(unittest.TestCase):
         self.assertNotIn(("label:agent only", "concept"), hints)
 
         post_punk = hints[("label:post punk", "concept")]
-        drama = hints[("label:drama", "concept")]
-        generic_qid = hints[("id:wikidata:Q130232", "concept")]
-        rock = hints[("label:rock", "concept")]
         movement = hints[("id:wikidata:Q37068", "concept")]
         # Discogs style and a differently-spelled IMDb value dedupe into one
         # hint whose independent provider origins raise its priority.
         self.assertEqual(post_punk["independent_origins"], 2)
-        self.assertEqual(post_punk["quality_class"], "B")
+        self.assertEqual(post_punk["assignment_quality"], "B")
+        self.assertEqual(post_punk["resolution_quality"], "unresolved")
         self.assertEqual(post_punk["display_value"], "Post-Punk")
-        for generic in (drama, generic_qid, rock):
-            self.assertEqual(generic["quality_class"], "E")
-            self.assertEqual(generic["specificity"], 0.05)
-            self.assertLess(generic["research_priority"] * 50, post_punk["research_priority"])
-        self.assertGreater(movement["research_priority"], generic_qid["research_priority"])
+        self.assertEqual(movement["assignment_quality"], "B")
+        # Generic (class E) hints are detected and counted, not persisted.
+        for key in ("label:drama", "id:wikidata:Q130232", "label:rock"):
+            self.assertNotIn((key, "concept"), hints)
+        self.assertEqual(report["suppressed"]["suppressed_generic_hints"], 3)
+        self.assertEqual(
+            report["suppressed"]["suppressed_generic_signals"],
+            {"discogs_genre": 1, "imdb_genre": 1, "wikidata_genre": 1},
+        )
+        # Every provider-native observation behind a merged hint stays auditable.
+        with sqlite3.connect(self.hints_path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT s.provider,s.raw_value,s.raw_semantic_family,s.semantic_family,"
+                    "s.assignment_quality,s.resolution_basis,s.source_snapshot "
+                    "FROM research_hint_signals s JOIN research_hints h ON h.id=s.hint_id "
+                    "WHERE h.dedup_key='label:post punk' ORDER BY s.provider"
+                ).fetchall(),
+                [
+                    ("discogs", "Post-Punk", "style", "style", "B", "normalized_label", None),
+                    ("imdb", "post punk", "style", "style", "E", "normalized_label", None),
+                ],
+            )
         # The work already has an evidence-backed genre, so a genre gap is smaller.
         work = work_hints(self.hints_path, "work-000001")
         self.assertEqual(work["evidence_backed_tag_count"], 1)
@@ -612,6 +675,17 @@ class ResearchHintBuildTests(unittest.TestCase):
         self.assertEqual([row["work_id"] for row in work_queue(self.hints_path)], ["work-000001"])
         with self.assertRaises(ResearchHintError):
             work_hints(self.hints_path, "work-000002")
+
+    def test_generic_hints_can_be_kept_explicitly_at_negligible_priority(self) -> None:
+        report = build(self.graph_path, self.product_path, self.hints_path, keep_generic=True)
+        self.assertEqual(report["suppressed"]["suppressed_generic_hints"], 0)
+        hints = self.hints()
+        post_punk = hints[("label:post punk", "concept")]
+        for key in ("label:drama", "id:wikidata:Q130232", "label:rock"):
+            generic = hints[(key, "concept")]
+            self.assertEqual(generic["assignment_quality"], "E")
+            self.assertEqual(generic["specificity"], 0.05)
+            self.assertLess(generic["research_priority"] * 50, post_punk["research_priority"])
 
     def test_restricted_opt_in_is_explicit_and_rebuild_is_deterministic(self) -> None:
         with self.assertRaises(ResearchHintError):
@@ -666,7 +740,7 @@ class ResearchHintBuildTests(unittest.TestCase):
         hints = self.hints()
         self.assertEqual(hints[("label:post punk", "concept")]["independent_origins"], 2)
         guide = hints[("label:graphic violence", "content_signal")]
-        self.assertEqual(guide["quality_class"], "B")
+        self.assertEqual(guide["assignment_quality"], "B")
         self.assertIn(
             {"kind": "manual_signal_not_under_mined", "work_id": "work-000002", "line": 2},
             report["issues"],
@@ -707,7 +781,7 @@ class ResearchHintBuildTests(unittest.TestCase):
                 )
             ],
         )
-        vocabulary = ROOT / "contracts/artifacts/hint_vocabulary_v1.example.json"
+        vocabulary = ROOT / "contracts/artifacts/hint_vocabulary.example.json"
 
         # Without the concordance the two spellings stay separate leads.
         plain = self.root / "plain.sqlite"
@@ -729,7 +803,10 @@ class ResearchHintBuildTests(unittest.TestCase):
         self.assertEqual(report["authority_resolved_hints"], 1)
         hint = self.hints()[("id:lcsh:sh85003435", "concept")]
         self.assertEqual(hint["independent_origins"], 2)
-        self.assertEqual(hint["quality_class"], "A")
+        # GND's own assignment is class A by policy; the Open Library subject
+        # stays class C even though its term resolved exactly.
+        self.assertEqual(hint["assignment_quality"], "A")
+        self.assertEqual(hint["resolution_quality"], "reviewed_crosswalk")
         self.assertEqual(hint["term_kind"], "topical")
         self.assertEqual(
             json.loads(hint["authority_ids_json"]),
@@ -738,12 +815,173 @@ class ResearchHintBuildTests(unittest.TestCase):
         self.assertEqual(hint["display_value"], "Alienation (Social psychology)")
         work = work_hints(self.hints_path, "work-000001")
         resolved = next(item for item in work["hints"] if item["value"].startswith("Alienation"))
-        # Every provider-native value stays visible to the miner.
+        # Every provider-native value stays visible to the miner, with how it
+        # was resolved and which snapshot produced it.
         self.assertEqual(
-            sorted((signal["provider"], signal["raw_value"]) for signal in resolved["signals"]),
-            [("gnd", "Entfremdung"), ("open-library", "Alienation (Social psychology)")],
+            sorted(
+                (
+                    signal["provider"],
+                    signal["raw_value"],
+                    signal["raw_vocabulary_id"],
+                    signal["assignment_quality"],
+                    signal["resolution_basis"],
+                )
+                for signal in resolved["signals"]
+            ),
+            [
+                ("gnd", "Entfremdung", "gnd:4014670-1", "A", "reviewed_crosswalk"),
+                ("open-library", "Alienation (Social psychology)", None, "C",
+                 "concordance_label"),
+            ],
         )
-        self.assertIn("lcsh:sh85003435", render_work(work))
+        self.assertEqual(
+            resolved["related_authority_ids"],
+            [{"scheme": "aat", "id": "300055520", "match": "related"}],
+        )
+        text = render_work(work)
+        self.assertIn("lcsh:sh85003435", text)
+        self.assertIn("gnd:4014670-1", text)
+
+    def test_generic_suppression_applies_after_authority_resolution(self) -> None:
+        self.graph.ingest(
+            "discogs",
+            [
+                work_record(
+                    "discogs", "master", "42",
+                    signals=[
+                        # An alias of a reviewed generic term, and a raw ID of it.
+                        concept("Komödie", "style", "discogs_style"),
+                        concept("Lustspiel", "style", "discogs_style",
+                                vocabulary_id="lcgft:gf2011026147"),
+                    ],
+                )
+            ],
+        )
+        self.graph.ingest(
+            "wikidata",
+            [
+                work_record(
+                    "wikidata", "item", "Q1",
+                    signals=[concept("Q11424", "theme", "wikidata_main_subject",
+                                     vocabulary_id="wikidata:Q11424")],
+                )
+            ],
+        )
+        plain = self.root / "plain.sqlite"
+        build(self.graph_path, self.product_path, plain)
+        with sqlite3.connect(plain) as connection:
+            kept = {row[0] for row in connection.execute("SELECT dedup_key FROM research_hints")}
+        self.assertIn("label:komödie", kept)
+        self.assertIn("id:wikidata:Q11424", kept)
+
+        vocabulary = ROOT / "contracts/artifacts/hint_vocabulary.example.json"
+        report = build(
+            self.graph_path, self.product_path, self.hints_path, vocabulary_path=vocabulary
+        )
+        hints = self.hints()
+        for key in ("id:lcgft:gf2011026147", "id:wikidata:Q11424", "label:komödie"):
+            self.assertNotIn((key, "concept"), hints)
+        self.assertEqual(report["suppressed"]["suppressed_generic_hints"], 5)
+
+    def test_prolific_agent_leads_attach_to_a_bounded_number_of_works(self) -> None:
+        with sqlite3.connect(self.product_path) as product:
+            product.execute("INSERT INTO entities VALUES('work-000003', 'work')")
+            product.execute("INSERT INTO works(entity_id,medium) VALUES('work-000003','album')")
+            product.execute(
+                "INSERT INTO external_ids(entity_id,scheme,value) "
+                "VALUES('work-000003','wikidata','Q4')"
+            )
+        self.graph.ingest(
+            "wikidata",
+            [
+                work_record(
+                    "wikidata", "item", "Q4",
+                    edges=[
+                        {
+                            "target": identity("wikidata", "item", "Q50"),
+                            "target_entity_type": "person",
+                            "relation_family": "credit",
+                            "relation_type": "performer",
+                        }
+                    ],
+                )
+            ],
+        )
+        report = build(self.graph_path, self.product_path, self.hints_path, max_agent_works=1)
+        self.assertEqual(report["suppressed"]["capped_credited_agent_attachments"], 1)
+        leads = [
+            (row["work_id"], row["hint_kind"])
+            for row in self.hints().values()
+            if row["hint_kind"] == "source_lead"
+        ]
+        # The neediest work (no evidence-backed tags yet) keeps the lead.
+        self.assertEqual(leads, [("work-000003", "source_lead")])
+
+    def test_compiled_sqlite_concordance_matches_the_json_form(self) -> None:
+        document = json.loads(
+            (ROOT / "contracts/artifacts/hint_vocabulary.example.json").read_text("utf-8")
+        )
+        terms = self.root / "terms.jsonl"
+        terms.write_text(
+            "".join(json.dumps(term) + "\n" for term in document["terms"])
+            + "".join(
+                json.dumps({"generic_id": value}) + "\n" for value in document["generic_ids"]
+            ),
+            encoding="utf-8",
+        )
+        compiled = self.root / "vocabulary.sqlite"
+        report = compile_vocabulary(terms, compiled, source="test")
+        self.assertEqual((report["terms"], report["generic_ids"]), (3, 1))
+        indexed = load_concordance(compiled)
+        self.assertIsInstance(indexed, SqliteConcordance)
+        try:
+            shipped = Concordance.load(ROOT / "contracts/artifacts/hint_vocabulary.example.json")
+            for family, label, vocabulary_id in (
+                ("keyword", "Entfremdung", None),
+                ("keyword", "x", "https://d-nb.info/gnd/4014670-1"),
+                ("style", "films noirs", None),
+                ("genre", "Entfremdung", None),
+                ("genre", "Folk horror", "lcgft:gf2014026363"),
+            ):
+                results = [
+                    vocabulary.resolve_with_basis(family, label, vocabulary_id)
+                    for vocabulary in (indexed, shipped)
+                ]
+                self.assertEqual(
+                    *[
+                        None
+                        if term is None
+                        else (term.term_kind, term.label, dict(term.ids), term.related,
+                              term.generic, basis)
+                        for term, basis in results
+                    ]
+                )
+            self.assertEqual(indexed.generic_ids, shipped.generic_ids)
+        finally:
+            indexed.close()
+        duplicate = self.root / "duplicate.jsonl"
+        duplicate.write_text(
+            json.dumps({"term_kind": "topical", "label": "A", "ids": {"lcsh": "sh1"}}) + "\n"
+            + json.dumps({"term_kind": "topical", "label": "B", "ids": {"lcsh": "sh1"}}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(HintVocabularyError):
+            compile_vocabulary(duplicate, self.root / "duplicate.sqlite")
+        self.assertFalse((self.root / "duplicate.sqlite").exists())
+        # A build accepts the compiled form exactly like the JSON form.
+        self.graph.ingest(
+            "gnd",
+            [
+                work_record(
+                    "gnd", "entity", "4000001-1",
+                    identifiers=[identity("wikidata", "item", "Q1")],
+                    signals=[concept("Entfremdung", "keyword", "gnd_subject",
+                                     vocabulary_id="gnd:4014670-1")],
+                )
+            ],
+        )
+        build(self.graph_path, self.product_path, self.hints_path, vocabulary_path=compiled)
+        self.assertIn(("id:lcsh:sh85003435", "concept"), self.hints())
 
     def test_movielens_relevance_is_licence_gated_hint_strength(self) -> None:
         manual = self.root / "movielens.jsonl"
@@ -769,7 +1007,7 @@ class ResearchHintBuildTests(unittest.TestCase):
         build(self.graph_path, self.product_path, self.hints_path, manual_path=manual,
               allow_restricted=["movielens_tag"])
         hint = self.hints()[("label:thought provoking", "concept")]
-        self.assertEqual(hint["quality_class"], "D")
+        self.assertEqual(hint["assignment_quality"], "D")
         work = work_hints(self.hints_path, "work-000001")
         signal = next(
             signal
@@ -798,98 +1036,161 @@ class ResearchHintBuildTests(unittest.TestCase):
 
 
 class ProviderPassTests(unittest.TestCase):
-    def test_one_graph_one_materialization_with_non_fatal_optional_failure(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="arachne-pass-") as temporary:
-            root = Path(temporary)
-            base = root / "wikidata.sqlite"
-            ObservationGraph.create(base).ingest(
-                "wikidata",
-                [
-                    work_record(
-                        "wikidata", "item", "Q1",
-                        identifiers=[identity("discogs", "master", "42")],
-                        edges=[
-                            {
-                                "target": identity("wikidata", "item", "Q9"),
-                                "target_entity_type": "person",
-                                "relation_family": "credit",
-                                "relation_type": "performer",
-                            }
-                        ],
-                    )
-                ],
-            )
-            with sqlite3.connect(base) as connection:
-                connection.execute(
-                    "INSERT INTO provider_sources VALUES('wikidata','2026-09-01','wd',?)",
-                    ("0" * 64,),
-                )
-            masters = root / "discogs_masters.xml.gz"
-            with gzip.open(masters, "wt", encoding="utf-8") as stream:
-                stream.write(
-                    '<masters><master id="42"><title>Album</title><year>1980</year>'
-                    "<styles><style>Darkwave</style></styles></master></masters>"
-                )
-            broken = root / "title.basics.tsv"
-            broken.write_text("tconst\tprimaryTitle\nnot-an-id\tX\n", encoding="utf-8")
-            manifest = root / "manifest.json"
-            manifest.write_text(
-                json.dumps(
-                    {
-                        "format": "provider_pass_manifest",
-                        "format_version": 1,
-                        "base_graph": "wikidata.sqlite",
-                        "inputs": [
-                            {"provider": "discogs", "kind": "masters",
-                             "path": masters.name, "snapshot_id": "20260901"},
-                            {"provider": "imdb", "kind": "title-basics",
-                             "path": broken.name, "snapshot_id": "2026-09-20"},
-                        ],
-                    }
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="arachne-pass-")
+        self.root = Path(self.temporary.name)
+        base = self.root / "wikidata.sqlite"
+        graph = ObservationGraph.create(base)
+        graph.ingest(
+            "wikidata",
+            [
+                work_record(
+                    "wikidata", "item", "Q1",
+                    identifiers=[identity("discogs", "master", "42")],
+                    edges=[
+                        {
+                            "target": identity("wikidata", "item", "Q9"),
+                            "target_entity_type": "person",
+                            "relation_family": "credit",
+                            "relation_type": "performer",
+                        }
+                    ],
+                    signals=[concept("Q37068", "movement", "wikidata_movement",
+                                     vocabulary_id="wikidata:Q37068")],
                 ),
-                encoding="utf-8",
+                # Never selected: its base-graph signal has no consumer.
+                work_record(
+                    "wikidata", "item", "Q77",
+                    signals=[concept("Q37069", "movement", "wikidata_movement",
+                                     vocabulary_id="wikidata:Q37069")],
+                ),
+            ],
+        )
+        graph.record_source_file("wikidata", "dump", "2026-09-01", "wd", "0" * 64)
+        self.masters = self.root / "discogs_masters.xml.gz"
+        with gzip.open(self.masters, "wt", encoding="utf-8") as stream:
+            stream.write(
+                '<masters><master id="42"><title>Album</title><year>1980</year>'
+                "<styles><style>Darkwave</style></styles></master>"
+                '<master id="43"><title>Other</title>'
+                "<styles><style>Coldwave</style></styles></master></masters>"
             )
-            product = root / "product.sqlite"
-            with sqlite3.connect(product) as connection:
-                connection.executescript((ROOT / "schema/product.sql").read_text("utf-8"))
-            priority = root / "priority.json"
-            priority.write_text(json.dumps({"wikidata": ["Q9"]}), encoding="utf-8")
+        broken = self.root / "title.basics.tsv"
+        broken.write_text("tconst\tprimaryTitle\nnot-an-id\tX\n", encoding="utf-8")
+        self.manifest = self.root / "manifest.json"
+        self.manifest.write_text(
+            json.dumps(
+                {
+                    "format": "provider_pass_manifest",
+                    "base_graph": "wikidata.sqlite",
+                    "inputs": [
+                        {"provider": "discogs", "kind": "masters",
+                         "path": self.masters.name, "snapshot_id": "20260901"},
+                        {"provider": "imdb", "kind": "title-basics",
+                         "path": broken.name, "snapshot_id": "2026-09-20"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.product = self.root / "product.sqlite"
+        with sqlite3.connect(self.product) as connection:
+            connection.executescript((ROOT / "schema/product.sql").read_text("utf-8"))
+        self.priority = self.root / "priority.json"
+        self.priority.write_text(json.dumps({"wikidata": ["Q9"]}), encoding="utf-8")
 
-            report = run_pass(
-                manifest, root / "pass.sqlite", product, priority,
-                root / "rebuild.json", root / "hints.sqlite",
-            )
-            self.assertEqual(report["failed_optional_inputs"], 1)
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def run_pass(self, name: str, **options: object) -> dict[str, object]:
+        return run_pass(
+            self.manifest, self.root / f"{name}.sqlite", self.product, self.priority,
+            self.root / f"{name}-rebuild.json", self.root / f"{name}-hints.sqlite",
+            **options,
+        )
+
+    def test_one_graph_one_materialization_with_non_fatal_optional_failure(self) -> None:
+        report = self.run_pass("pass")
+        self.assertEqual(report["failed_optional_inputs"], 1)
+        self.assertEqual(
+            [(item["provider"], item["status"]) for item in report["inputs"]],
+            [("discogs", "ingested"), ("imdb", "failed")],
+        )
+        # The general pass counts signals instead of storing them.
+        self.assertEqual(report["inputs"][0]["signals_not_persisted"], 2)
+        self.assertEqual(report["general"]["status"], "succeeded")
+        self.assertEqual(report["general"]["primary_metrics"]["N"], 1)
+        hints = report["research_hints"]
+        self.assertEqual(hints["status"], "succeeded")
+        # Only the selected album's Darkwave style is stored; master 43's
+        # Coldwave and the unselected base-graph movement never persist.
+        self.assertEqual(hints["signal_pass"]["pruned_base_signals"], 1)
+        self.assertEqual(
+            hints["signal_pass"]["inputs"],
+            [{"provider": "discogs", "kind": "masters", "records": 2, "signals": 1,
+              "signals_not_relevant": 1}],
+        )
+        self.assertEqual(hints["build"]["hints"], 2)
+        with sqlite3.connect(self.root / "pass.sqlite") as connection:
             self.assertEqual(
-                [(item["provider"], item["status"]) for item in report["inputs"]],
-                [("discogs", "ingested"), ("imdb", "failed")],
+                {row[0] for row in connection.execute("SELECT provider FROM provider_sources")},
+                {"wikidata", "discogs"},
             )
-            self.assertEqual(report["primary_metrics"]["N"], 1)
-            self.assertEqual(report["research_hints"]["hints"], 1)
-            with sqlite3.connect(root / "pass.sqlite") as connection:
-                self.assertEqual(
-                    {row[0] for row in connection.execute("SELECT provider FROM provider_sources")},
-                    {"wikidata", "discogs"},
-                )
-            with sqlite3.connect(product) as connection:
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT year_start FROM works"
-                    ).fetchone()[0],
-                    1980,
-                )
-                self.assertEqual(
-                    connection.execute("SELECT count(*) FROM work_concepts").fetchone()[0], 0
-                )
+            self.assertEqual(
+                sorted(row[0] for row in connection.execute("SELECT value FROM provider_signals")),
+                ["Darkwave", "Q37068"],
+            )
+        with sqlite3.connect(self.product) as connection:
+            self.assertEqual(
+                connection.execute("SELECT year_start FROM works").fetchone()[0], 1980
+            )
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM work_concepts").fetchone()[0], 0
+            )
+        with sqlite3.connect(self.root / "pass-hints.sqlite") as connection:
+            snapshots = json.loads(
+                connection.execute(
+                    "SELECT provider_snapshots_json FROM research_hint_info"
+                ).fetchone()[0]
+            )
+        self.assertEqual(snapshots["discogs"]["snapshot_id"], "20260901")
+        self.assertEqual(
+            snapshots["discogs"]["files"],
+            [{"kind": "masters", "sha256": digest(self.masters)}],
+        )
 
-            required = json.loads(manifest.read_text(encoding="utf-8"))
-            required["inputs"][1]["required"] = True
-            manifest.write_text(json.dumps(required), encoding="utf-8")
-            with self.assertRaises(ProviderPassError):
-                run_pass(
-                    manifest, root / "pass2.sqlite", product, priority,
-                    root / "rebuild2.json", root / "hints2.sqlite",
-                )
+        required = json.loads(self.manifest.read_text(encoding="utf-8"))
+        required["inputs"][1]["required"] = True
+        self.manifest.write_text(json.dumps(required), encoding="utf-8")
+        with self.assertRaises(ProviderPassError):
+            self.run_pass("pass2")
+
+    def test_hint_inputs_are_preflighted_before_product_mutation(self) -> None:
+        manual = self.root / "manual.jsonl"
+        manual.write_text('{"work_id":"work-000001","kind":"nope"}\n', encoding="utf-8")
+        before = digest(self.product)
+        with self.assertRaisesRegex(ProviderPassError, "preflight"):
+            self.run_pass("pass", manual_signals=manual)
+        with self.assertRaisesRegex(ProviderPassError, "preflight"):
+            self.run_pass("pass", allow_restricted=["discogs_style"])
+        self.assertEqual(digest(self.product), before)
+        self.assertFalse((self.root / "pass.sqlite").exists())
+
+    def test_hint_failure_never_blurs_the_committed_general_pass(self) -> None:
+        (self.root / "pass-hints.sqlite").write_text("occupied", encoding="utf-8")
+        report = self.run_pass("pass")
+        self.assertEqual(report["general"]["status"], "succeeded")
+        self.assertEqual(report["research_hints"]["status"], "failed")
+        self.assertIn("already exists", report["research_hints"]["reason"])
+        with sqlite3.connect(self.product) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM works").fetchone()[0], 1)
+
+    def test_old_versioned_manifest_is_rejected(self) -> None:
+        document = json.loads(self.manifest.read_text(encoding="utf-8"))
+        document["format_version"] = 1
+        self.manifest.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaises(ProviderPassError):
+            self.run_pass("pass")
 
 
 if __name__ == "__main__":

@@ -147,7 +147,7 @@ verified acquired Wikidata dump
         ▼
 build_external_graph.py (offline, bounded streaming)
         │
-        ├── provider_observation_graph_v1
+        ├── provider_observation_graph
         ├── wikidata_image_hints_v1
         └── wikidata_mapping_review_v1
 ```

@@ -91,12 +91,14 @@ members of the C++ `contract_name` enumeration:
   exact conflicts, no-QID candidates found by normalized names or strong
   external-ID crosswalks, and budget-deferred rows. Its compact cache and
   fingerprints remain non-canonical operational state.
-- `hint_vocabulary_v1` is the reviewed authority concordance used to normalize
+- `hint_vocabulary` is the reviewed authority concordance used to normalize
   and deduplicate research hints. It records authority terms, their exact
-  labels and aliases, and their GND/LCSH/RAMEAU/LCGFT/AAT/Iconclass crosswalks,
-  keeping genre/form terms separate from topical subject terms. It orders and
-  merges research leads only: it never creates a canonical concept, assertion,
-  or evidence row, and the shipped example's identifiers are illustrative.
+  labels and aliases, their exact GND/LCSH/RAMEAU/LCGFT/AAT/Iconclass
+  crosswalks, weaker reviewed mappings kept as context only, and reviewed
+  generic markers, keeping genre/form terms separate from topical subject
+  terms. It orders and merges research leads only: it never creates a
+  canonical concept, assertion, or evidence row, and the shipped example's
+  identifiers are illustrative. It is latest-only (see below).
 - `external_enrichment_review_v1` is a disposable, snapshot-bound comparison
   of canonical entities and relations with one provider's normalized point
   observations. It preserves redirects, identity signals, field and relation
@@ -112,6 +114,35 @@ reserved for not-yet-reviewed assignments already present in the canonical
 product. Merge hints are a disposable Ariadne projection with an explicit
 review artifact; only ignored-pair decisions are durable, and neither artifact
 is part of the product database contract.
+
+## Latest-only rebuildable formats
+
+The repository is experimental. For internal, rebuildable formats the schema
+in the selected repository commit is the supported schema; older artifacts are
+rebuilt, replaced, or discarded, and no migration chain exists. Such formats
+carry no format version in their file name, type discriminator,
+`format_version` field, or SQLite `PRAGMA user_version`:
+
+- `schema/provider_observation.sql` (the provider observation graph, reported
+  by the Wikidata worker as artifact type `provider_observation_graph`);
+- `schema/research_hint.sql` (the research-hint artifact);
+- `hint_vocabulary` (JSON) and `schema/hint_vocabulary.sql` (compiled form);
+- `provider_pass_manifest` and the provider pass, provider rebuild,
+  research-hint build, GND conversion/resolution, and MovieLens import
+  reports.
+
+Readers check that an input has the current shape and ask for a rebuild
+otherwise. Provenance is not versioning and is kept: provider snapshot IDs,
+per-file SHA-256 digests, storage references, and source digests of reviewed
+inputs remain in these artifacts. The product schema already follows this
+model (`schema/product.sql`, no product migrations).
+
+New internal formats must not add `_v1`-style versioning. The remaining
+versioned actor contracts and artifacts listed above are older machinery; they
+are to be converted to latest-only naming in one separate repository-wide
+change, when every producer, consumer, C++ contract enumeration, schema file,
+example, and test that names them can change together. Until then their
+current rules below still apply.
 
 ## Actor-contract evolution policy
 

@@ -241,7 +241,9 @@ class ProviderObservationGraphTests(unittest.TestCase):
             self.assertIn(
                 ("open-library", "birth_date", '"12 December 1915"'), facts
             )
-            self.assertIn(("imdb", "runtime_minutes", "94"), facts)
+            # Detected fields without a product consumer are counted, not stored.
+            self.assertNotIn("runtime_minutes", {field for _provider, field, _value in facts})
+            self.assertNotIn(("musicbrainz", "original_date", '"1971-03"'), facts)
 
             media = {
                 (row[0], row[1], row[2])
@@ -374,6 +376,84 @@ class ProviderObservationGraphTests(unittest.TestCase):
             tracks[0]["edges"][0]["metadata"],
             {"position": 3, "position_text": "1.3"},
         )
+
+    def test_detection_is_counted_but_only_consumed_facts_are_persisted(self) -> None:
+        title = normalize_imdb_title_basics(
+            {
+                "tconst": "tt0000009",
+                "primaryTitle": "Film",
+                "titleType": "movie",
+                "runtimeMinutes": "94",
+                "isAdult": "0",
+                "genres": "Drama",
+            }
+        )
+        stats = self.graph.ingest("imdb", [title], signals=False)
+        self.assertEqual(stats["unpersisted"], {"adult": 1, "runtime_minutes": 1})
+        self.assertEqual((stats["signals"], stats["signals_not_persisted"]), (0, 1))
+        self.assertEqual(self.graph.counts()["provider_signals"], 0)
+        with self.assertRaises(ObservationGraphError):
+            self.graph.ingest(
+                "imdb",
+                [
+                    {
+                        "id": identity("imdb", "title", "tt0000010"),
+                        "entity_type": "work",
+                        "facts": [{"field": "runtime_minutes", "value": 94}],
+                    }
+                ],
+            )
+
+    def test_signal_pass_stores_only_relevant_subjects(self) -> None:
+        genre = {"kind": "concept", "family": "genre", "type": "imdb_genre", "value": "Noir"}
+        lead = {
+            "kind": "source_lead",
+            "type": "discogs_url",
+            "value": "https://example.org/a",
+            "url": "https://example.org/a",
+        }
+        records = [
+            {"id": identity("imdb", "title", "tt1"), "entity_type": "work", "signals": [genre]},
+            {"id": identity("imdb", "title", "tt2"), "entity_type": "work", "signals": [genre]},
+            {"id": identity("imdb", "name", "nm1"), "entity_type": "person",
+             "signals": [genre, lead]},
+        ]
+        self.graph.ingest("imdb", records, signals=False)
+        relevant = {
+            ("imdb", "title", "tt1"): "work",
+            ("imdb", "name", "nm1"): "credited_agent",
+        }
+        stats = self.graph.ingest_signals("imdb", records, relevant)
+        # tt2 is irrelevant; an agent contributes only its lead.
+        self.assertEqual((stats["signals"], stats["signals_not_relevant"]), (2, 2))
+        self.graph.ingest("imdb", records)
+        self.assertEqual(self.graph.counts()["provider_signals"], 4)
+        self.assertEqual(self.graph.prune_signals(relevant), 2)
+        self.assertEqual(self.graph.counts()["provider_signals"], 2)
+
+    def test_source_files_bind_one_consistent_provider_snapshot(self) -> None:
+        first = self.graph.record_source_file("imdb", "title-basics", "2026-09-20", "a.tsv", "a" * 64)
+        second = self.graph.record_source_file("imdb", "name-basics", "2026-09-20", "b.tsv", "b" * 64)
+        self.assertNotEqual(first, second)
+        with self.assertRaises(ObservationGraphError):
+            self.graph.record_source_file("imdb", "title-crew", "2026-09-27", "c.tsv", "c" * 64)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT snapshot_id,sha256 FROM provider_sources WHERE provider='imdb'"
+                ).fetchone(),
+                ("2026-09-20", second),
+            )
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM provider_source_files").fetchone()[0],
+                2,
+            )
+
+    def test_graph_built_by_older_code_is_rejected_for_rebuild(self) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("DROP TABLE provider_source_files")
+        with self.assertRaisesRegex(ObservationGraphError, "rebuild"):
+            self.graph.counts()
 
     def test_untyped_musicbrainz_artist_remains_ambiguous(self) -> None:
         record = normalize_musicbrainz_artist(

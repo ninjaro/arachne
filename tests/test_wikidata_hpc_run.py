@@ -174,7 +174,7 @@ print("12345678;claix")
         metadata = self.metadata()
         graph = Path(metadata["external_graph"])
         graph.write_text(
-            '{"artifact_type":"provider_observation_graph_v1"}\n',
+            '{"artifact_type":"provider_observation_graph"}\n',
             encoding="utf-8",
         )
         hints = Path(metadata["image_hints"])
@@ -226,7 +226,7 @@ print("12345678;claix")
                 {
                     "status": "succeeded",
                     "output": custody(
-                        graph, "provider_observation_graph_v1"
+                        graph, "provider_observation_graph"
                     ),
                     "image_hints_output": custody(
                         hints, "wikidata_image_hints_v1"
@@ -650,7 +650,7 @@ print("COMPLETED|0:0")
         )
         payload = Path(config["paths"]["artifact_store"]) / "wikidata" / "raw.bin"
         Path(metadata["external_graph"]).write_text(
-            '{"artifact_type":"provider_observation_graph_v1","tampered":true}\n',
+            '{"artifact_type":"provider_observation_graph","tampered":true}\n',
             encoding="utf-8",
         )
 

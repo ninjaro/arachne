@@ -95,8 +95,8 @@ falls back to stale bytes.
 | Hint analysis | Ariadne | Code-local `.arachne/tmp/merge-hints.sqlite` and `.arachne/merge-hints-review.json` are disposable; `arachne-data/database/merge-hint-decisions.json` preserves reviewed decisions |
 | Product inspection projections | Ariadne | Snapshot-bound `product_research_report_v1`, `product_entity_projection_v1`, and `taste_index_v1` JSON are disposable read models; they never become product state |
 | Provider observation graph | Ariadne | Disposable normalized provider facts and topology; never canonical state or human evidence |
-| Research hints | Ariadne | Disposable `research_hint_v1` SQLite built from provider signals for under-mined works only; read-only over the product, never evidence and never canonical tags (`docs/RESEARCH_HINTS.md`) |
-| Hint authority vocabulary | Reviewed input | `hint_vocabulary_v1` concordance of authority terms and GND/LCSH/RAMEAU/LCGFT crosswalks; it normalizes and deduplicates research leads only and never creates a concept or assertion |
+| Research hints | Ariadne | Disposable, latest-only research-hint SQLite (`schema/research_hint.sql`) built from provider signals for under-mined works only; read-only over the product, never evidence and never canonical tags; rebuilt, never migrated (`docs/RESEARCH_HINTS.md`) |
+| Hint authority vocabulary | Reviewed input | Latest-only `hint_vocabulary` concordance (JSON, or compiled indexed SQLite for larger subsets) of authority terms and exact GND/LCSH/RAMEAU/LCGFT crosswalks; weaker mappings stay context only; it normalizes and deduplicates research leads and never creates a concept or assertion |
 | Artifact store | Arachne | Transport evidence, raw acquisitions and policy-controlled intermediate outputs |
 
 Arachne's own `paths.queue` is not an immutable inbox. Fully transferred raw queue
@@ -265,7 +265,7 @@ disposable mapping review and never removes entities from processing. Mapping,
 candidate, and review artifacts have no canonical write authority.
 
 The worker hash-verifies the source receipt and product export, derives coverage,
-and emits a disposable `provider_observation_graph_v1` SQLite graph,
+and emits a disposable, latest-only `provider_observation_graph` SQLite graph,
 `wikidata_image_hints_v1`, and
 `wikidata_mapping_review_v1`. Image targets never enter work-only coverage.
 Current provider media references in the observation graph are ordinary general
