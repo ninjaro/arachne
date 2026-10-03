@@ -6,6 +6,12 @@ streaming orchestration remain outside the adapter, and unsupported record
 families are not guessed into product semantics. Semantic provider values
 (genres, styles, subjects, useful URL relations) are emitted only as hint-only
 ``signals``; they never become general facts.
+
+Detection is broader than persistence. A field an adapter recognizes but that
+has no current general-information consumer is named in the record's
+``unpersisted`` list: the graph counts it and stores nothing. Signals carry a
+``category`` with the provider-native classification next to the analytical
+``family`` the adapter assigns.
 """
 
 from __future__ import annotations
@@ -103,14 +109,10 @@ def normalize_imdb_name_basics(record: Mapping[str, Any]) -> dict[str, Any]:
         year = _dump_integer(record.get(source), f"IMDb name basics.{source}")
         if year is not None:
             facts.append({"field": field, "value": year})
-    professions = _dump_text(record.get("primaryProfession"))
-    if professions is not None:
-        facts.append(
-            {
-                "field": "professions",
-                "value": [item for item in professions.split(",") if item],
-            }
-        )
+    # Professions are detected but have no product consumer yet.
+    unpersisted = (
+        ["professions"] if _dump_text(record.get("primaryProfession")) is not None else []
+    )
 
     return {
         "id": _identity("imdb", "name", external_id),
@@ -120,6 +122,7 @@ def normalize_imdb_name_basics(record: Mapping[str, Any]) -> dict[str, Any]:
         "facts": facts,
         "media": [],
         "edges": [],
+        "unpersisted": unpersisted,
     }
 
 
@@ -151,15 +154,23 @@ def normalize_imdb_title_basics(record: Mapping[str, Any]) -> dict[str, Any]:
     start_year = _dump_integer(record.get("startYear"), "IMDb title basics.startYear")
     if start_year is not None:
         facts.append({"field": "original_date", "value": str(start_year)})
-    runtime = _dump_integer(
+    # Runtime and the adult flag are validated and detected, but no current
+    # consumer needs them, so they are counted rather than stored.
+    unpersisted: list[str] = []
+    if _dump_integer(
         record.get("runtimeMinutes"), "IMDb title basics.runtimeMinutes"
-    )
-    if runtime is not None:
-        facts.append({"field": "runtime_minutes", "value": runtime})
+    ) is not None:
+        unpersisted.append("runtime_minutes")
     # IMDb genres are broad research hints, never product general facts.
     genres = _dump_text(record.get("genres"))
     signals = [
-        {"kind": "concept", "family": "genre", "type": "imdb_genre", "value": item}
+        {
+            "kind": "concept",
+            "family": "genre",
+            "category": "genre",
+            "type": "imdb_genre",
+            "value": item,
+        }
         for item in (genres.split(",") if genres is not None else [])
         if item
     ]
@@ -167,7 +178,7 @@ def normalize_imdb_title_basics(record: Mapping[str, Any]) -> dict[str, Any]:
     if adult is not None:
         if adult not in {"0", "1"}:
             raise ProviderAdapterError("IMDb title basics.isAdult must be 0, 1, or \\N")
-        facts.append({"field": "adult", "value": adult == "1"})
+        unpersisted.append("adult")
 
     return {
         "id": _identity("imdb", "title", external_id),
@@ -178,6 +189,7 @@ def normalize_imdb_title_basics(record: Mapping[str, Any]) -> dict[str, Any]:
         "media": [],
         "edges": [],
         "signals": signals,
+        "unpersisted": unpersisted,
     }
 
 
@@ -437,9 +449,11 @@ def normalize_musicbrainz_artist(record: Mapping[str, Any]) -> dict[str, Any]:
             value = life_span.get(source)
             if isinstance(value, str) and value.strip():
                 facts.append({"field": field, "value": value.strip()})
+    # The product has no agent country field, so the value is only counted.
     country = record.get("country")
-    if isinstance(country, str) and country.strip():
-        facts.append({"field": "country_code", "value": country.strip()})
+    unpersisted = (
+        ["agent_country_code"] if isinstance(country, str) and country.strip() else []
+    )
 
     return {
         "id": _identity("musicbrainz", "artist", external_id),
@@ -450,6 +464,7 @@ def normalize_musicbrainz_artist(record: Mapping[str, Any]) -> dict[str, Any]:
         "media": [],
         "edges": [],
         "signals": _musicbrainz_source_leads(record),
+        "unpersisted": unpersisted,
     }
 
 
@@ -472,9 +487,15 @@ def normalize_musicbrainz_release_group(
                 "value": primary_type.strip().lower().replace(" ", "_"),
             }
         )
+    # ``first-release-date`` aggregates every release in the group, including
+    # bootlegs and pseudo-releases that Arachne excludes from dating. Dates
+    # therefore come only from release rows with an accepted status.
     first_release = record.get("first-release-date")
-    if isinstance(first_release, str) and first_release.strip():
-        facts.append({"field": "original_date", "value": first_release.strip()})
+    unpersisted = (
+        ["first_release_date"]
+        if isinstance(first_release, str) and first_release.strip()
+        else []
+    )
 
     edges: list[dict[str, Any]] = []
     artist_credit = record.get("artist-credit", [])
@@ -506,6 +527,7 @@ def normalize_musicbrainz_release_group(
         "media": [],
         "edges": edges,
         "signals": _musicbrainz_source_leads(record),
+        "unpersisted": unpersisted,
     }
 
 
@@ -546,42 +568,43 @@ def normalize_musicbrainz_recording(record: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
-# Release statuses whose dates must not compete for a release group's earliest
-# original date. A bootleg or pseudo-release can predate or misdate the work.
+# Release statuses whose dates may compete for a release group's earliest
+# original date. Filtering is fail-closed: a missing, non-string, or other
+# status (bootleg, pseudo-release, withdrawn, ...) never dates the work.
 MUSICBRAINZ_DATED_STATUSES = {"official", "promotion"}
+
+
+def musicbrainz_release_dated(record: Mapping[str, Any]) -> bool:
+    status = record.get("status")
+    return isinstance(status, str) and status.strip().lower() in MUSICBRAINZ_DATED_STATUSES
 
 
 def _musicbrainz_release_group_facts(
     record: Mapping[str, Any], release_group: Mapping[str, Any]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Derive release-group date and type facts from one release row.
 
-    The release itself stays structural: only its date and its release group's
-    declared type reach the graph, so the materializer can keep the earliest
-    relevant original date without any manifestation entity.
+    The release itself stays structural: only its own dates and its release
+    group's declared type reach the graph, so the materializer can keep the
+    earliest accepted original date without any manifestation entity. The
+    group's aggregate ``first-release-date`` is never copied here, because it
+    can reintroduce the excluded statuses.
     """
 
     facts: list[dict[str, Any]] = []
-    status = record.get("status")
-    dated = not isinstance(status, str) or status.strip().lower() in (
-        MUSICBRAINZ_DATED_STATUSES
-    )
-    if dated:
-        dates = [record.get("date")]
-        events = record.get("release-events", [])
-        if isinstance(events, list):
-            dates.extend(
-                event.get("date") for event in events if isinstance(event, Mapping)
-            )
-        dates.append(release_group.get("first-release-date"))
-        seen: set[str] = set()
-        for value in dates:
-            if not isinstance(value, str) or not value.strip():
-                continue
-            value = value.strip()
-            if value not in seen:
-                seen.add(value)
-                facts.append({"field": "original_date", "value": value})
+    unpersisted: list[str] = []
+    dates = [record.get("date")]
+    events = record.get("release-events", [])
+    if isinstance(events, list):
+        dates.extend(event.get("date") for event in events if isinstance(event, Mapping))
+    values: list[str] = []
+    for value in dates:
+        if isinstance(value, str) and value.strip() and value.strip() not in values:
+            values.append(value.strip())
+    if musicbrainz_release_dated(record):
+        facts.extend({"field": "original_date", "value": value} for value in values)
+    elif values:
+        unpersisted.append("excluded_status_release_date")
     primary_type = release_group.get("primary-type")
     if isinstance(primary_type, str) and primary_type.strip():
         facts.append(
@@ -590,16 +613,22 @@ def _musicbrainz_release_group_facts(
                 "value": primary_type.strip().lower().replace(" ", "_"),
             }
         )
-    return facts
+    return facts, unpersisted
 
 
-def _musicbrainz_label_credits(record: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return label credits for a release group from one release row."""
+def musicbrainz_release_labels(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Detect the labels and catalog numbers of one specific release.
 
-    edges: list[dict[str, Any]] = []
+    Label and catalog number belong to a release (an edition, reissue, or
+    regional pressing), not to the release group that Arachne materializes as
+    a work, so they are never emitted as work credits. The detector is kept
+    for release-scoped analysis and build metrics.
+    """
+
+    labels: list[dict[str, Any]] = []
     label_info = record.get("label-info", [])
     if not isinstance(label_info, list):
-        return edges
+        return labels
     seen: set[str] = set()
     for entry in label_info:
         label = entry.get("label") if isinstance(entry, Mapping) else None
@@ -611,20 +640,17 @@ def _musicbrainz_label_credits(record: Mapping[str, Any]) -> list[dict[str, Any]
             continue
         seen.add(label_id)
         catalog_number = entry.get("catalog-number")
-        edges.append(
+        labels.append(
             {
-                "target": _identity("musicbrainz", "label", label_id),
-                "target_entity_type": "organization",
-                "relation_family": "credit",
-                "relation_type": "record_label",
-                "metadata": {
-                    "catalog_number": (
-                        catalog_number if isinstance(catalog_number, str) else None
-                    )
-                },
+                "label_id": label_id,
+                "catalog_number": (
+                    catalog_number.strip()
+                    if isinstance(catalog_number, str) and catalog_number.strip()
+                    else None
+                ),
             }
         )
-    return edges
+    return labels
 
 
 def expand_musicbrainz_release(record: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -632,8 +658,9 @@ def expand_musicbrainz_release(record: Mapping[str, Any]) -> list[dict[str, Any]
 
     Release editions are not promoted to product works.  The explicit release
     group and recording MBIDs instead supply the canonical album/track graph,
-    while the release's own date and label credits only sharpen the release
-    group's earliest original date and topology.
+    while the release's own date (only for an accepted status) sharpens the
+    release group's earliest original date. Release-specific labels are
+    detected and counted, never copied onto the work.
     """
 
     record = _record(record, "MusicBrainz release")
@@ -646,9 +673,11 @@ def expand_musicbrainz_release(record: Mapping[str, Any]) -> list[dict[str, Any]
     release_group_id = release_group_id.strip()
 
     result: list[dict[str, Any]] = []
-    facts = _musicbrainz_release_group_facts(record, release_group)
-    edges = _musicbrainz_label_credits(record)
-    if facts or edges:
+    facts, unpersisted = _musicbrainz_release_group_facts(record, release_group)
+    unpersisted.extend(
+        "release_label" for _label in musicbrainz_release_labels(record)
+    )
+    if facts or unpersisted:
         result.append(
             {
                 "id": _identity("musicbrainz", "release_group", release_group_id),
@@ -657,7 +686,8 @@ def expand_musicbrainz_release(record: Mapping[str, Any]) -> list[dict[str, Any]
                 "names": [],
                 "facts": facts,
                 "media": [],
-                "edges": edges,
+                "edges": [],
+                "unpersisted": unpersisted,
             }
         )
     media = record.get("media", [])
@@ -817,6 +847,11 @@ OPEN_LIBRARY_SUBJECT_FIELDS = (
     ("subject_places", "setting", "open_library_subject_place"),
     ("subject_times", "setting", "open_library_subject_time"),
 )
+OPEN_LIBRARY_SUBJECT_CATEGORIES = {
+    "subjects": "subject",
+    "subject_places": "subject_place",
+    "subject_times": "subject_time",
+}
 
 
 def _open_library_subject_signals(record: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -837,7 +872,13 @@ def _open_library_subject_signals(record: Mapping[str, Any]) -> list[dict[str, A
             ):
                 continue
             result.append(
-                {"kind": "concept", "family": family, "type": signal_type, "value": value}
+                {
+                    "kind": "concept",
+                    "family": family,
+                    "category": OPEN_LIBRARY_SUBJECT_CATEGORIES[source],
+                    "type": signal_type,
+                    "value": value,
+                }
             )
     return result
 
@@ -1038,19 +1079,21 @@ def normalize_musicbrainz_label(record: Mapping[str, Any]) -> dict[str, Any]:
     record = _record(record, "MusicBrainz label")
     external_id = _required_text(record.get("id"), "MusicBrainz label.id")
     name = _required_text(record.get("name"), "MusicBrainz label.name")
-    facts: list[dict[str, Any]] = []
     country = record.get("country")
-    if isinstance(country, str) and country.strip():
-        facts.append({"field": "country_code", "value": country.strip()})
     return {
         "id": _identity("musicbrainz", "label", external_id),
         "entity_type": "organization",
         "identifiers": _musicbrainz_crosswalks(record),
         "names": [{"type": "label", "value": name}, *_musicbrainz_aliases(record)],
-        "facts": facts,
+        "facts": [],
         "media": [],
         "edges": [],
         "signals": _musicbrainz_source_leads(record),
+        "unpersisted": (
+            ["agent_country_code"]
+            if isinstance(country, str) and country.strip()
+            else []
+        ),
     }
 
 
@@ -1122,16 +1165,14 @@ def normalize_open_library_redirect(record: Mapping[str, Any]) -> dict[str, Any]
 
 
 GND_ID = re.compile(r"[0-9]{1,12}(?:-[0-9X])?\Z")
-# GND entity kinds Arachne can use. Anything else stays untyped rather than
-# guessing a product entity type.
+# Exact GND entity kinds with a safe product type. Anything else, including
+# conferences/events (not an organization), families (not a performing
+# group), and undifferentiated person names (which may cover several people),
+# stays ``unknown`` until an exact crosswalk from another provider types it.
 GND_ENTITY_TYPES = {
     "person": "person",
     "differentiated_person": "person",
     "corporate_body": "organization",
-    "organization": "organization",
-    "family": "group",
-    "group": "group",
-    "conference_or_event": "organization",
     "work": "work",
 }
 # Exact crosswalks a GND record may assert. Fuzzy name matching is never used.
@@ -1205,6 +1246,7 @@ def normalize_gnd_entity(record: Mapping[str, Any]) -> dict[str, Any]:
                 {
                     "kind": "concept",
                     "family": "keyword",
+                    "category": "subject",
                     "type": "gnd_subject",
                     "value": label.strip(),
                     "vocabulary_id": f"gnd:{subject_id}",
@@ -1499,7 +1541,13 @@ def normalize_discogs_master(element: Element) -> dict[str, Any]:
             text = _xml_text(value)
             if text is not None:
                 signals.append(
-                    {"kind": "concept", "family": family, "type": signal_type, "value": text}
+                    {
+                        "kind": "concept",
+                        "family": family,
+                        "category": item,
+                        "type": signal_type,
+                        "value": text,
+                    }
                 )
     return {
         "id": _identity("discogs", "master", external_id),

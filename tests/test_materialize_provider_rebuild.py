@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import tracemalloc
 import unittest
 from pathlib import Path
 
 from scripts.materialize_provider_rebuild import (
-    Edge,
-    Graph,
-    Identity,
+    ProviderGraph,
     anomalies,
     bundle_for,
     date_value,
@@ -289,69 +288,75 @@ class ProviderRebuildMaterializerTests(unittest.TestCase):
         with sqlite3.connect(self.database_path) as connection:
             self.assertEqual(tail_metrics(connection), (1, 1, 0))
 
+    def cluster(self, graph: ProviderGraph, external_id: str) -> int:
+        cluster = graph.cluster_for_key("wikidata", external_id)
+        self.assertIsNotNone(cluster)
+        return int(cluster)
+
     def test_fixed_bundle_costs_and_recurrent_actor_gate(self) -> None:
-        identities = {
-            cluster: [Identity("wikidata", "item", f"Q{cluster}")]
-            for cluster in range(1, 30)
-        }
-        album_identity = identities[4][0]
-        album = Graph(
-            types={1: "person", 2: "work", 4: "work", 5: "work"},
-            identities={key: identities[key] for key in (1, 2, 4, 5)},
-            names={},
-            facts={
-                4: {"medium": [("album", "wikidata", album_identity)]},
-            },
-            media={},
-            edges=[
-                Edge(2, 1, "wikidata", "credit", "artist", {}),
-                Edge(4, 1, "wikidata", "credit", "artist", {}),
-                Edge(5, 1, "wikidata", "credit", "artist", {}),
-                Edge(5, 4, "wikidata", "work_membership", "track_of", {}),
+        self.graph.ingest(
+            "wikidata",
+            [
+                record("Q1", "person", name="Artist"),
+                record("Q2", "work", name="Parsed", edges=[edge("Q1", "person", "credit", "artist")]),
+                record(
+                    "Q4",
+                    "work",
+                    name="Album",
+                    facts=[{"field": "medium", "value": "album"}],
+                    edges=[edge("Q1", "person", "credit", "artist")],
+                ),
+                record(
+                    "Q5",
+                    "work",
+                    name="Track",
+                    edges=[
+                        edge("Q1", "person", "credit", "artist"),
+                        edge("Q4", "work", "work_membership", "track_of"),
+                    ],
+                ),
             ],
         )
         conflicts: list[dict[str, object]] = []
-        selected, _ranking, spent = ordinary_selection(
-            album, {2}, 4, set(), conflicts, set()
-        )
-        self.assertEqual((selected, spent), (set(), 0))
-        selected, _ranking, spent = ordinary_selection(
-            album, {2}, 5, set(), conflicts, set()
-        )
-        self.assertEqual((selected, spent), ({4, 5}, 5))
-        forward = {5: {4}}
-        reverse = {4: {5}}
-        self.assertEqual(bundle_for(album, 4, forward, reverse, conflicts), ({4, 5}, 5))
-
-        episode_ids = set(range(10, 20))
-        series_edges = [
-            Edge(episode, 9, "wikidata", "work_membership", "episode_of", {})
-            for episode in episode_ids
-        ]
-        for actor in (20, 21):
-            series_edges.extend(
-                Edge(episode, actor, "imdb", "credit", "actor", {})
-                for episode in sorted(episode_ids)[:8]
+        with ProviderGraph(self.graph_path) as album:
+            parsed, album_cluster, track = (
+                self.cluster(album, qid) for qid in ("Q2", "Q4", "Q5")
             )
-        series = Graph(
-            types={
-                9: "work",
-                **{episode: "work" for episode in episode_ids},
-                20: "person",
-                21: "person",
-            },
-            identities={
-                key: identities[key]
-                for key in ({9, 20, 21} | episode_ids)
-            },
-            names={},
-            facts={},
-            media={},
-            edges=series_edges,
-        )
-        self.assertFalse(series_allowed(series, 9, episode_ids | {9}))
-        series.edges = [edge for edge in series.edges if edge.object != 21]
-        self.assertTrue(series_allowed(series, 9, episode_ids | {9}))
+            selected, _ranking, spent = ordinary_selection(
+                album, {parsed}, 4, set(), conflicts, set()
+            )
+            self.assertEqual((selected, spent), (set(), 0))
+            selected, _ranking, spent = ordinary_selection(
+                album, {parsed}, 5, set(), conflicts, set()
+            )
+            self.assertEqual((selected, spent), ({album_cluster, track}, 5))
+            self.assertEqual(
+                bundle_for(album, album_cluster, conflicts), ({album_cluster, track}, 5)
+            )
+
+        episodes = [f"Q{number}" for number in range(10, 20)]
+
+        def series_graph(path: Path, actors: tuple[str, ...]) -> None:
+            records = [record("Q9", "work", name="Series")]
+            records.extend(record(actor, "person", name=actor) for actor in actors)
+            for index, episode in enumerate(episodes):
+                edges = [edge("Q9", "work", "work_membership", "episode_of")]
+                if index < 8:
+                    edges.extend(edge(actor, "person", "credit", "actor") for actor in actors)
+                records.append(record(episode, "work", name=episode, edges=edges))
+            ObservationGraph.create(path).ingest("wikidata", records)
+
+        for name, actors, allowed in (
+            ("two-recurrent.sqlite", ("Q20", "Q21"), False),
+            ("one-recurrent.sqlite", ("Q20",), True),
+        ):
+            path = self.root / name
+            series_graph(path, actors)
+            with ProviderGraph(path) as series:
+                component = {self.cluster(series, qid) for qid in ["Q9", *episodes]}
+                self.assertEqual(
+                    series_allowed(series, self.cluster(series, "Q9"), component), allowed
+                )
 
     def test_provider_disagreement_is_reported_without_dropping_field(self) -> None:
         self.graph.ingest(
@@ -514,6 +519,55 @@ class ProviderRebuildMaterializerTests(unittest.TestCase):
                     "SELECT 1 FROM external_ids WHERE scheme='wikidata' AND value='Q50'"
                 ).fetchone()
             )
+
+
+class ProviderRebuildMemoryTests(unittest.TestCase):
+    """The materializer queries the graph; it never loads the whole corpus."""
+
+    UNRELATED_WORKS = 2000
+    PAYLOAD = "x" * 4000
+
+    def peak_bytes(self, root: Path, unrelated: int) -> tuple[int, dict[str, object]]:
+        graph_path = root / f"graph-{unrelated}.sqlite"
+        database = root / f"product-{unrelated}.sqlite"
+        priority = root / f"priority-{unrelated}.json"
+        with sqlite3.connect(database) as connection:
+            connection.executescript((ROOT / "schema/product.sql").read_text("utf-8"))
+        priority.write_text(json.dumps({"wikidata": ["Q1"]}), encoding="utf-8")
+        records = [
+            record("Q2", "person", name="Artist"),
+            record("Q1", "work", name="Selected", edges=[edge("Q2", "person", "credit", "artist")]),
+        ]
+        # A large corpus the selection never reaches, with heavy names and facts.
+        records.extend(
+            record(
+                f"Q{1000 + index}",
+                "work",
+                name=f"{index} {self.PAYLOAD}",
+                facts=[{"field": "production_info", "value": {"note": self.PAYLOAD}}],
+            )
+            for index in range(unrelated)
+        )
+        ObservationGraph.create(graph_path).ingest("wikidata", records)
+        tracemalloc.start()
+        try:
+            report = materialize(graph_path, database, priority, root / f"report-{unrelated}.json")
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        return peak, report
+
+    def test_unselected_corpus_does_not_grow_peak_memory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="arachne-memory-") as temporary:
+            root = Path(temporary)
+            small, small_report = self.peak_bytes(root, 0)
+            large, large_report = self.peak_bytes(root, self.UNRELATED_WORKS)
+        self.assertEqual(small_report["product"]["materialized_works"], 1)
+        self.assertEqual(large_report["product"]["materialized_works"], 1)
+        # Loading the unrelated corpus would cost well over 16 MB of Python
+        # objects; lazy selection keeps the difference to noise.
+        corpus_bytes = self.UNRELATED_WORKS * len(self.PAYLOAD) * 2
+        self.assertLess(large - small, corpus_bytes // 16)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,11 @@
 This is the automatic general-information writer. It consumes the unified,
 disposable observation graph, applies priority closure before ordinary graph
 expansion, and never writes human concepts, assertions, sources, or evidence.
+
+The graph is queried, never loaded whole: selection visits only the product's
+neighbourhood (existing and priority works, their credited agents, and the
+agents' other works), and detailed names, facts, media, and edges are read
+only for clusters that are actually selected. It never reads provider_signals.
 """
 
 from __future__ import annotations
@@ -15,11 +20,21 @@ import os
 import re
 import sqlite3
 import tempfile
+import sys
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.provider_observation_graph import (
+    ObservationGraphError,
+    require_current_graph,
+)
 
 
 TAG_THRESHOLD = 16
@@ -190,6 +205,9 @@ class Identity:
         return (self.provider, self.namespace, self.external_id)
 
 
+AGENT_TYPES = ("person", "organization", "group")
+
+
 @dataclass(frozen=True)
 class Edge:
     subject: int
@@ -198,114 +216,296 @@ class Edge:
     family: str
     relation: str
     metadata: Mapping[str, Any]
-    subject_identity: Identity | None = None
-    object_identity: Identity | None = None
 
 
-@dataclass
-class Graph:
-    types: dict[int, str]
-    identities: dict[int, list[Identity]]
-    names: dict[int, list[dict[str, Any]]]
-    facts: dict[int, dict[str, list[tuple[Any, str, Identity]]]]
-    media: dict[int, list[dict[str, Any]]]
-    edges: list[Edge]
+class ProviderGraph:
+    """Read-only, lazily queried view of the provider observation graph.
 
-    @classmethod
-    def load(cls, path: Path) -> "Graph":
-        connection = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
-        connection.row_factory = sqlite3.Row
+    The graph is used as a database, not loaded into Python. Selection keeps
+    only the projection it visits (cluster types, identities, typed credit
+    and membership adjacency of the product neighbourhood) in bounded caches;
+    names, facts, media, and edges are queried per selected cluster.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.connection = sqlite3.connect(
+            f"file:{Path(path).resolve()}?mode=ro&immutable=1", uri=True
+        )
         try:
-            version = connection.execute(
-                "SELECT format_version FROM provider_graph_info WHERE singleton=1"
-            ).fetchone()
-            if version is None or int(version[0]) != 1:
-                raise ProviderRebuildError("unsupported provider observation graph")
-            types = {
-                int(row[0]): str(row[1])
-                for row in connection.execute(
-                    "SELECT id,entity_type FROM entity_clusters"
-                )
-            }
-            identities: dict[int, list[Identity]] = defaultdict(list)
-            provider_identities: dict[int, tuple[int, Identity]] = {}
-            for row in connection.execute(
-                "SELECT id,cluster_id,provider,namespace,external_id "
-                "FROM provider_ids ORDER BY provider,namespace,external_id"
-            ):
-                identity = Identity(str(row[2]), str(row[3]), str(row[4]))
-                identities[int(row[1])].append(identity)
-                provider_identities[int(row[0])] = (int(row[1]), identity)
+            require_current_graph(self.connection)
+        except ObservationGraphError as error:
+            self.connection.close()
+            raise ProviderRebuildError(str(error)) from error
+        except sqlite3.Error as error:
+            self.connection.close()
+            raise ProviderRebuildError(f"cannot read observation graph: {error}") from error
+        self._types: dict[int, str | None] = {}
+        self._identities: dict[int, list[tuple[int, Identity]]] = {}
+        self._facts: dict[int, dict[str, list[tuple[Any, str, Identity]]]] = {}
+        self._agents_of: dict[int, frozenset[int]] = {}
+        self._works_of: dict[int, frozenset[int]] = {}
+        self._forward: dict[int, frozenset[tuple[int, str]]] = {}
+        self._reverse: dict[int, frozenset[tuple[int, str]]] = {}
 
-            names: dict[int, list[dict[str, Any]]] = defaultdict(list)
-            for row in connection.execute(
-                "SELECT subject_provider_id,observation_provider,name_type,"
-                "language_code,script_code,value FROM provider_names ORDER BY id"
-            ):
-                cluster, identity = provider_identities[int(row[0])]
-                names[cluster].append(
-                    {
-                        "provider": str(row[1]),
-                        "identity": identity,
-                        "type": str(row[2]),
-                        "language": row[3],
-                        "script": row[4],
-                        "value": str(row[5]),
-                    }
-                )
+    def close(self) -> None:
+        self.connection.close()
 
-            facts: dict[int, dict[str, list[tuple[Any, str, Identity]]]] = defaultdict(
-                lambda: defaultdict(list)
-            )
-            for row in connection.execute(
-                "SELECT subject_provider_id,observation_provider,field,value_json "
-                "FROM provider_facts ORDER BY id"
-            ):
-                cluster, identity = provider_identities[int(row[0])]
-                facts[cluster][str(row[2])].append(
-                    (json.loads(str(row[3])), str(row[1]), identity)
-                )
+    def __enter__(self) -> "ProviderGraph":
+        return self
 
-            media: dict[int, list[dict[str, Any]]] = defaultdict(list)
-            for row in connection.execute(
-                "SELECT subject_provider_id,observation_provider,media_kind,"
-                "media_json FROM provider_media ORDER BY id"
-            ):
-                cluster, identity = provider_identities[int(row[0])]
-                value = json.loads(str(row[3]))
-                if isinstance(value, dict):
-                    value = dict(value)
-                    value["kind"] = str(row[2])
-                    value["provider"] = str(row[1])
-                    value["identity"] = identity
-                    media[cluster].append(value)
+    def __exit__(self, *_exception: object) -> None:
+        self.close()
 
-            edges: list[Edge] = []
-            for row in connection.execute(
-                "SELECT subject_provider_id,object_provider_id,observation_provider,"
-                "relation_family,relation_type,metadata_json FROM provider_edges "
-                "ORDER BY id"
-            ):
-                subject = provider_identities[int(row[0])][0]
-                object_ = provider_identities[int(row[1])][0]
-                metadata = json.loads(str(row[5]))
-                edges.append(
-                    Edge(
-                        subject,
-                        object_,
-                        str(row[2]),
-                        str(row[3]),
-                        str(row[4]),
-                        metadata if isinstance(metadata, dict) else {},
-                        provider_identities[int(row[0])][1],
-                        provider_identities[int(row[1])][1],
-                    )
-                )
+    def _rows(self, sql: str, parameters: Iterable[Any] = ()) -> list[tuple[Any, ...]]:
+        try:
+            return self.connection.execute(sql, tuple(parameters)).fetchall()
         except sqlite3.Error as error:
             raise ProviderRebuildError(f"cannot read observation graph: {error}") from error
-        finally:
-            connection.close()
-        return cls(types, dict(identities), dict(names), facts, dict(media), edges)
+
+    def type_of(self, cluster: int) -> str | None:
+        if cluster not in self._types:
+            rows = self._rows("SELECT entity_type FROM entity_clusters WHERE id=?", (cluster,))
+            self._types[cluster] = str(rows[0][0]) if rows else None
+        return self._types[cluster]
+
+    def identity_rows(self, cluster: int) -> list[tuple[int, Identity]]:
+        if cluster not in self._identities:
+            self._identities[cluster] = [
+                (int(row[0]), Identity(str(row[1]), str(row[2]), str(row[3])))
+                for row in self._rows(
+                    "SELECT id,provider,namespace,external_id FROM provider_ids "
+                    "WHERE cluster_id=? ORDER BY provider,namespace,external_id",
+                    (cluster,),
+                )
+            ]
+        return self._identities[cluster]
+
+    def identities(self, cluster: int) -> list[Identity]:
+        return [identity for _row, identity in self.identity_rows(cluster)]
+
+    def sort_key(self, cluster: int) -> tuple[str, str, str]:
+        return min(identity.sort_key for identity in self.identities(cluster))
+
+    def clusters_for_external_id(self, external_id: str) -> list[tuple[int, Identity]]:
+        return [
+            (int(row[0]), Identity(str(row[1]), str(row[2]), str(row[3])))
+            for row in self._rows(
+                "SELECT cluster_id,provider,namespace,external_id FROM provider_ids "
+                "WHERE external_id=? ORDER BY provider,namespace",
+                (external_id,),
+            )
+        ]
+
+    def cluster_for_key(self, scheme: str, external_id: str) -> int | None:
+        matches = {
+            cluster
+            for cluster, identity in self.clusters_for_external_id(external_id)
+            if identity.scheme == scheme
+        }
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    def facts(self, cluster: int) -> dict[str, list[tuple[Any, str, Identity]]]:
+        if cluster not in self._facts:
+            facts: dict[str, list[tuple[Any, str, Identity]]] = defaultdict(list)
+            for row in self._rows(
+                "SELECT f.field,f.value_json,f.observation_provider,"
+                "i.provider,i.namespace,i.external_id FROM provider_facts f "
+                "JOIN provider_ids i ON i.id=f.subject_provider_id "
+                "WHERE i.cluster_id=? ORDER BY f.id",
+                (cluster,),
+            ):
+                facts[str(row[0])].append(
+                    (
+                        json.loads(str(row[1])),
+                        str(row[2]),
+                        Identity(str(row[3]), str(row[4]), str(row[5])),
+                    )
+                )
+            self._facts[cluster] = dict(facts)
+        return self._facts[cluster]
+
+    def agents_of(self, work: int) -> frozenset[int]:
+        """Agent clusters credited on one work cluster."""
+
+        if work not in self._agents_of:
+            self._agents_of[work] = (
+                frozenset(
+                    int(row[0])
+                    for row in self._rows(
+                        "SELECT DISTINCT o.cluster_id FROM provider_ids s "
+                        "JOIN provider_edges e ON e.subject_provider_id=s.id "
+                        "JOIN provider_ids o ON o.id=e.object_provider_id "
+                        "JOIN entity_clusters oc ON oc.id=o.cluster_id "
+                        "WHERE s.cluster_id=? AND e.relation_family='credit' "
+                        "AND oc.entity_type IN ('person','organization','group')",
+                        (work,),
+                    )
+                )
+                if self.type_of(work) == "work"
+                else frozenset()
+            )
+        return self._agents_of[work]
+
+    def works_of(self, agent: int) -> frozenset[int]:
+        """Work clusters on which one agent cluster is credited."""
+
+        if agent not in self._works_of:
+            self._works_of[agent] = (
+                frozenset(
+                    int(row[0])
+                    for row in self._rows(
+                        "SELECT DISTINCT s.cluster_id FROM provider_ids o "
+                        "JOIN provider_edges e ON e.object_provider_id=o.id "
+                        "JOIN provider_ids s ON s.id=e.subject_provider_id "
+                        "JOIN entity_clusters sc ON sc.id=s.cluster_id "
+                        "WHERE o.cluster_id=? AND e.relation_family='credit' "
+                        "AND sc.entity_type='work'",
+                        (agent,),
+                    )
+                )
+                if self.type_of(agent) in AGENT_TYPES
+                else frozenset()
+            )
+        return self._works_of[agent]
+
+    def membership_forward(self, cluster: int) -> frozenset[tuple[int, str]]:
+        """``(parent cluster, relation)`` pairs of typed work memberships."""
+
+        if cluster not in self._forward:
+            self._forward[cluster] = (
+                frozenset(
+                    (int(row[0]), str(row[1]))
+                    for row in self._rows(
+                        "SELECT DISTINCT o.cluster_id,e.relation_type FROM provider_ids s "
+                        "JOIN provider_edges e ON e.subject_provider_id=s.id "
+                        "JOIN provider_ids o ON o.id=e.object_provider_id "
+                        "JOIN entity_clusters oc ON oc.id=o.cluster_id "
+                        "WHERE s.cluster_id=? AND e.relation_family='work_membership' "
+                        "AND oc.entity_type='work'",
+                        (cluster,),
+                    )
+                    if str(row[1]) in MEMBERSHIP_TYPES
+                )
+                if self.type_of(cluster) == "work"
+                else frozenset()
+            )
+        return self._forward[cluster]
+
+    def membership_reverse(self, cluster: int) -> frozenset[tuple[int, str]]:
+        """``(child cluster, relation)`` pairs of typed work memberships."""
+
+        if cluster not in self._reverse:
+            self._reverse[cluster] = (
+                frozenset(
+                    (int(row[0]), str(row[1]))
+                    for row in self._rows(
+                        "SELECT DISTINCT s.cluster_id,e.relation_type FROM provider_ids o "
+                        "JOIN provider_edges e ON e.object_provider_id=o.id "
+                        "JOIN provider_ids s ON s.id=e.subject_provider_id "
+                        "JOIN entity_clusters sc ON sc.id=s.cluster_id "
+                        "WHERE o.cluster_id=? AND e.relation_family='work_membership' "
+                        "AND sc.entity_type='work'",
+                        (cluster,),
+                    )
+                    if str(row[1]) in MEMBERSHIP_TYPES
+                )
+                if self.type_of(cluster) == "work"
+                else frozenset()
+            )
+        return self._reverse[cluster]
+
+    def has_episode_edge(self, cluster: int) -> bool:
+        return bool(
+            self._rows(
+                "SELECT 1 FROM provider_ids s "
+                "JOIN provider_edges e ON e.subject_provider_id=s.id "
+                "WHERE s.cluster_id=? AND e.relation_family='work_membership' "
+                "AND e.relation_type='episode_of' LIMIT 1",
+                (cluster,),
+            )
+        )
+
+    def actors_of(self, work: int) -> set[int]:
+        return {
+            int(row[0])
+            for row in self._rows(
+                "SELECT DISTINCT o.cluster_id FROM provider_ids s "
+                "JOIN provider_edges e ON e.subject_provider_id=s.id "
+                "JOIN provider_ids o ON o.id=e.object_provider_id "
+                "WHERE s.cluster_id=? AND e.relation_family='credit' "
+                "AND e.relation_type='actor'",
+                (work,),
+            )
+        }
+
+    def edges_from(self, cluster: int) -> list[Edge]:
+        return [
+            Edge(
+                cluster,
+                int(row[0]),
+                str(row[1]),
+                str(row[2]),
+                str(row[3]),
+                metadata if isinstance(metadata := json.loads(str(row[4])), dict) else {},
+            )
+            for row in self._rows(
+                "SELECT o.cluster_id,e.observation_provider,e.relation_family,"
+                "e.relation_type,e.metadata_json FROM provider_ids s "
+                "JOIN provider_edges e ON e.subject_provider_id=s.id "
+                "JOIN provider_ids o ON o.id=e.object_provider_id "
+                "WHERE s.cluster_id=? ORDER BY e.id",
+                (cluster,),
+            )
+        ]
+
+    def identity_names(self, provider_id: int) -> list[dict[str, Any]]:
+        return [
+            {"type": str(row[0]), "language": row[1], "script": row[2], "value": str(row[3])}
+            for row in self._rows(
+                "SELECT name_type,language_code,script_code,value FROM provider_names "
+                "WHERE subject_provider_id=? ORDER BY id",
+                (provider_id,),
+            )
+        ]
+
+    def identity_media(self, provider_id: int) -> list[dict[str, Any]]:
+        media: list[dict[str, Any]] = []
+        for row in self._rows(
+            "SELECT observation_provider,media_kind,media_json FROM provider_media "
+            "WHERE subject_provider_id=? ORDER BY id",
+            (provider_id,),
+        ):
+            value = json.loads(str(row[2]))
+            if isinstance(value, dict):
+                value = dict(value)
+                value["kind"] = str(row[1])
+                value["provider"] = str(row[0])
+                media.append(value)
+        return media
+
+    def identity_edges(
+        self, provider_id: int
+    ) -> list[tuple[str, str, dict[str, Any], Identity, str]]:
+        result: list[tuple[str, str, dict[str, Any], Identity, str]] = []
+        for row in self._rows(
+            "SELECT e.relation_family,e.relation_type,e.metadata_json,"
+            "o.provider,o.namespace,o.external_id,oc.entity_type "
+            "FROM provider_edges e JOIN provider_ids o ON o.id=e.object_provider_id "
+            "JOIN entity_clusters oc ON oc.id=o.cluster_id "
+            "WHERE e.subject_provider_id=? ORDER BY e.id",
+            (provider_id,),
+        ):
+            metadata = json.loads(str(row[2]))
+            result.append(
+                (
+                    str(row[0]),
+                    str(row[1]),
+                    metadata if isinstance(metadata, dict) else {},
+                    Identity(str(row[3]), str(row[4]), str(row[5])),
+                    str(row[6]),
+                )
+            )
+        return result
 
 
 def canonical_json(value: Any) -> str:
@@ -352,12 +552,8 @@ def identity_priority_names(identity: Identity) -> set[str]:
 
 
 def resolve_priorities(
-    graph: Graph, priority: Mapping[str, list[str]]
+    graph: ProviderGraph, priority: Mapping[str, list[str]]
 ) -> tuple[dict[tuple[str, str], int], list[dict[str, Any]]]:
-    by_external: dict[str, list[tuple[int, Identity]]] = defaultdict(list)
-    for cluster, identities in graph.identities.items():
-        for identity in identities:
-            by_external[identity.external_id].append((cluster, identity))
     resolved: dict[tuple[str, str], int] = {}
     issues: list[dict[str, Any]] = []
     for provider, identifiers in priority.items():
@@ -366,7 +562,7 @@ def resolve_priorities(
         for external_id in identifiers:
             matches = {
                 cluster
-                for cluster, identity in by_external.get(external_id, [])
+                for cluster, identity in graph.clusters_for_external_id(external_id)
                 if wanted in identity_priority_names(identity)
                 or wanted_compact in identity_priority_names(identity)
             }
@@ -437,15 +633,15 @@ def date_value(values: Iterable[Any]) -> tuple[int, str, str] | None:
     return chosen[0], chosen[3], chosen[4]
 
 
-def distinct_values(graph: Graph, cluster: int, field: str) -> list[Any]:
+def distinct_values(graph: ProviderGraph, cluster: int, field: str) -> list[Any]:
     encoded: dict[str, Any] = {}
-    for value, _provider, _identity in graph.facts.get(cluster, {}).get(field, []):
+    for value, _provider, _identity in graph.facts(cluster).get(field, []):
         encoded[canonical_json(value)] = value
     return [encoded[key] for key in sorted(encoded)]
 
 
 def scalar_value(
-    graph: Graph,
+    graph: ProviderGraph,
     cluster: int,
     field: str,
     conflicts: list[dict[str, Any]],
@@ -454,7 +650,7 @@ def scalar_value(
     if len(values) <= 1:
         return values[0] if values else None
     ordered = sorted(
-        graph.facts.get(cluster, {}).get(field, []),
+        graph.facts(cluster).get(field, []),
         key=lambda item: (item[2].sort_key, item[1], canonical_json(item[0])),
     )
     observations = [
@@ -485,7 +681,7 @@ def scalar_value(
 
 
 def medium_value(
-    graph: Graph, cluster: int, conflicts: list[dict[str, Any]]
+    graph: ProviderGraph, cluster: int, conflicts: list[dict[str, Any]]
 ) -> str | None:
     direct = scalar_value(graph, cluster, "medium", conflicts)
     if isinstance(direct, str) and direct in WORK_MEDIA:
@@ -496,40 +692,18 @@ def medium_value(
     return None
 
 
-def graph_adjacency(graph: Graph) -> tuple[
-    dict[int, set[int]], dict[int, set[int]], dict[int, set[int]], dict[int, set[int]]
-]:
-    credit_works: dict[int, set[int]] = defaultdict(set)
-    work_agents: dict[int, set[int]] = defaultdict(set)
-    membership: dict[int, set[int]] = defaultdict(set)
-    membership_reverse: dict[int, set[int]] = defaultdict(set)
-    for edge in graph.edges:
-        if (
-            edge.family == "credit"
-            and graph.types.get(edge.subject) == "work"
-            and graph.types.get(edge.object) in {"person", "organization", "group"}
-        ):
-            credit_works[edge.object].add(edge.subject)
-            work_agents[edge.subject].add(edge.object)
-        elif (
-            edge.family == "work_membership"
-            and edge.relation in MEMBERSHIP_TYPES
-            and graph.types.get(edge.subject) == "work"
-            and graph.types.get(edge.object) == "work"
-        ):
-            membership[edge.subject].add(edge.object)
-            membership_reverse[edge.object].add(edge.subject)
-    return credit_works, work_agents, membership, membership_reverse
+def membership_neighbours(graph: ProviderGraph, cluster: int) -> set[int]:
+    return {parent for parent, _relation in graph.membership_forward(cluster)} | {
+        child for child, _relation in graph.membership_reverse(cluster)
+    }
 
 
-def membership_closure(
-    seeds: Iterable[int], forward: Mapping[int, set[int]], reverse: Mapping[int, set[int]]
-) -> set[int]:
+def membership_closure(graph: ProviderGraph, seeds: Iterable[int]) -> set[int]:
     result = set(seeds)
     queue = deque(result)
     while queue:
         current = queue.popleft()
-        for neighbour in forward.get(current, set()) | reverse.get(current, set()):
+        for neighbour in membership_neighbours(graph, current):
             if neighbour not in result:
                 result.add(neighbour)
                 queue.append(neighbour)
@@ -537,23 +711,23 @@ def membership_closure(
 
 
 def _one_provider_value(
-    graph: Graph, cluster: int, identity: Identity, field: str
+    graph: ProviderGraph, cluster: int, identity: Identity, field: str
 ) -> Any | None:
     values = {
         canonical_json(value): value
-        for value, _observer, subject in graph.facts.get(cluster, {}).get(field, [])
+        for value, _observer, subject in graph.facts(cluster).get(field, [])
         if subject == identity
     }
     return values[next(iter(values))] if len(values) == 1 else None
 
 
 def _provider_date_value(
-    graph: Graph, cluster: int, identity: Identity, *fields: str
+    graph: ProviderGraph, cluster: int, identity: Identity, *fields: str
 ) -> dict[str, Any] | None:
     values = [
         value
         for field in fields
-        for value, _observer, subject in graph.facts.get(cluster, {}).get(field, [])
+        for value, _observer, subject in graph.facts(cluster).get(field, [])
         if subject == identity
     ]
     chosen = date_value(values)
@@ -562,14 +736,17 @@ def _provider_date_value(
     return {"year": chosen[0], "precision": chosen[1], "text": chosen[2]}
 
 
-def provider_state(graph: Graph) -> dict[tuple[str, str], dict[str, Any]]:
-    """Return only normalized non-null fields that the product can materialize."""
+def provider_state(
+    graph: ProviderGraph, clusters: Iterable[int]
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Return normalized non-null materializable fields for the given clusters."""
 
     state: dict[tuple[str, str], dict[str, Any]] = defaultdict(dict)
-    for cluster, identities in graph.identities.items():
-        for identity in identities:
+    for cluster in sorted(set(clusters)):
+        cluster_type = graph.type_of(cluster)
+        for provider_id, identity in graph.identity_rows(cluster):
             key = (identity.scheme, identity.external_id)
-            if graph.types.get(cluster) == "work":
+            if cluster_type == "work":
                 medium = _one_provider_value(graph, cluster, identity, "medium")
                 if not isinstance(medium, str) or medium not in WORK_MEDIA:
                     work_type = _one_provider_value(
@@ -591,7 +768,7 @@ def provider_state(graph: Graph) -> dict[tuple[str, str], dict[str, Any]]:
                     value = _one_provider_value(graph, cluster, identity, field)
                     if value is not None:
                         state[key][field] = value
-            elif graph.types.get(cluster) in {"person", "organization", "group"}:
+            elif cluster_type in AGENT_TYPES:
                 for target, aliases in (
                     ("birth_date", ("birth_date", "birth_year")),
                     ("death_date", ("death_date", "death_year")),
@@ -607,63 +784,50 @@ def provider_state(graph: Graph) -> dict[tuple[str, str], dict[str, Any]]:
                     "script": row["script"],
                     "value": row["value"],
                 }
-                for row in graph.names.get(cluster, [])
-                if row["identity"] == identity
+                for row in graph.identity_names(provider_id)
             ]
             if identity_names:
                 state[key]["names"] = sorted(identity_names, key=canonical_json)
-            identity_media = [
-                {
-                    field: value
-                    for field, value in row.items()
-                    if field != "identity"
-                }
-                for row in graph.media.get(cluster, [])
-                if row["identity"] == identity
-            ]
+            identity_media = graph.identity_media(provider_id)
             if identity_media:
                 state[key]["media"] = sorted(identity_media, key=canonical_json)
 
-    relationship_sets: dict[
-        tuple[str, str], dict[str, dict[str, dict[str, Any]]]
-    ] = defaultdict(lambda: defaultdict(dict))
-    for edge in graph.edges:
-        if edge.subject_identity is None or edge.object_identity is None:
-            continue
-        if (
-            edge.family == "credit"
-            and edge.relation in CREDIT_ROLES
-            and graph.types.get(edge.subject) == "work"
-            and graph.types.get(edge.object) in {"person", "organization", "group"}
-        ):
-            field = "credits"
-        elif (
-            edge.family == "work_membership"
-            and edge.relation in MEMBERSHIP_TYPES
-            and graph.types.get(edge.subject) == "work"
-            and graph.types.get(edge.object) == "work"
-        ):
-            field = "work_memberships"
-        elif (
-            edge.family == "agent_relation"
-            and edge.relation in AGENT_RELATION_TYPES
-            and graph.types.get(edge.subject) in {"person", "organization", "group"}
-            and graph.types.get(edge.object) in {"person", "organization", "group"}
-        ):
-            field = "agent_relations"
-        else:
-            continue
-        row = {
-            "target_scheme": edge.object_identity.scheme,
-            "target_external_id": edge.object_identity.external_id,
-            "relation": edge.relation,
-            "metadata": dict(edge.metadata),
-        }
-        key = (edge.subject_identity.scheme, edge.subject_identity.external_id)
-        relationship_sets[key][field][canonical_json(row)] = row
-    for key, fields in relationship_sets.items():
-        for field, rows in fields.items():
-            state[key][field] = [rows[value] for value in sorted(rows)]
+            relationship_sets: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+            for family, relation, metadata, target, target_type in graph.identity_edges(
+                provider_id
+            ):
+                if (
+                    family == "credit"
+                    and relation in CREDIT_ROLES
+                    and cluster_type == "work"
+                    and target_type in AGENT_TYPES
+                ):
+                    field = "credits"
+                elif (
+                    family == "work_membership"
+                    and relation in MEMBERSHIP_TYPES
+                    and cluster_type == "work"
+                    and target_type == "work"
+                ):
+                    field = "work_memberships"
+                elif (
+                    family == "agent_relation"
+                    and relation in AGENT_RELATION_TYPES
+                    and cluster_type in AGENT_TYPES
+                    and target_type in AGENT_TYPES
+                ):
+                    field = "agent_relations"
+                else:
+                    continue
+                row = {
+                    "target_scheme": target.scheme,
+                    "target_external_id": target.external_id,
+                    "relation": relation,
+                    "metadata": dict(metadata),
+                }
+                relationship_sets[field][canonical_json(row)] = row
+            for field, rows in relationship_sets.items():
+                state[key][field] = [rows[value] for value in sorted(rows)]
     return state
 
 
@@ -699,33 +863,32 @@ def anomalies(
 
 
 def current_cluster_entities(
-    graph: Graph, product: sqlite3.Connection, issues: list[dict[str, Any]]
+    graph: ProviderGraph, product: sqlite3.Connection, issues: list[dict[str, Any]]
 ) -> tuple[dict[int, str], set[int]]:
-    existing = {
-        (str(scheme), str(value)): (str(entity), str(entity_type))
-        for entity, scheme, value, entity_type in product.execute(
-            "SELECT x.entity_id,x.scheme,x.value,e.entity_type "
-            "FROM external_ids x JOIN entities e ON e.id=x.entity_id"
-        )
-    }
+    """Bind graph clusters to product entities through exact external IDs.
+
+    Only the product's own external IDs are looked up in the graph, so the
+    work is bounded by the product rather than by the provider corpus.
+    """
+
+    matches: dict[int, set[tuple[str, str]]] = defaultdict(set)
+    for entity, scheme, value, entity_type in product.execute(
+        "SELECT x.entity_id,x.scheme,x.value,e.entity_type "
+        "FROM external_ids x JOIN entities e ON e.id=x.entity_id"
+    ):
+        for cluster, identity in graph.clusters_for_external_id(str(value)):
+            if identity.scheme == str(scheme):
+                matches[cluster].add((str(entity), str(entity_type)))
     result: dict[int, str] = {}
     blocked: set[int] = set()
-    for cluster, identities in graph.identities.items():
-        matches = {
-            existing[(identity.scheme, identity.external_id)]
-            for identity in identities
-            if (identity.scheme, identity.external_id) in existing
-        }
-        entities = {entity for entity, _entity_type in matches}
+    for cluster in sorted(matches):
+        entities = {entity for entity, _entity_type in matches[cluster]}
         if len(entities) == 1:
-            entity, entity_type = next(iter(matches))
-            graph_type = graph.types.get(cluster)
+            entity, entity_type = next(iter(matches[cluster]))
+            graph_type = graph.type_of(cluster)
             compatible = (
                 graph_type == "work" and entity_type == "work"
-            ) or (
-                graph_type in {"person", "organization", "group"}
-                and entity_type == graph_type
-            )
+            ) or (graph_type in AGENT_TYPES and entity_type == graph_type)
             if compatible:
                 result[cluster] = entity
             else:
@@ -739,7 +902,7 @@ def current_cluster_entities(
                         "provider_type": graph_type,
                     }
                 )
-        elif len(entities) > 1:
+        else:
             blocked.add(cluster)
             issues.append(
                 {
@@ -767,15 +930,15 @@ def next_ids(product: sqlite3.Connection) -> dict[str, int]:
 
 def allocate_entity(
     product: sqlite3.Connection,
-    graph: Graph,
+    graph: ProviderGraph,
     cluster: int,
     cluster_entities: dict[int, str],
     counters: dict[str, int],
 ) -> str:
     if cluster in cluster_entities:
         return cluster_entities[cluster]
-    entity_type = graph.types[cluster]
-    if entity_type not in {"work", "person", "organization", "group"}:
+    entity_type = graph.type_of(cluster)
+    if entity_type not in {"work", *AGENT_TYPES}:
         raise ProviderRebuildError(
             f"cluster {cluster} has non-materializable type {entity_type!r}"
         )
@@ -797,12 +960,12 @@ def allocate_entity(
 
 def apply_scalars(
     product: sqlite3.Connection,
-    graph: Graph,
+    graph: ProviderGraph,
     cluster: int,
     entity_id: str,
     conflicts: list[dict[str, Any]],
 ) -> None:
-    if graph.types[cluster] == "work":
+    if graph.type_of(cluster) == "work":
         medium = medium_value(graph, cluster, conflicts)
         values: dict[str, Any] = {}
         if medium is not None:
@@ -848,9 +1011,9 @@ def apply_scalars(
 
 
 def apply_identity(
-    product: sqlite3.Connection, graph: Graph, cluster: int, entity_id: str
+    product: sqlite3.Connection, graph: ProviderGraph, cluster: int, entity_id: str
 ) -> None:
-    for identity in graph.identities.get(cluster, []):
+    for identity in graph.identities(cluster):
         product.execute(
             "INSERT OR IGNORE INTO external_ids(entity_id,scheme,value) VALUES(?,?,?)",
             (entity_id, identity.scheme, identity.external_id),
@@ -1144,58 +1307,64 @@ def synchronize_provider_relationships(
 
 def apply_edges(
     product: sqlite3.Connection,
-    graph: Graph,
+    graph: ProviderGraph,
     selected: set[int],
     cluster_entities: Mapping[int, str],
     issues: list[dict[str, Any]],
 ) -> None:
-    for edge in graph.edges:
-        if edge.subject not in selected or edge.object not in selected:
-            continue
-        subject = cluster_entities[edge.subject]
-        object_ = cluster_entities[edge.object]
-        if edge.family == "credit":
-            if edge.relation not in CREDIT_ROLES:
-                issues.append({"kind": "unsupported_credit", "relation": edge.relation})
+    for cluster in sorted(selected):
+        for edge in graph.edges_from(cluster):
+            if edge.object not in selected:
                 continue
-            position = edge.metadata.get("position")
-            position = position if isinstance(position, int) and position >= 0 else None
-            credited_as = edge.metadata.get("credited_as")
-            credited_as = credited_as if isinstance(credited_as, str) and credited_as else None
-            product.execute(
-                "INSERT OR IGNORE INTO credits(entity_id,agent_id,role,credit_order,importance,credited_as) "
-                "VALUES(?,?,?,?,?,?)",
-                (subject, object_, edge.relation, position, "supporting", credited_as),
-            )
-        elif edge.family == "work_membership" and edge.relation in MEMBERSHIP_TYPES:
-            position = edge.metadata.get("position")
-            position = position if isinstance(position, int) and position >= 0 else None
-            position_text = edge.metadata.get("position_text")
-            position_text = position_text if isinstance(position_text, str) and position_text else None
-            product.execute(
-                "INSERT OR IGNORE INTO work_memberships(child_work_id,parent_work_id,membership_type,position,position_text) "
-                "VALUES(?,?,?,?,?)",
-                (subject, object_, edge.relation, position, position_text),
-            )
-        elif edge.family == "agent_relation" and edge.relation in AGENT_RELATION_TYPES:
-            product.execute(
-                "INSERT OR IGNORE INTO agent_relations(subject_agent_id,relation_type,object_agent_id) "
-                "VALUES(?,?,?)",
-                (subject, edge.relation, object_),
-            )
+            subject = cluster_entities[edge.subject]
+            object_ = cluster_entities[edge.object]
+            if edge.family == "credit":
+                if edge.relation not in CREDIT_ROLES:
+                    issues.append({"kind": "unsupported_credit", "relation": edge.relation})
+                    continue
+                position = edge.metadata.get("position")
+                position = position if isinstance(position, int) and position >= 0 else None
+                credited_as = edge.metadata.get("credited_as")
+                credited_as = (
+                    credited_as if isinstance(credited_as, str) and credited_as else None
+                )
+                product.execute(
+                    "INSERT OR IGNORE INTO credits(entity_id,agent_id,role,credit_order,"
+                    "importance,credited_as) VALUES(?,?,?,?,?,?)",
+                    (subject, object_, edge.relation, position, "supporting", credited_as),
+                )
+            elif edge.family == "work_membership" and edge.relation in MEMBERSHIP_TYPES:
+                position = edge.metadata.get("position")
+                position = position if isinstance(position, int) and position >= 0 else None
+                position_text = edge.metadata.get("position_text")
+                position_text = (
+                    position_text
+                    if isinstance(position_text, str) and position_text
+                    else None
+                )
+                product.execute(
+                    "INSERT OR IGNORE INTO work_memberships(child_work_id,parent_work_id,"
+                    "membership_type,position,position_text) VALUES(?,?,?,?,?)",
+                    (subject, object_, edge.relation, position, position_text),
+                )
+            elif edge.family == "agent_relation" and edge.relation in AGENT_RELATION_TYPES:
+                product.execute(
+                    "INSERT OR IGNORE INTO agent_relations(subject_agent_id,relation_type,"
+                    "object_agent_id) VALUES(?,?,?)",
+                    (subject, edge.relation, object_),
+                )
 
 
 def update_provider_state(
     product: sqlite3.Connection,
-    state: Mapping[tuple[str, str], dict[str, Any]],
+    graph: ProviderGraph,
     cluster_entities: Mapping[int, str],
-    graph: Graph,
 ) -> None:
+    state = provider_state(graph, cluster_entities)
     entity_for_identity = {
-        (identity.scheme, identity.external_id): cluster_entities[cluster]
-        for cluster, identities in graph.identities.items()
-        if cluster in cluster_entities
-        for identity in identities
+        (identity.scheme, identity.external_id): entity
+        for cluster, entity in cluster_entities.items()
+        for identity in graph.identities(cluster)
     }
     for key, fields in state.items():
         entity_id = entity_for_identity.get(key)
@@ -1232,93 +1401,96 @@ def tail_metrics(product: sqlite3.Connection) -> tuple[int, int, int]:
     return count, tail, budget
 
 
-def series_allowed(graph: Graph, series: int, children: set[int]) -> bool:
-    episodes = {
-        child
-        for child in children
-        if any(
-            edge.subject == child
-            and edge.family == "work_membership"
-            and edge.relation == "episode_of"
-            for edge in graph.edges
-        )
-    }
+def series_allowed(graph: ProviderGraph, series: int, children: set[int]) -> bool:
+    episodes = {child for child in children if graph.has_episode_edge(child)}
     if not episodes:
         return True
     actor_episodes: dict[int, set[int]] = defaultdict(set)
-    for edge in graph.edges:
-        if edge.family == "credit" and edge.relation == "actor" and edge.subject in episodes:
-            actor_episodes[edge.object].add(edge.subject)
+    for episode in episodes:
+        for actor in graph.actors_of(episode):
+            actor_episodes[actor].add(episode)
     top = sorted(actor_episodes.values(), key=lambda value: -len(value))[:TOP_ACTOR_COUNT]
     recurrent = sum(len(value) / len(episodes) >= RECURRENT_ACTOR_RATIO for value in top)
     return recurrent <= MAX_RECURRENT_TOP_ACTORS
 
 
 def bundle_for(
-    graph: Graph,
+    graph: ProviderGraph,
     work: int,
-    forward: Mapping[int, set[int]],
-    reverse: Mapping[int, set[int]],
     conflicts: list[dict[str, Any]],
 ) -> tuple[set[int], int] | None:
-    component = membership_closure({work}, forward, reverse)
+    component = membership_closure(graph, {work})
     relations = {
-        edge.relation
-        for edge in graph.edges
-        if edge.family == "work_membership"
-        and edge.subject in component
-        and edge.object in component
+        relation
+        for cluster in component
+        for parent, relation in graph.membership_forward(cluster)
+        if parent in component
     }
     media = {medium_value(graph, cluster, conflicts) for cluster in component}
     if "track_of" in relations or "album" in media:
         return component, ALBUM_BUNDLE_COST
     if {"episode_of", "season_of"} & relations:
-        roots = {cluster for cluster in component if not (forward.get(cluster, set()) & component)}
+        roots = {
+            cluster
+            for cluster in component
+            if not ({parent for parent, _relation in graph.membership_forward(cluster)}
+                    & component)
+        }
         series = min(roots or component)
         return (component, SERIES_BUNDLE_COST) if series_allowed(graph, series, component) else None
     return {work}, ORDINARY_WORK_COST
 
 
 def ordinary_selection(
-    graph: Graph,
+    graph: ProviderGraph,
     already: set[int],
     budget: int,
     anomalous: set[tuple[str, str]],
     conflicts: list[dict[str, Any]],
     blocked: set[int],
 ) -> tuple[set[int], list[dict[str, Any]], int]:
-    credit_works, _work_agents, forward, reverse = graph_adjacency(graph)
+    """Greedy agent-pool expansion over the product's graph neighbourhood.
+
+    An agent can score only if one of its works is already materialized or
+    claimed, so candidates are exactly the agents credited on those works;
+    the rest of the provider corpus is never visited.
+    """
+
     claimed: set[int] = set()
     selected_agents: set[int] = set()
     selected_works: set[int] = set()
+    candidates: set[int] = set()
+    for work in already:
+        candidates.update(graph.agents_of(work))
     ranking: list[dict[str, Any]] = []
     remaining = budget
     pool_rank = 0
     while remaining > 0:
         choices: list[tuple[float, int, tuple[str, str, str], int, set[int]]] = []
-        for agent, works in credit_works.items():
+        for agent in candidates:
             if agent in selected_agents or agent in blocked:
                 continue
+            works = graph.works_of(agent)
             parsed = len(works & already)
             gray = len(works & claimed)
-            unclaimed = works - already - claimed - blocked
+            unclaimed = set(works) - already - claimed - blocked
             if not works or parsed + gray == 0 or not unclaimed:
                 continue
             base = (parsed + GRAY_WEIGHT * gray) / len(works)
+            identities = graph.identities(agent)
             provider_count = min(
-                PROVIDER_BONUS_CAP,
-                len({identity.provider for identity in graph.identities.get(agent, [])}),
+                PROVIDER_BONUS_CAP, len({identity.provider for identity in identities})
             )
             bonus = 1.0 + PROVIDER_BONUS_STEP * max(0, provider_count - 1)
             penalty = (
                 ANOMALY_MULTIPLIER
                 if any(
                     (identity.scheme, identity.external_id) in anomalous
-                    for identity in graph.identities.get(agent, [])
+                    for identity in identities
                 )
                 else 1.0
             )
-            key = min(identity.sort_key for identity in graph.identities[agent])
+            key = graph.sort_key(agent)
             choices.append((base * bonus * penalty, -len(unclaimed), key, agent, unclaimed))
         if not choices:
             break
@@ -1328,13 +1500,10 @@ def ordinary_selection(
         selected_agents.add(agent)
         pool_rank += 1
         accepted: set[int] = set()
-        for work in sorted(
-            unclaimed,
-            key=lambda cluster: min(identity.sort_key for identity in graph.identities[cluster]),
-        ):
+        for work in sorted(unclaimed, key=graph.sort_key):
             if work in claimed:
                 continue
-            bundle = bundle_for(graph, work, forward, reverse, conflicts)
+            bundle = bundle_for(graph, work, conflicts)
             if bundle is None:
                 continue
             works, cost = bundle
@@ -1347,6 +1516,8 @@ def ordinary_selection(
             claimed.update(new_works)
             selected_works.update(new_works)
             remaining -= cost
+        for work in accepted:
+            candidates.update(graph.agents_of(work))
         ranking.append(
             {
                 "pool_rank": pool_rank,
@@ -1359,13 +1530,9 @@ def ordinary_selection(
 
 
 def priority_selection(
-    graph: Graph,
+    graph: ProviderGraph,
     resolved: Mapping[tuple[str, str], int],
     blocked: set[int],
-    credit_works: Mapping[int, set[int]],
-    work_agents: Mapping[int, set[int]],
-    membership: Mapping[int, set[int]],
-    membership_reverse: Mapping[int, set[int]],
     issues: list[dict[str, Any]],
 ) -> tuple[set[int], set[int], set[tuple[str, str]]]:
     works: set[int] = set()
@@ -1373,19 +1540,17 @@ def priority_selection(
     for token, cluster in resolved.items():
         if cluster in blocked:
             continue
-        entity_type = graph.types.get(cluster)
+        entity_type = graph.type_of(cluster)
         seeds = (
             {cluster}
             if entity_type == "work"
-            else set(credit_works.get(cluster, set()))
-            if entity_type in {"person", "organization", "group"}
+            else set(graph.works_of(cluster))
+            if entity_type in AGENT_TYPES
             else set()
         )
         usable: set[int] = set()
         for seed in seeds:
-            component = membership_closure(
-                {seed}, membership, membership_reverse
-            )
+            component = membership_closure(graph, {seed})
             if component & blocked:
                 issues.append(
                     {
@@ -1403,7 +1568,7 @@ def priority_selection(
     agents = {
         agent
         for work in works
-        for agent in work_agents.get(work, set())
+        for agent in graph.agents_of(work)
         if agent not in blocked
     }
     return works, agents, successful
@@ -1429,117 +1594,122 @@ def materialize(
 ) -> dict[str, Any]:
     if report_path.exists() or report_path.is_symlink():
         raise ProviderRebuildError(f"report already exists: {report_path}")
-    graph = Graph.load(graph_path)
     priority = load_priority(priority_path)
-    resolved, issues = resolve_priorities(graph, priority)
-    credit_works, work_agents, membership, membership_reverse = graph_adjacency(graph)
     successful: set[tuple[str, str]] = set()
 
-    product = sqlite3.connect(database_path)
-    product.execute("PRAGMA foreign_keys=ON")
-    try:
-        required = {
-            str(row[0])
-            for row in product.execute("SELECT name FROM sqlite_schema WHERE type='table'")
-        }
-        if "provider_general_facts" not in required:
-            raise ProviderRebuildError("product database lacks provider_general_facts")
-        current_state = provider_state(graph)
-        anomalous, anomaly_rows = anomalies(product, current_state)
-        cluster_entities, blocked = current_cluster_entities(graph, product, issues)
-        priority_works, priority_agents, successful = priority_selection(
-            graph,
-            resolved,
-            blocked,
-            credit_works,
-            work_agents,
-            membership,
-            membership_reverse,
-            issues,
-        )
-        existing_work_clusters = {
-            cluster
-            for cluster, entity in cluster_entities.items()
-            if product.execute("SELECT 1 FROM works WHERE entity_id=?", (entity,)).fetchone()
-        }
-        existing_agents = {
-            cluster
-            for cluster, entity in cluster_entities.items()
-            if product.execute(
-                "SELECT 1 FROM agents WHERE entity_id=?", (entity,)
-            ).fetchone()
-        }
-        existing_agents.update(
-            agent
-            for work in existing_work_clusters
-            for agent in work_agents.get(work, set())
-            if agent not in blocked
-        )
-        selected = (
-            existing_work_clusters
-            | existing_agents
-            | priority_works
-            | priority_agents
-        )
-        product.execute("BEGIN IMMEDIATE")
-        counters = next_ids(product)
-        conflicts: list[dict[str, Any]] = []
-        for cluster in sorted(selected):
-            entity = allocate_entity(product, graph, cluster, cluster_entities, counters)
-            apply_scalars(product, graph, cluster, entity, conflicts)
-            apply_identity(product, graph, cluster, entity)
-        n_after_priority, t_after_priority, budget = tail_metrics(product)
-        ordinary_works, ranking, spent = ordinary_selection(
-            graph,
-            existing_work_clusters | priority_works,
-            budget,
-            anomalous,
-            conflicts,
-            blocked,
-        )
-        ordinary_agents = {
-            agent
-            for work in ordinary_works
-            for agent in work_agents.get(work, set())
-            if agent not in blocked
-        }
-        ordinary_selected = ordinary_works | ordinary_agents
-        for cluster in sorted(ordinary_selected - selected):
-            entity = allocate_entity(product, graph, cluster, cluster_entities, counters)
-            apply_scalars(product, graph, cluster, entity, conflicts)
-            apply_identity(product, graph, cluster, entity)
-        selected.update(ordinary_selected)
-        apply_edges(product, graph, selected, cluster_entities, issues)
-        update_provider_state(product, current_state, cluster_entities, graph)
-        synchronize_provider_sets(
-            product,
-            (cluster_entities[cluster] for cluster in selected),
-        )
-        synchronize_provider_relationships(
-            product,
-            (cluster_entities[cluster] for cluster in selected),
-            issues,
-        )
+    with ProviderGraph(graph_path) as graph:
+        resolved, issues = resolve_priorities(graph, priority)
+        product = sqlite3.connect(database_path)
+        product.execute("PRAGMA foreign_keys=ON")
+        try:
+            required = {
+                str(row[0])
+                for row in product.execute("SELECT name FROM sqlite_schema WHERE type='table'")
+            }
+            if "provider_general_facts" not in required:
+                raise ProviderRebuildError("product database lacks provider_general_facts")
+            # Anomalies compare stored provider state with the current state of
+            # the same exact identities only.
+            previous_clusters = {
+                cluster
+                for (scheme, external_id) in product.execute(
+                    "SELECT DISTINCT provider,external_id FROM provider_general_facts"
+                )
+                if (cluster := graph.cluster_for_key(str(scheme), str(external_id)))
+                is not None
+            }
+            anomalous, anomaly_rows = anomalies(
+                product, provider_state(graph, previous_clusters)
+            )
+            cluster_entities, blocked = current_cluster_entities(graph, product, issues)
+            priority_works, priority_agents, successful = priority_selection(
+                graph, resolved, blocked, issues
+            )
+            existing_work_clusters = {
+                cluster
+                for cluster, entity in cluster_entities.items()
+                if product.execute("SELECT 1 FROM works WHERE entity_id=?", (entity,)).fetchone()
+            }
+            existing_agents = {
+                cluster
+                for cluster, entity in cluster_entities.items()
+                if product.execute(
+                    "SELECT 1 FROM agents WHERE entity_id=?", (entity,)
+                ).fetchone()
+            }
+            existing_agents.update(
+                agent
+                for work in existing_work_clusters
+                for agent in graph.agents_of(work)
+                if agent not in blocked
+            )
+            selected = (
+                existing_work_clusters
+                | existing_agents
+                | priority_works
+                | priority_agents
+            )
+            product.execute("BEGIN IMMEDIATE")
+            counters = next_ids(product)
+            conflicts: list[dict[str, Any]] = []
+            for cluster in sorted(selected):
+                entity = allocate_entity(product, graph, cluster, cluster_entities, counters)
+                apply_scalars(product, graph, cluster, entity, conflicts)
+                apply_identity(product, graph, cluster, entity)
+            n_after_priority, t_after_priority, budget = tail_metrics(product)
+            ordinary_works, ranking, spent = ordinary_selection(
+                graph,
+                existing_work_clusters | priority_works,
+                budget,
+                anomalous,
+                conflicts,
+                blocked,
+            )
+            ordinary_agents = {
+                agent
+                for work in ordinary_works
+                for agent in graph.agents_of(work)
+                if agent not in blocked
+            }
+            ordinary_selected = ordinary_works | ordinary_agents
+            for cluster in sorted(ordinary_selected - selected):
+                entity = allocate_entity(product, graph, cluster, cluster_entities, counters)
+                apply_scalars(product, graph, cluster, entity, conflicts)
+                apply_identity(product, graph, cluster, entity)
+            selected.update(ordinary_selected)
+            apply_edges(product, graph, selected, cluster_entities, issues)
+            update_provider_state(product, graph, cluster_entities)
+            synchronize_provider_sets(
+                product,
+                (cluster_entities[cluster] for cluster in selected),
+            )
+            synchronize_provider_relationships(
+                product,
+                (cluster_entities[cluster] for cluster in selected),
+                issues,
+            )
 
-        product.execute(
-            "DELETE FROM entities WHERE id IN ("
-            "SELECT a.entity_id FROM agents a WHERE NOT EXISTS("
-            "SELECT 1 FROM credits c WHERE c.agent_id=a.entity_id))"
-        )
-        for cluster, entity in list(cluster_entities.items()):
-            if not product.execute("SELECT 1 FROM entities WHERE id=?", (entity,)).fetchone():
-                del cluster_entities[cluster]
-                successful = {token for token in successful if resolved.get(token) != cluster}
-        foreign_keys = list(product.execute("PRAGMA foreign_key_check"))
-        if foreign_keys:
-            raise ProviderRebuildError("materialized product has foreign-key errors")
-        n, tail, next_budget = tail_metrics(product)
-        product.commit()
-    except BaseException:
-        product.rollback()
-        raise
-    finally:
-        product.close()
+            product.execute(
+                "DELETE FROM entities WHERE id IN ("
+                "SELECT a.entity_id FROM agents a WHERE NOT EXISTS("
+                "SELECT 1 FROM credits c WHERE c.agent_id=a.entity_id))"
+            )
+            for cluster, entity in list(cluster_entities.items()):
+                if not product.execute("SELECT 1 FROM entities WHERE id=?", (entity,)).fetchone():
+                    del cluster_entities[cluster]
+                    successful = {
+                        token for token in successful if resolved.get(token) != cluster
+                    }
+            foreign_keys = list(product.execute("PRAGMA foreign_key_check"))
+            if foreign_keys:
+                raise ProviderRebuildError("materialized product has foreign-key errors")
+            n, tail, next_budget = tail_metrics(product)
+            product.commit()
+        except BaseException:
+            product.rollback()
+            raise
+        finally:
+            product.close()
 
     remaining = {
         provider: [
@@ -1554,7 +1724,6 @@ def materialize(
     pending = {provider: len(values) for provider, values in remaining.items()}
     report = {
         "format": "provider_rebuild_report",
-        "format_version": 1,
         "priority": {
             "resolved": len(resolved),
             "materialized": len(successful),

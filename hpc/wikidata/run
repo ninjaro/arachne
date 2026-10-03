@@ -1177,7 +1177,7 @@ def command_result(arguments: argparse.Namespace) -> int:
                     report,
                     "output",
                     path_value(metadata, "external_graph"),
-                    "provider_observation_graph_v1",
+                    "provider_observation_graph",
                 )
                 verify_report_artifact(
                     report,
@@ -1279,7 +1279,7 @@ def command_clean(arguments: argparse.Namespace) -> int:
         report,
         "output",
         path_value(metadata, "external_graph"),
-        "provider_observation_graph_v1",
+        "provider_observation_graph",
     )
     verify_report_artifact(
         report,

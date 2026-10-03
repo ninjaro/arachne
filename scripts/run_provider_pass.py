@@ -2,9 +2,18 @@
 """Run one multi-provider pass: one graph, one materialization, one hint build.
 
 The pass starts from the required Wikidata observation graph (the HPC worker
-output), streams every acquired optional provider dump into that same graph,
-materializes the product exactly once, and finally builds the separate
-disposable research-hint artifact from the same graph snapshot.
+output) and runs two independent domains:
+
+1. General information. Hint inputs are preflighted first. Every acquired
+   optional provider dump is then streamed into the same graph without its
+   hint-only signals (they are detected and counted, not stored), and the
+   product is materialized exactly once. This domain commits on its own.
+2. Research hints. Dump families that can carry signals are scanned a second
+   time and only signals whose subject can reach an under-mined work are
+   stored; signals already in the base graph that no under-mined work can use
+   are pruned. The separate disposable hint artifact is then built. A hint
+   failure is reported as that domain's failure and never makes the state of
+   the committed general pass ambiguous.
 
 Each dump is ingested atomically. A failed optional input is reported and the
 pass continues with the inputs that succeeded; a failed required input aborts
@@ -15,7 +24,6 @@ Pheidippides boundary: this script consumes already-acquired artifacts.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import sqlite3
@@ -29,7 +37,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.hint_vocabulary import HintVocabularyError
-from scripts.ingest_provider_dump import PROVIDER_KINDS, DumpIngestError, records_for
+from scripts.ingest_provider_dump import (
+    PROVIDER_KINDS,
+    SIGNAL_INPUTS,
+    DumpIngestError,
+    records_for,
+    sha256_file,
+)
 from scripts.materialize_provider_rebuild import (
     ProviderRebuildError,
     canonical_json,
@@ -39,7 +53,12 @@ from scripts.materialize_provider_rebuild import (
 from scripts.provider_fixture_adapters import ProviderAdapterError
 from scripts.provider_observation_graph import ObservationGraph, ObservationGraphError
 from scripts.provider_policy import PROVIDER_POLICIES
-from scripts.research_hints import ResearchHintError, build as build_hints
+from scripts.research_hints import (
+    ResearchHintError,
+    build as build_hints,
+    preflight as preflight_hints,
+    relevant_signal_subjects,
+)
 
 
 INGEST_ERRORS = (
@@ -50,32 +69,30 @@ INGEST_ERRORS = (
     ObservationGraphError,
     DumpIngestError,
 )
+HINT_ERRORS = (
+    *INGEST_ERRORS,
+    HintVocabularyError,
+    ResearchHintError,
+    ValueError,
+)
+# Exit status when general information committed but the hint build failed.
+HINTS_FAILED_EXIT = 3
 
 
 class ProviderPassError(RuntimeError):
     """The pass manifest or a required input cannot be processed."""
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def load_manifest(path: Path) -> dict[str, Any]:
+    """Read the latest-only pass manifest; the current commit's shape only."""
+
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ProviderPassError(f"cannot read pass manifest: {error}") from error
-    if (
-        not isinstance(value, dict)
-        or value.get("format") != "provider_pass_manifest"
-        or value.get("format_version") != 1
-    ):
-        raise ProviderPassError("manifest must be provider_pass_manifest format_version 1")
-    if set(value) - {"format", "format_version", "base_graph", "inputs"}:
+    if not isinstance(value, dict) or value.get("format") != "provider_pass_manifest":
+        raise ProviderPassError("manifest must be a provider_pass_manifest")
+    if set(value) - {"format", "base_graph", "inputs"}:
         raise ProviderPassError("manifest contains unsupported fields")
     base = value.get("base_graph")
     if base is not None and (not isinstance(base, str) or not base):
@@ -105,31 +122,32 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
-def record_sources(graph_path: Path, ingested: dict[str, list[dict[str, Any]]]) -> None:
-    """Record one deterministic source identity per ingested provider.
+def signal_pass(
+    graph: ObservationGraph,
+    graph_path: Path,
+    database_path: Path,
+    ingested: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Store only the signals an under-mined work can consume."""
 
-    ``provider_sources`` has one row per provider, while some providers ship
-    several dump files. The row's digest therefore covers the sorted
-    ``(kind, sha256)`` list of every file ingested for that provider.
-    """
-
-    connection = sqlite3.connect(graph_path)
-    try:
-        for provider, items in sorted(ingested.items()):
-            files = sorted([item["kind"], item["sha256"]] for item in items)
-            connection.execute(
-                "INSERT OR IGNORE INTO provider_sources(provider,snapshot_id,storage_ref,sha256) "
-                "VALUES(?,?,?,?)",
-                (
-                    provider,
-                    items[0]["snapshot_id"],
-                    f"provider-pass:{provider}",
-                    hashlib.sha256(canonical_json(files).encode("utf-8")).hexdigest(),
-                ),
-            )
-        connection.commit()
-    finally:
-        connection.close()
+    relevant = relevant_signal_subjects(graph_path, database_path)
+    report: dict[str, Any] = {
+        "relevant_subjects": len(relevant),
+        "pruned_base_signals": graph.prune_signals(relevant),
+        "inputs": [],
+    }
+    for item in ingested:
+        if (item["provider"], item["kind"]) not in SIGNAL_INPUTS:
+            continue
+        stats = graph.ingest_signals(
+            item["provider"],
+            records_for(item["provider"], item["kind"], item["path"]),
+            relevant,
+        )
+        report["inputs"].append(
+            {"provider": item["provider"], "kind": item["kind"], **stats}
+        )
+    return report
 
 
 def run_pass(
@@ -147,6 +165,15 @@ def run_pass(
     manifest = load_manifest(manifest_path)
     if graph_path.exists() or graph_path.is_symlink():
         raise ProviderPassError(f"pass graph already exists: {graph_path}")
+    # A malformed disposable hint input fails before any product mutation.
+    try:
+        preflight_hints(
+            manual_path=manual_signals,
+            allow_restricted=allow_restricted or (),
+            vocabulary_path=vocabulary,
+        )
+    except (OSError, HintVocabularyError, ResearchHintError) as error:
+        raise ProviderPassError(f"hint input preflight failed: {error}") from error
     base = manifest.get("base_graph")
     graph_path.parent.mkdir(parents=True, exist_ok=True)
     if base is not None:
@@ -158,7 +185,7 @@ def run_pass(
         graph = ObservationGraph.create(graph_path)
 
     statuses: list[dict[str, Any]] = []
-    ingested: dict[str, list[dict[str, Any]]] = {}
+    ingested: list[dict[str, Any]] = []
     for item in manifest.get("inputs", []):
         provider, kind = item["provider"], item["kind"]
         required = item.get("required", False)
@@ -168,7 +195,8 @@ def run_pass(
             if not path.is_file():
                 raise DumpIngestError("input must be a regular file")
             digest = sha256_file(path)
-            graph.ingest(provider, records_for(provider, kind, path))
+            stats = graph.ingest(provider, records_for(provider, kind, path), signals=False)
+            graph.record_source_file(provider, kind, item["snapshot_id"], path.name, digest)
         except INGEST_ERRORS as error:
             if required:
                 raise ProviderPassError(
@@ -177,32 +205,42 @@ def run_pass(
             status.update({"status": "failed", "reason": str(error)})
             statuses.append(status)
             continue
-        status.update({"status": "ingested", "sha256": digest})
+        status.update({"status": "ingested", "sha256": digest, **stats})
         statuses.append(status)
-        ingested.setdefault(provider, []).append(
-            {"kind": kind, "sha256": digest, "snapshot_id": item["snapshot_id"]}
-        )
-    record_sources(graph_path, ingested)
+        ingested.append({"provider": provider, "kind": kind, "path": path})
 
-    # Exactly one selection/materialization pass over the combined graph.
+    # Exactly one selection/materialization pass over the combined graph. It
+    # commits on its own; the hint domain below cannot undo or blur it.
     rebuild = materialize(graph_path, database_path, priority_path, rebuild_report_path)
-    hints = build_hints(
-        graph_path,
-        database_path,
-        hints_path,
-        manual_path=manual_signals,
-        allow_restricted=allow_restricted or (),
-        vocabulary_path=vocabulary,
-    )
-    return {
+    report: dict[str, Any] = {
         "format": "provider_pass_report",
-        "format_version": 1,
-        "graph_counts": graph.counts(),
         "inputs": statuses,
         "failed_optional_inputs": sum(item["status"] == "failed" for item in statuses),
-        "primary_metrics": rebuild["primary_metrics"],
-        "research_hints": hints,
+        "general": {
+            "status": "succeeded",
+            "primary_metrics": rebuild["primary_metrics"],
+        },
     }
+    try:
+        signals = signal_pass(graph, graph_path, database_path, ingested)
+        hints = build_hints(
+            graph_path,
+            database_path,
+            hints_path,
+            manual_path=manual_signals,
+            allow_restricted=allow_restricted or (),
+            vocabulary_path=vocabulary,
+        )
+    except HINT_ERRORS as error:
+        report["research_hints"] = {"status": "failed", "reason": str(error)}
+    else:
+        report["research_hints"] = {
+            "status": "succeeded",
+            "signal_pass": signals,
+            "build": hints,
+        }
+    report["graph_counts"] = graph.counts()
+    return report
 
 
 def parser() -> argparse.ArgumentParser:
@@ -245,6 +283,14 @@ def main() -> int:
             ),
         )
         write_json_atomic(arguments.pass_report.resolve(strict=False), report)
+        if report["research_hints"]["status"] != "succeeded":
+            print(canonical_json(report))
+            print(
+                "run_provider_pass: general information committed; research-hint "
+                f"build failed: {report['research_hints']['reason']}",
+                file=sys.stderr,
+            )
+            return HINTS_FAILED_EXIT
     except (
         OSError,
         sqlite3.Error,

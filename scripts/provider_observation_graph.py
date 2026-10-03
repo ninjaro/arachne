@@ -5,21 +5,29 @@ The graph records provider facts and topology without selecting product rows.
 An adapter may assert exact identifiers for the same foreign entity; those
 identifiers are unified into a cluster while the original crosswalk and the
 provider that supplied every observation remain queryable.
+
+Detection is not persistence. Adapters may recognize more provider fields than
+the graph stores: a record names such fields in ``unpersisted`` and the graph
+only counts them. General facts are limited to ``GENERAL_FACT_FIELDS``, the
+fields the product materializer actually consumes.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SCHEMA = ROOT / "schema/provider_observation_v1.sql"
+DEFAULT_SCHEMA = ROOT / "schema/provider_observation.sql"
 TOKEN = re.compile(r"[a-z][a-z0-9_-]*\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 ENTITY_TYPES = {"unknown", "work", "person", "organization", "group"}
 RELATION_FAMILIES = {"credit", "work_membership", "agent_relation"}
 RECORD_FIELDS = {
@@ -31,8 +39,40 @@ RECORD_FIELDS = {
     "media",
     "edges",
     "signals",
+    "unpersisted",
+}
+# The only general facts with a current consumer in
+# scripts/materialize_provider_rebuild.py. Anything else an adapter can detect
+# is reported through ``unpersisted`` instead of being stored.
+GENERAL_FACT_FIELDS = {
+    "medium",
+    "work_type",
+    "original_date",
+    "language_code",
+    "country_code",
+    "production_info",
+    "birth_date",
+    "birth_year",
+    "death_date",
+    "death_year",
+}
+# Tables a graph built by current code has. Older graphs are rebuilt.
+REQUIRED_TABLES = {
+    "provider_sources",
+    "provider_source_files",
+    "entity_clusters",
+    "provider_ids",
+    "provider_identity_links",
+    "provider_names",
+    "provider_facts",
+    "provider_media",
+    "provider_edges",
+    "provider_signals",
 }
 SIGNAL_KINDS = {"concept", "content_signal", "source_lead", "search_lead"}
+LEAD_KINDS = {"source_lead", "search_lead"}
+# How a relevant signal subject can reach an under-mined work.
+SIGNAL_ATTACHMENTS = {"work", "credited_agent"}
 SEMANTIC_FAMILIES = {
     "genre",
     "style",
@@ -112,6 +152,39 @@ def _identity(value: Any, context: str) -> tuple[str, str, str]:
     )
 
 
+def require_current_graph(connection: sqlite3.Connection) -> None:
+    """Fail closed on a graph that does not have the current commit's shape."""
+
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_schema WHERE type='table'")
+    }
+    missing = sorted(REQUIRED_TABLES - tables)
+    if missing:
+        raise ObservationGraphError(
+            "provider observation graph does not match the current schema "
+            f"(missing {', '.join(missing)}); rebuild it with current code"
+        )
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(provider_signals)")
+    }
+    if "provider_category" not in columns:
+        raise ObservationGraphError(
+            "provider observation graph does not match the current schema; "
+            "rebuild it with current code"
+        )
+
+
+def source_digest(files: Iterable[tuple[str, str]]) -> str:
+    """Return the provider snapshot digest over sorted ``(kind, sha256)`` pairs."""
+
+    encoded = json.dumps(
+        sorted([str(kind), str(digest)] for kind, digest in files),
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _without_nulls(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -154,12 +227,11 @@ class ObservationGraph:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        identity = connection.execute(
-            "SELECT format_version FROM provider_graph_info WHERE singleton=1"
-        ).fetchone()
-        if identity is None or int(identity[0]) != 1:
+        try:
+            require_current_graph(connection)
+        except BaseException:
             connection.close()
-            raise ObservationGraphError("unsupported provider observation graph")
+            raise
         return connection
 
     @staticmethod
@@ -279,6 +351,12 @@ class ObservationGraph:
         _only_fields(record, {"field", "value", "metadata"}, context)
         if "field" not in record or "value" not in record:
             raise ObservationGraphError(f"{context} requires field and value")
+        field = _token(record["field"], f"{context}.field")
+        if field not in GENERAL_FACT_FIELDS:
+            raise ObservationGraphError(
+                f"{context}.field {field!r} has no general-information consumer; "
+                "report it as unpersisted instead"
+            )
         if record["value"] is None:
             return
         metadata = _without_nulls(_object(record.get("metadata", {}), f"{context}.metadata"))
@@ -289,7 +367,7 @@ class ObservationGraph:
             (
                 subject_id,
                 provider,
-                _token(record["field"], f"{context}.field"),
+                field,
                 _canonical_json(record["value"]),
                 _canonical_json(metadata),
             ),
@@ -369,6 +447,14 @@ class ObservationGraph:
         )
 
     @staticmethod
+    def _signal_kind(value: Any, context: str) -> str:
+        record = _object(value, context)
+        kind = _token(record.get("kind"), f"{context}.kind")
+        if kind not in SIGNAL_KINDS:
+            raise ObservationGraphError(f"{context}.kind is unsupported")
+        return kind
+
+    @staticmethod
     def _insert_signal(
         connection: sqlite3.Connection,
         subject_id: int,
@@ -379,7 +465,17 @@ class ObservationGraph:
         record = _object(value, context)
         _only_fields(
             record,
-            {"kind", "family", "type", "value", "vocabulary_id", "strength", "url", "metadata"},
+            {
+                "kind",
+                "family",
+                "category",
+                "type",
+                "value",
+                "vocabulary_id",
+                "strength",
+                "url",
+                "metadata",
+            },
             context,
         )
         kind = _token(record.get("kind"), f"{context}.kind")
@@ -392,6 +488,9 @@ class ObservationGraph:
                 raise ObservationGraphError(f"{context}.family is unsupported")
         elif kind in {"concept", "content_signal"}:
             raise ObservationGraphError(f"{context} requires a semantic family")
+        category = record.get("category")
+        if category is not None:
+            category = _token(category, f"{context}.category")
         vocabulary_id = _optional_text(record.get("vocabulary_id"), f"{context}.vocabulary_id")
         if vocabulary_id is not None and not VOCABULARY_ID.fullmatch(vocabulary_id):
             raise ObservationGraphError(
@@ -409,13 +508,14 @@ class ObservationGraph:
         connection.execute(
             "INSERT OR IGNORE INTO provider_signals("
             "subject_provider_id,observation_provider,signal_kind,semantic_family,"
-            "signal_type,value,vocabulary_id,strength,url,metadata_json) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "provider_category,signal_type,value,vocabulary_id,strength,url,"
+            "metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
                 subject_id,
                 provider,
                 kind,
                 family,
+                category,
                 _token(record.get("type"), f"{context}.type"),
                 _text(record.get("value"), f"{context}.value").strip(),
                 vocabulary_id,
@@ -425,10 +525,32 @@ class ObservationGraph:
             ),
         )
 
-    def ingest(self, provider: str, records: Iterable[Mapping[str, Any]]) -> None:
-        """Atomically ingest one provider's normalized current observations."""
+    @staticmethod
+    def _unpersisted(record: Mapping[str, Any], context: str, stats: Counter) -> None:
+        values = record.get("unpersisted", [])
+        if not isinstance(values, list):
+            raise ObservationGraphError(f"{context}.unpersisted must be an array")
+        for index, name in enumerate(values):
+            stats[_token(name, f"{context}.unpersisted[{index}]")] += 1
+
+    def ingest(
+        self,
+        provider: str,
+        records: Iterable[Mapping[str, Any]],
+        *,
+        signals: bool = True,
+    ) -> dict[str, Any]:
+        """Atomically ingest one provider's normalized current observations.
+
+        With ``signals=False`` (the general pass of a multi-provider run),
+        hint-only signals are validated for shape, counted, and dropped; a later
+        ``ingest_signals`` call stores only the ones an under-mined work can use.
+        Returns counts of records and of detected-but-not-persisted values.
+        """
 
         provider = _token(provider, "provider")
+        stats: dict[str, Any] = {"records": 0, "signals": 0, "signals_not_persisted": 0}
+        unpersisted: Counter[str] = Counter()
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -446,6 +568,8 @@ class ObservationGraph:
                 entity_type = _token(record["entity_type"], f"{context}.entity_type")
                 if entity_type not in ENTITY_TYPES:
                     raise ObservationGraphError(f"{context}.entity_type is unsupported")
+                stats["records"] += 1
+                self._unpersisted(record, context, unpersisted)
                 subject_id, cluster_id = self._provider_id(
                     connection, primary, entity_type
                 )
@@ -475,13 +599,13 @@ class ObservationGraph:
                 facts = record.get("facts", [])
                 media = record.get("media", [])
                 edges = record.get("edges", [])
-                signals = record.get("signals", [])
+                record_signals = record.get("signals", [])
                 for field, values in (
                     ("names", names),
                     ("facts", facts),
                     ("media", media),
                     ("edges", edges),
-                    ("signals", signals),
+                    ("signals", record_signals),
                 ):
                     if not isinstance(values, list):
                         raise ObservationGraphError(f"{context}.{field} must be an array")
@@ -517,25 +641,190 @@ class ObservationGraph:
                         edge,
                         f"{context}.edges[{item_index}]",
                     )
-                for item_index, signal in enumerate(signals):
-                    self._insert_signal(
-                        connection,
-                        subject_id,
-                        provider,
-                        signal,
-                        f"{context}.signals[{item_index}]",
-                    )
+                for item_index, signal in enumerate(record_signals):
+                    signal_context = f"{context}.signals[{item_index}]"
+                    if signals:
+                        self._insert_signal(
+                            connection, subject_id, provider, signal, signal_context
+                        )
+                        stats["signals"] += 1
+                    else:
+                        self._signal_kind(signal, signal_context)
+                        stats["signals_not_persisted"] += 1
             connection.commit()
         except BaseException:
             connection.rollback()
             raise
         finally:
             connection.close()
+        stats["unpersisted"] = dict(sorted(unpersisted.items()))
+        return stats
+
+    def ingest_signals(
+        self,
+        provider: str,
+        records: Iterable[Mapping[str, Any]],
+        relevant: Mapping[tuple[str, str, str], str],
+    ) -> dict[str, int]:
+        """Store only the signals whose subject can reach an under-mined work.
+
+        ``relevant`` maps an exact provider identity to ``work`` (every signal
+        kind may attach) or ``credited_agent`` (only source/search leads may
+        attach). Names, facts, media, and edges are ignored: they were stored by
+        the general pass. Subjects the general pass never stored are skipped.
+        """
+
+        provider = _token(provider, "provider")
+        stats = {"records": 0, "signals": 0, "signals_not_relevant": 0}
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for index, raw_record in enumerate(records):
+                context = f"records[{index}]"
+                record = _object(raw_record, context)
+                _only_fields(record, RECORD_FIELDS, context)
+                primary = _identity(record.get("id"), f"{context}.id")
+                if primary[0] != provider:
+                    raise ObservationGraphError(
+                        f"{context}.id.provider does not match ingest provider"
+                    )
+                stats["records"] += 1
+                record_signals = record.get("signals", [])
+                if not isinstance(record_signals, list):
+                    raise ObservationGraphError(f"{context}.signals must be an array")
+                if not record_signals:
+                    continue
+                attachment = relevant.get(primary)
+                row = (
+                    connection.execute(
+                        "SELECT id FROM provider_ids "
+                        "WHERE provider=? AND namespace=? AND external_id=?",
+                        primary,
+                    ).fetchone()
+                    if attachment is not None
+                    else None
+                )
+                for item_index, signal in enumerate(record_signals):
+                    signal_context = f"{context}.signals[{item_index}]"
+                    kind = self._signal_kind(signal, signal_context)
+                    if row is None or (
+                        attachment == "credited_agent" and kind not in LEAD_KINDS
+                    ):
+                        stats["signals_not_relevant"] += 1
+                        continue
+                    self._insert_signal(
+                        connection, int(row[0]), provider, signal, signal_context
+                    )
+                    stats["signals"] += 1
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return stats
+
+    def prune_signals(self, relevant: Mapping[tuple[str, str, str], str]) -> int:
+        """Delete stored signals that no under-mined work can consume."""
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "CREATE TEMP TABLE relevant_signal_subjects("
+                "provider_id INTEGER PRIMARY KEY, attachment TEXT NOT NULL)"
+            )
+            for identity, attachment in relevant.items():
+                if attachment not in SIGNAL_ATTACHMENTS:
+                    raise ObservationGraphError(f"unsupported attachment {attachment!r}")
+                connection.execute(
+                    "INSERT OR IGNORE INTO relevant_signal_subjects "
+                    "SELECT id,? FROM provider_ids "
+                    "WHERE provider=? AND namespace=? AND external_id=?",
+                    (attachment, *identity),
+                )
+            deleted = connection.execute(
+                "DELETE FROM provider_signals WHERE id IN ("
+                "SELECT s.id FROM provider_signals s "
+                "LEFT JOIN relevant_signal_subjects r ON r.provider_id=s.subject_provider_id "
+                "WHERE r.provider_id IS NULL OR (r.attachment='credited_agent' "
+                "AND s.signal_kind NOT IN ('source_lead','search_lead')))"
+            ).rowcount
+            connection.execute("DROP TABLE relevant_signal_subjects")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return int(deleted)
+
+    def record_source_file(
+        self,
+        provider: str,
+        kind: str,
+        snapshot_id: str,
+        storage_ref: str,
+        sha256: str,
+    ) -> str:
+        """Bind one acquired input file to its provider's logical snapshot.
+
+        Every file of one provider must claim the same snapshot. The provider
+        row's digest is recomputed over the sorted ``(kind, sha256)`` list of
+        all its files and returned.
+        """
+
+        provider = _token(provider, "provider")
+        kind = _text(kind, "source kind")
+        snapshot_id = _text(snapshot_id, "snapshot_id")
+        storage_ref = _text(storage_ref, "storage_ref")
+        if not isinstance(sha256, str) or not SHA256.fullmatch(sha256):
+            raise ObservationGraphError("source sha256 must be lowercase hexadecimal")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT snapshot_id FROM provider_sources WHERE provider=?", (provider,)
+            ).fetchone()
+            if existing is not None and str(existing[0]) != snapshot_id:
+                raise ObservationGraphError(
+                    f"{provider} input {kind} claims snapshot {snapshot_id!r}, "
+                    f"but the graph already holds {provider} snapshot {existing[0]!r}"
+                )
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO provider_sources(provider,snapshot_id,storage_ref,sha256) "
+                    "VALUES(?,?,?,?)",
+                    (provider, snapshot_id, storage_ref, source_digest([(kind, sha256)])),
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO provider_source_files("
+                "provider,kind,storage_ref,sha256) VALUES(?,?,?,?)",
+                (provider, kind, storage_ref, sha256),
+            )
+            files = connection.execute(
+                "SELECT kind,sha256 FROM provider_source_files WHERE provider=?",
+                (provider,),
+            ).fetchall()
+            digest = source_digest((str(row[0]), str(row[1])) for row in files)
+            storage = storage_ref if len(files) == 1 else f"provider-pass:{provider}"
+            connection.execute(
+                "UPDATE provider_sources SET sha256=?,storage_ref=? WHERE provider=?",
+                (digest, storage, provider),
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return digest
 
     def counts(self) -> dict[str, int]:
         connection = self._connect()
         try:
             tables = (
+                "provider_source_files",
                 "entity_clusters",
                 "provider_ids",
                 "provider_identity_links",

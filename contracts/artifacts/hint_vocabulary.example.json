@@ -1,7 +1,7 @@
 {
-  "artifact_type": "hint_vocabulary_v1",
-  "format_version": 1,
+  "artifact_type": "hint_vocabulary",
   "source": "illustrative rows; every identifier must be copied from the published authority file",
+  "generic_ids": ["wikidata:Q11424"],
   "terms": [
     {
       "term_kind": "genre_form",
@@ -13,7 +13,15 @@
       "term_kind": "topical",
       "label": "Alienation (Social psychology)",
       "aliases": ["Entfremdung", "Aliénation (psychologie sociale)"],
-      "ids": {"lcsh": "sh85003435", "gnd": "4014670-1", "rameau": "FRBNF11930652"}
+      "ids": {"lcsh": "sh85003435", "gnd": "4014670-1", "rameau": "FRBNF11930652"},
+      "related_ids": [{"scheme": "aat", "id": "300055520", "match": "related"}]
+    },
+    {
+      "term_kind": "genre_form",
+      "label": "Comedy films",
+      "aliases": ["Komödie"],
+      "ids": {"lcgft": "gf2011026147"},
+      "generic": true
     }
   ]
 }

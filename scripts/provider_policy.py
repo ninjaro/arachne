@@ -6,14 +6,18 @@ to that specific field; internal, non-published hint use does not make a
 licence restriction disappear. A signal type without a record here is never
 turned into a research hint.
 
-Quality classes order research only. They are not evidence quality and never
-flow into canonical confidence:
+Quality classes are *assignment* quality: how trustworthy a provider's claim
+that a term applies to a work is. They order research only, are not evidence
+quality, and never flow into canonical confidence:
 
-- A: controlled/curated assignment with a stable authority vocabulary ID
+- A: controlled/curated assignment by an authority (for example GND subjects)
 - B: curated provider-specific style/subject/content assignment
 - C: provider folksonomy/community tag or community-edited classification
 - D: algorithmic classification or inferred descriptor
 - E: broad generic classification
+
+Resolving a value to an authority ID says how well Arachne identified the term
+(resolution quality); it never promotes the assignment class.
 """
 
 from __future__ import annotations
@@ -139,9 +143,10 @@ PROVIDER_POLICIES: dict[str, ProviderPolicy] = {
             False,
             True,
             False,
-            "GroupLens research datasets. Research-only and optional: the tag "
-            "matrix is never published as Arachne data, and tag relevance is "
-            "hint strength, never confidence or evidence.",
+            "MovieLens 25M (ml-25m) Tag Genome only, verified from the extracted "
+            "distribution. Research-only and optional: the tag matrix is never "
+            "published as Arachne data, and tag relevance is hint strength, "
+            "never confidence or evidence.",
         ),
         ProviderPolicy(
             "manual",
@@ -194,8 +199,9 @@ SIGNAL_POLICIES: dict[str, SignalPolicy] = {
             "C",
             "CC0-1.0",
             False,
-            "P921 main subject. A hint-only topical lead; broad values fall to "
-            "class E and generic items carry negligible research priority.",
+            "P921 main subject, kept with provider category main_subject; the "
+            "theme family is analytical only. Broad values fall to class E and "
+            "are suppressed.",
         ),
         SignalPolicy(
             "musicbrainz_url_relation",
@@ -212,7 +218,8 @@ SIGNAL_POLICIES: dict[str, SignalPolicy] = {
             "C",
             "CC-BY-NC-SA-3.0",
             True,
-            "Supplementary user tags/genre associations; license-gated.",
+            "Supplementary user tags/genre associations; license-gated. "
+            "Policy only: no acquisition/adapter path emits this signal type yet.",
         ),
         SignalPolicy(
             "open_library_subject",
@@ -277,8 +284,9 @@ SIGNAL_POLICIES: dict[str, SignalPolicy] = {
             "D",
             "GroupLens-Research-NonCommercial",
             True,
-            "Tag Genome descriptor. Model-derived relevance is hint strength "
-            "only; research/non-commercial licence, so it is licence-gated.",
+            "MovieLens 25M Tag Genome descriptor. Model-derived relevance is "
+            "hint strength only; research/non-commercial licence, so it is "
+            "licence-gated.",
         ),
         SignalPolicy(
             "manual_concept",
@@ -309,9 +317,6 @@ SIGNAL_POLICIES: dict[str, SignalPolicy] = {
 }
 
 QUALITY_CLASSES = ("A", "B", "C", "D", "E")
-
-# Stable authority vocabularies whose IDs promote a hint to class A.
-AUTHORITY_VOCABULARIES = {"aat", "gnd", "iconclass", "lcgft", "lcsh", "rameau"}
 
 
 def validate_policies() -> None:

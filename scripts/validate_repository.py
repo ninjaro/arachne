@@ -26,10 +26,12 @@ CONTROL_CONTRACTS = (
 
 ARTIFACT_FORMATS = (
     "external_enrichment_review_v1",
-    "hint_vocabulary_v1",
     "wikidata_image_hints_v1",
     "wikidata_mapping_review_v1",
 )
+# Latest-only rebuildable artifacts: no format version anywhere, and the
+# selected commit's shape is the only supported one.
+LATEST_ONLY_ARTIFACT_FORMATS = ("hint_vocabulary",)
 
 PRODUCT_BATCH_FORMAT = "arachne_batch"
 
@@ -130,6 +132,21 @@ def check_artifacts(root: Path) -> None:
                 f"{example_path}: wrong artifact_type")
         require(example.get("format_version") == 1,
                 f"{example_path}: wrong format_version")
+    for name in LATEST_ONLY_ARTIFACT_FORMATS:
+        schema_path = directory / f"{name}.schema.json"
+        example_path = directory / f"{name}.example.json"
+        schema = load_json(schema_path)
+        example = load_json(example_path)
+        require(schema.get("additionalProperties") is False,
+                f"{schema_path}: artifact root must be closed")
+        require(schema.get("properties", {}).get("artifact_type", {}).get("const") == name,
+                f"{schema_path}: wrong artifact_type const")
+        require("format_version" not in schema.get("properties", {}),
+                f"{schema_path}: latest-only artifacts carry no format_version")
+        require(example.get("artifact_type") == name,
+                f"{example_path}: wrong artifact_type")
+        require("format_version" not in example,
+                f"{example_path}: latest-only artifacts carry no format_version")
 
 
 def check_configuration(root: Path) -> None:

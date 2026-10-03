@@ -173,34 +173,82 @@ Controls land in one directory per provider. A provider whose plan is rejected
 at the boundary is reported as `failed` and the remaining providers continue;
 no transport happens here.
 
+## Multi-provider pass
+
+`scripts/run_provider_pass.py` runs general information and research hints as
+two independent domains over one graph:
+
+```sh
+python3 scripts/run_provider_pass.py \
+  --manifest /run/provider-pass.json \
+  --graph /run/provider-observations.sqlite \
+  --database arachne-data/database/art-islands.sqlite \
+  --priority arachne-data/priority.json \
+  --rebuild-report /run/provider-rebuild.json \
+  --hints /run/research-hints.sqlite \
+  --pass-report /run/provider-pass-report.json \
+  --vocabulary /run/hint-vocabulary.sqlite
+```
+
+Hint inputs (vocabulary, manual signals, restricted opt-ins) are validated
+before anything is ingested. The general pass then ingests every input without
+its hint-only signals, materializes the product once, and commits. Only after
+that are signal-carrying dump families rescanned for subjects that can reach an
+under-mined work, and the hint artifact is built. The pass report carries a
+separate `general.status` and `research_hints.status`; exit status `3` means
+general information committed and the hint build failed. A failed hint build is
+rerun with `scripts/research_hints.py build` against the same graph and product;
+it never requires repeating the general pass.
+
 ## Authority bridges and optional research hints
 
 GND resolves only around entities the product already holds, so no authority
-corpus is materialized:
+corpus is materialized. The official DNB MARC 21 Authority export is first
+converted to Arachne's narrow record shape, then resolved, then ingested with
+its snapshot so every GND signal names the bytes that produced it:
 
 ```sh
+python3 scripts/convert_gnd_marc.py \
+  --input /acquired/authorities-gnd.mrc.xml.gz \
+  --output /run/gnd-converted.jsonl
 python3 scripts/resolve_gnd_identities.py \
   --product arachne-data/database/art-islands.sqlite \
-  --gnd /acquired/gnd-authority.jsonl.gz \
+  --gnd /run/gnd-converted.jsonl \
   --output /run/gnd-selection.jsonl
 python3 scripts/ingest_provider_dump.py \
   --graph /run/provider-observations.sqlite \
-  --provider gnd --kind entities --input /run/gnd-selection.jsonl
+  --provider gnd --kind entities --snapshot-id 2026-09-01 \
+  --input /run/gnd-selection.jsonl
 ```
 
-MovieLens Tag Genome stays optional and research-only. The importer requires an
-explicit acknowledgement, keeps a bounded selection rather than the tag matrix,
-and its relevance is hint strength only; the hint build still needs
+The converter and resolver reports record the SHA-256 of their input and
+output, so the chain from a hint signal back to the official export is
+auditable. The converter's MARC field and code tables must be re-checked
+against current DNB documentation before a production run.
+
+MovieLens stays optional and research-only. Only the MovieLens 25M (`ml-25m`)
+distribution is supported; the importer verifies it from the extracted
+directory (README and exact file headers), records each file's SHA-256,
+requires an explicit acknowledgement, keeps a bounded online top-K selection
+rather than the tag matrix, and skips movies whose exact IMDb and TMDb links
+disagree. Relevance is hint strength only; the hint build still needs
 `--allow-restricted-signal movielens_tag`:
 
 ```sh
 python3 scripts/import_movielens_tag_hints.py \
   --product arachne-data/database/art-islands.sqlite \
-  --links /acquired/ml/links.csv \
-  --tags /acquired/ml/genome-tags.csv \
-  --scores /acquired/ml/genome-scores.csv \
+  --dataset-dir /acquired/ml-25m \
   --output /run/movielens-hints.jsonl \
   --acknowledge-research-only
+```
+
+A large reviewed authority subset is compiled once into an indexed SQLite
+concordance instead of being passed as JSON:
+
+```sh
+python3 scripts/hint_vocabulary.py compile \
+  --input /run/reviewed-authority-terms.jsonl \
+  --output /run/hint-vocabulary.sqlite
 ```
 
 Hint semantics, the reviewed licence policy, and the authority concordance are

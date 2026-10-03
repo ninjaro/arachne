@@ -3,7 +3,8 @@
 **Status date:** 2026-09-29  
 **Audit scope:** current provider/research-hint architecture, with PR #50 (`feat: implement 09-21 roadmap`) as the immediate implementation under review  
 **Working baseline:** `ninjaro/arachne` PR #50 head `1370a429cec21947f2f0d9b5651cc2d58eed05b0`  
-**Design posture:** experimental, latest-only, rebuildable; no backward-compatibility obligation for internal schemas or disposable artifacts
+**Design posture:** experimental, latest-only, rebuildable; no backward-compatibility obligation for internal schemas or disposable artifacts  
+**Implementation status (2026-09-30):** checked items below are implemented in this commit; the two unchecked items (independent-origin bonus review) are deliberately deferred. The GND MARC tables in `scripts/convert_gnd_marc.py` still need a check against current DNB format documentation before a production run.
 
 ## 1. Goal
 
@@ -320,11 +321,14 @@ Alternative implementations are acceptable if they preserve bounded state and av
 
 ### Tasks
 
-- [ ] Inventory every fact emitted by each adapter and identify its current consumer.
-- [ ] Stop persisting general facts with no current consumer unless they are needed for identity/topology/provenance.
-- [ ] Keep the extraction/parsing capability in adapter code where it is cheap and potentially useful.
-- [ ] Avoid corpus-wide `provider_signals` persistence when only under-mined works can consume them.
-- [ ] Add build metrics for detected-but-not-persisted fields/signals where useful.
+- [x] Inventory every fact emitted by each adapter and identify its current consumer.
+- [x] Stop persisting general facts with no current consumer unless they are needed for identity/topology/provenance.
+- [x] Keep the extraction/parsing capability in adapter code where it is cheap and potentially useful.
+- [x] Avoid corpus-wide `provider_signals` persistence when only under-mined works can consume them.
+      The multi-provider pass stores signals only for relevant subjects and
+      prunes irrelevant signals copied from the Wikidata base graph; the HPC
+      worker's own base graph still carries its (small) P135/P136/P921 set.
+- [x] Add build metrics for detected-but-not-persisted fields/signals where useful.
 
 ---
 
@@ -359,11 +363,11 @@ SQLite graph
 
 ### Tasks
 
-- [ ] Identify the minimal graph projection required for priority closure and candidate ranking.
-- [ ] Keep only that projection in memory.
-- [ ] Query detailed names/facts/media/edges lazily for selected clusters.
-- [ ] Avoid materializing the complete edge set as one Python list.
-- [ ] Add a large synthetic provider-graph memory test or measurement target.
+- [x] Identify the minimal graph projection required for priority closure and candidate ranking.
+- [x] Keep only that projection in memory.
+- [x] Query detailed names/facts/media/edges lazily for selected clusters.
+- [x] Avoid materializing the complete edge set as one Python list.
+- [x] Add a large synthetic provider-graph memory test or measurement target.
 
 This is an existing architectural debt rather than a PR #50-specific regression, but PR #50 makes it more important by moving toward a real multi-provider pass.
 
@@ -520,12 +524,12 @@ Do not load a million-term authority corpus into several Python data structures 
 
 ### Tasks
 
-- [ ] Preserve raw semantic family/category per child signal.
-- [ ] Add compact `resolution_basis` / equivalent analytical provenance.
-- [ ] Split assignment quality from authority-resolution quality.
-- [ ] Keep unresolved values provider-native.
-- [ ] Keep normalization/crosswalks optional and rebuildable.
-- [ ] Replace the million-term JSON-in-RAM design with a bounded subset or indexed lookup before large authority corpora are used.
+- [x] Preserve raw semantic family/category per child signal.
+- [x] Add compact `resolution_basis` / equivalent analytical provenance.
+- [x] Split assignment quality from authority-resolution quality.
+- [x] Keep unresolved values provider-native.
+- [x] Keep normalization/crosswalks optional and rebuildable.
+- [x] Replace the million-term JSON-in-RAM design with a bounded subset or indexed lookup before large authority corpora are used.
 
 ---
 
@@ -556,10 +560,10 @@ Genericity must be evaluated against the effective normalized term, not only the
 
 ### Tasks
 
-- [ ] Preserve P921 as a provider-native subject signal.
-- [ ] Make any `theme` assignment explicitly analytical.
-- [ ] Apply generic suppression after authority resolution as well as on raw values.
-- [ ] Expand/replace hard-coded generic QID handling with a maintainable mechanism if P921 volume justifies it.
+- [x] Preserve P921 as a provider-native subject signal.
+- [x] Make any `theme` assignment explicitly analytical.
+- [x] Apply generic suppression after authority resolution as well as on raw values.
+- [x] Expand/replace hard-coded generic QID handling with a maintainable mechanism if P921 volume justifies it.
 
 ---
 
@@ -583,9 +587,9 @@ A reissue, bootleg, regional release, or later edition may have a different labe
 
 ### Required correction
 
-- [ ] Do not materialize release-specific `label-info` as a release-group work credit.
-- [ ] If label information is useful for hint propagation/topology, keep it in a release-scoped disposable structure or hint layer rather than canonical work credits.
-- [ ] Preserve catalog numbers only at the manifestation/release observation level if they are kept at all.
+- [x] Do not materialize release-specific `label-info` as a release-group work credit.
+- [x] If label information is useful for hint propagation/topology, keep it in a release-scoped disposable structure or hint layer rather than canonical work credits.
+- [x] Preserve catalog numbers only at the manifestation/release observation level if they are kept at all.
 
 ### 10.2 Date filtering must be fail-closed
 
@@ -593,19 +597,20 @@ Current date logic accepts a release when status is missing/non-string, despite 
 
 If statuses are being filtered, missing/unknown status should not silently pass as eligible original-date evidence.
 
-- [ ] Require an explicitly allowed status before a release date participates.
+- [x] Require an explicitly allowed status before a release date participates.
 
 ### 10.3 Do not reintroduce excluded statuses through aggregate release-group dates
 
 If `release-group.first-release-date` can incorporate releases with statuses that Arachne intends to exclude, adding it from an otherwise allowed release can reintroduce the very bootleg/pseudo-release date the filter attempted to remove.
 
-- [ ] Compute earliest accepted date from explicitly accepted release observations, or document and prove that the aggregate field satisfies the same status rule.
+- [x] Compute earliest accepted date from explicitly accepted release observations, or document and prove that the aggregate field satisfies the same status rule.
 
 ### 10.4 Supplementary tags are not implemented merely because a policy entry exists
 
 The roadmap currently marks MusicBrainz supplementary tags/genres as implemented, but there is no complete acquisition/adapter path from the relevant bytes to `musicbrainz_tag` signals.
 
-- [ ] Either implement the full path or mark the roadmap item incomplete.
+- [x] Either implement the full path or mark the roadmap item incomplete.
+      Marked incomplete in the 2026-09-21 roadmap and in `docs/RESEARCH_HINTS.md`.
 
 ---
 
@@ -639,10 +644,10 @@ but an actual normalization/conversion stage is missing.
 
 ### Tasks
 
-- [ ] Add a documented converter from the selected official DNB format to Arachne's narrow GND record shape.
-- [ ] Make type/date/crosswalk/subject conversion explicit and testable.
-- [ ] Keep only records around already-known Arachne identities.
-- [ ] Do not bulk-materialize unrelated GND entities.
+- [x] Add a documented converter from the selected official DNB format to Arachne's narrow GND record shape.
+- [x] Make type/date/crosswalk/subject conversion explicit and testable.
+- [x] Keep only records around already-known Arachne identities.
+- [x] Do not bulk-materialize unrelated GND entities.
 
 ### 11.2 Do not invent unsupported product entity types
 
@@ -650,7 +655,7 @@ If the provider exposes a type that the product ontology cannot represent safely
 
 Do not map `conference_or_event` to `organization` merely because both are agent-like.
 
-- [ ] Remove or justify lossy GND type coercions.
+- [x] Remove or justify lossy GND type coercions.
 
 ### 11.3 Preserve concordance relation semantics when they matter
 
@@ -658,14 +663,14 @@ Cross-vocabulary mappings may distinguish exact, close, broader/narrower, partia
 
 Do not silently treat every co-listed external vocabulary ID as strict identity if the source mapping is weaker.
 
-- [ ] Preserve mapping relation type for reviewed concordances when available.
-- [ ] Use weaker mappings as analytical hints without pretending they are exact IDs for dedup unless policy explicitly allows it.
+- [x] Preserve mapping relation type for reviewed concordances when available.
+- [x] Use weaker mappings as analytical hints without pretending they are exact IDs for dedup unless policy explicitly allows it.
 
 ### 11.4 GND hint provenance should bind to its actual source snapshot
 
 The documented manual GND path currently bypasses parts of the normal `provider_sources` registration flow.
 
-- [ ] Ensure GND signals can report the exact source artifact/snapshot/digest that produced them.
+- [x] Ensure GND signals can report the exact source artifact/snapshot/digest that produced them.
 
 ---
 
@@ -681,28 +686,28 @@ Do not call a path implemented for one dataset a completed implementation of ano
 
 ### Tasks
 
-- [ ] Choose the exact supported MovieLens dataset and document it unambiguously.
-- [ ] Bind accepted file layout, score semantics, and license to that dataset.
-- [ ] Do not use a free-form `--dataset` label as a substitute for verified dataset identity.
+- [x] Choose the exact supported MovieLens dataset and document it unambiguously.
+- [x] Bind accepted file layout, score semantics, and license to that dataset.
+- [x] Do not use a free-form `--dataset` label as a substitute for verified dataset identity.
 
 ### 12.2 Resolve conflicting exact links conservatively
 
 If MovieLens IMDb and TMDb links resolve to different Arachne works, do not silently pick the first scheme.
 
-- [ ] Report/skip conflicting exact identity mappings.
+- [x] Report/skip conflicting exact identity mappings.
 
 ### 12.3 Make top-K selection truly bounded
 
 Current code accumulates every above-threshold descriptor per work and truncates only after the full file is read.
 
-- [ ] Maintain an online bounded top-K structure per work.
-- [ ] Never keep more than the configured maximum plus minimal heap/index overhead.
+- [x] Maintain an online bounded top-K structure per work.
+- [x] Never keep more than the configured maximum plus minimal heap/index overhead.
 
 ### 12.4 Keep tag identity when useful
 
 The final manual signal preserves MovieLens movie ID and label but drops `tagId`.
 
-- [ ] Preserve the external tag ID when it materially improves reproducibility/debugging.
+- [x] Preserve the external tag ID when it materially improves reproducibility/debugging.
 
 ### 12.5 Preserve restricted-source build provenance
 
@@ -775,9 +780,9 @@ For the current architecture, Option A is simpler and more honest.
 
 ### Tasks
 
-- [ ] Preflight all selected hint inputs before general materialization, or decouple hint build from general-pass success.
-- [ ] Do not let a disposable vocabulary parse error create a partially successful pass reported as one failure.
-- [ ] Make report status explicit per domain.
+- [x] Preflight all selected hint inputs before general materialization, or decouple hint build from general-pass success.
+- [x] Do not let a disposable vocabulary parse error create a partially successful pass reported as one failure.
+- [x] Make report status explicit per domain.
 
 ---
 
@@ -791,14 +796,14 @@ Do not silently pick the first input's `snapshot_id` when different provider fil
 
 ### Tasks
 
-- [ ] Require consistent provider snapshot identity across files in one logical snapshot, or represent per-input snapshot provenance.
-- [ ] Bind provider snapshot digest to the sorted set of actual input files and their digests.
+- [x] Require consistent provider snapshot identity across files in one logical snapshot, or represent per-input snapshot provenance.
+- [x] Bind provider snapshot digest to the sorted set of actual input files and their digests.
 
 ### 15.2 Snapshot provenance must reach miner-visible data where useful
 
 The hint SQLite tables may retain snapshot fields, but miner-facing query output should expose enough provenance to understand the origin of a normalized hint when needed.
 
-- [ ] Include native vocabulary ID and source snapshot/digest in detailed miner inspection output.
+- [x] Include native vocabulary ID and source snapshot/digest in detailed miner inspection output.
 
 ---
 
@@ -814,9 +819,12 @@ Do not attempt a universal dependency graph now. Keep the bonus modest and prove
 
 ### Tasks
 
-- [ ] Preserve/extend explicit upstream provenance when known.
-- [ ] Avoid claiming strong independence merely from provider-name difference in documentation.
+- [x] Preserve/extend explicit upstream provenance when known.
+- [x] Avoid claiming strong independence merely from provider-name difference in documentation.
 - [ ] Consider applying independent-origin bonuses only to signal types/providers where independence policy is reviewed.
+      Considered and deferred with the P6 revisit below: the bonus stays small
+      and capped, and documentation no longer claims independence from
+      provider-name difference.
 
 This affects research ordering only, not truth.
 
@@ -835,9 +843,9 @@ Source leads are directions for research, never evidence.
 
 ### Tasks
 
-- [ ] Keep the current useful URL filtering approach.
-- [ ] Avoid work-level duplication of the same prolific-agent lead where possible.
-- [ ] Preserve enough provider provenance to explain why a lead was attached.
+- [x] Keep the current useful URL filtering approach.
+- [x] Avoid work-level duplication of the same prolific-agent lead where possible.
+- [x] Preserve enough provider provenance to explain why a lead was attached.
 
 ---
 
@@ -847,14 +855,14 @@ The documentation should describe the architecture that actually exists, not mer
 
 ### Immediate corrections
 
-- [ ] Replace `research_hint_v1` / `provider_observation_v1` naming with latest-only naming when the repository-wide versioning cleanup is performed.
-- [ ] Remove backward-compatibility promises that the code does not implement.
-- [ ] Document detection vs persistence explicitly.
-- [ ] Document that hint normalization may be lossy at the top level only when child provider observations preserve the important raw information.
-- [ ] Correct MovieLens dataset naming/layout/license documentation.
-- [ ] Document the missing/added GND official-format normalization stage.
-- [ ] Mark MusicBrainz supplementary tag ingestion incomplete until bytes can actually reach the hint builder.
-- [ ] Remove wording that implies release-level MusicBrainz label credits are safe work-level general information.
+- [x] Replace `research_hint_v1` / `provider_observation_v1` naming with latest-only naming when the repository-wide versioning cleanup is performed.
+- [x] Remove backward-compatibility promises that the code does not implement.
+- [x] Document detection vs persistence explicitly.
+- [x] Document that hint normalization may be lossy at the top level only when child provider observations preserve the important raw information.
+- [x] Correct MovieLens dataset naming/layout/license documentation.
+- [x] Document the missing/added GND official-format normalization stage.
+- [x] Mark MusicBrainz supplementary tag ingestion incomplete until bytes can actually reach the hint builder.
+- [x] Remove wording that implies release-level MusicBrainz label credits are safe work-level general information.
 
 ---
 
@@ -862,54 +870,55 @@ The documentation should describe the architecture that actually exists, not mer
 
 ### P0 — Preserve trust boundaries
 
-- [ ] Remove MusicBrainz release-specific label credits from work-level product materialization.
-- [ ] Fix MusicBrainz release-date filtering so excluded/unknown release statuses cannot influence original date indirectly.
-- [ ] Remove unsafe GND entity-type coercions.
-- [ ] Keep semantic provider signals structurally unable to write canonical semantics.
+- [x] Remove MusicBrainz release-specific label credits from work-level product materialization.
+- [x] Fix MusicBrainz release-date filtering so excluded/unknown release statuses cannot influence original date indirectly.
+- [x] Remove unsafe GND entity-type coercions.
+- [x] Keep semantic provider signals structurally unable to write canonical semantics.
 
 ### P1 — Adopt latest-only format policy
 
-- [ ] Stop adding new `_v1` internal artifacts/contracts in this work.
-- [ ] Remove version checks/fields from new rebuildable hint/provider artifacts.
-- [ ] Document that old disposable artifacts are rebuilt, not migrated.
-- [ ] Plan a later repository-wide removal of legacy actor-contract versioning.
+- [x] Stop adding new `_v1` internal artifacts/contracts in this work.
+- [x] Remove version checks/fields from new rebuildable hint/provider artifacts.
+- [x] Document that old disposable artifacts are rebuilt, not migrated.
+- [x] Plan a later repository-wide removal of legacy actor-contract versioning.
+      Recorded in `contracts/VERSIONS.md` ("Latest-only rebuildable formats").
 
 ### P2 — Separate detection from persistence
 
-- [ ] Audit emitted provider facts against real consumers.
-- [ ] Stop storing currently unused fields in the provider graph while retaining detector capability.
-- [ ] Limit semantic-signal persistence to records relevant to current hint work.
-- [ ] Suppress generic E hints from final SQLite unless explicitly useful.
+- [x] Audit emitted provider facts against real consumers.
+- [x] Stop storing currently unused fields in the provider graph while retaining detector capability.
+- [x] Limit semantic-signal persistence to records relevant to current hint work.
+- [x] Suppress generic E hints from final SQLite unless explicitly useful.
 
 ### P3 — Make hint normalization auditable
 
-- [ ] Preserve raw semantic family per signal.
-- [ ] Record analytical resolution/merge basis.
-- [ ] Split assignment quality from term-resolution quality.
-- [ ] Preserve weaker authority crosswalk relation types where available.
-- [ ] Keep aggressive normalization/dedup experimental and rebuildable.
+- [x] Preserve raw semantic family per signal.
+- [x] Record analytical resolution/merge basis.
+- [x] Split assignment quality from term-resolution quality.
+- [x] Preserve weaker authority crosswalk relation types where available.
+- [x] Keep aggressive normalization/dedup experimental and rebuildable.
 
 ### P4 — Bound memory
 
-- [ ] Stop loading the full provider graph into Python for materialization.
-- [ ] Query detailed provider data only for selected clusters.
-- [ ] Make MovieLens top-K online/bounded.
-- [ ] Replace large JSON authority corpora with bounded subsets or indexed storage.
-- [ ] Bound propagated credited-agent leads.
+- [x] Stop loading the full provider graph into Python for materialization.
+- [x] Query detailed provider data only for selected clusters.
+- [x] Make MovieLens top-K online/bounded.
+- [x] Replace large JSON authority corpora with bounded subsets or indexed storage.
+- [x] Bound propagated credited-agent leads.
 
 ### P5 — Complete provider-specific paths honestly
 
-- [ ] Add official DNB → Arachne GND normalization.
-- [ ] Fix GND snapshot provenance.
-- [ ] Choose and correctly implement one exact MovieLens dataset contract.
-- [ ] Handle MovieLens exact-ID conflicts.
-- [ ] Either implement MusicBrainz supplementary tags end-to-end or mark them unfinished.
+- [x] Add official DNB → Arachne GND normalization.
+- [x] Fix GND snapshot provenance.
+- [x] Choose and correctly implement one exact MovieLens dataset contract.
+- [x] Handle MovieLens exact-ID conflicts.
+- [x] Either implement MusicBrainz supplementary tags end-to-end or mark them unfinished.
 
 ### P6 — Clean orchestration/provenance
 
-- [ ] Decouple general-pass success from hint-build success or stage both explicitly.
-- [ ] Validate provider snapshot consistency across multiple files.
-- [ ] Expose useful native provenance in miner-facing queries.
+- [x] Decouple general-pass success from hint-build success or stage both explicitly.
+- [x] Validate provider snapshot consistency across multiple files.
+- [x] Expose useful native provenance in miner-facing queries.
 - [ ] Revisit independent-origin bonuses only after upstream provenance is available.
 
 ---
