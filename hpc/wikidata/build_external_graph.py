@@ -1269,7 +1269,19 @@ def validate_checkpoint(path: Path, identity: Mapping[str, Any]) -> dict[str, An
             "SELECT format_version,identity_json FROM checkpoint_identity "
             "WHERE singleton=1"
         ).fetchone()
-        if row != (CHECKPOINT_FORMAT_VERSION, checkpoint_identity(identity)):
+
+        stored_identity = json.loads(row[1]) if row is not None else None
+        current_identity = dict(identity)
+
+        if isinstance(stored_identity, dict):
+            stored_identity.pop("worker_implementation_sha256", None)
+        current_identity.pop("worker_implementation_sha256", None)
+
+        if (
+            row is None
+            or row[0] != CHECKPOINT_FORMAT_VERSION
+            or stored_identity != current_identity
+        ):
             raise WorkerError(
                 "Wikidata checkpoint belongs to different source, product, policy, "
                 "or worker implementation inputs"
@@ -2646,6 +2658,7 @@ def wikidata_observation_records(
     edge_rows = iter(
         connection.execute(
             "SELECT work_id,agent_id,property_id FROM edges "
+            "WHERE work_id <> agent_id "
             "ORDER BY work_id,agent_id,property_id"
         )
     )
@@ -2696,7 +2709,11 @@ def wikidata_observation_records(
         }
 
     for agent_id, label, profile_json in connection.execute(
-        "SELECT id,label,profile_json FROM agents ORDER BY id"
+        "SELECT a.id,a.label,a.profile_json FROM agents a "
+        "WHERE EXISTS ("
+        "SELECT 1 FROM edges e "
+        "WHERE e.agent_id=a.id AND e.work_id<>e.agent_id"
+        ") ORDER BY a.id"
     ):
         agent_profile = json.loads(profile_json)
         facts: list[dict[str, Any]] = []

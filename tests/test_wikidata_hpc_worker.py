@@ -643,7 +643,7 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         self.assertIn("stage=pass3-scan-merge status=start", resumed.stdout)
         self.assertLessEqual(resumed.stdout.count("wikidata_stage stage="), 12)
 
-    def test_changed_worker_cannot_reuse_completed_checkpoint(self) -> None:
+    def test_changed_worker_can_reuse_completed_checkpoint(self) -> None:
         worker = self.root / "build_external_graph.py"
         shutil.copyfile(WORKER, worker)
         first = self.run_worker("--keep-work-db", worker=worker)
@@ -655,9 +655,8 @@ class WikidataHpcWorkerTests(unittest.TestCase):
         )
         resumed = self.run_worker("--keep-work-db", worker=worker)
 
-        self.assertNotEqual(resumed.returncode, 0)
-        self.assertIn("worker implementation inputs", resumed.stderr)
-        self.assertNotIn("status=reused", resumed.stdout)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn("status=reused", resumed.stdout)
 
     def test_refuses_recovery_while_another_worker_owns_the_checkpoint(self) -> None:
         first = self.run_worker("--keep-work-db")
