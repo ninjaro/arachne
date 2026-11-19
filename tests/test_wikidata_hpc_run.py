@@ -284,7 +284,9 @@ print("12345678;claix")
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(Path(self.metadata()["state_root"]), self.state)
+        self.assertEqual(
+            Path(self.metadata()["state_root"]).resolve(), self.state.resolve()
+        )
 
     def test_prepare_materializes_canonical_database_without_active_control(
         self,

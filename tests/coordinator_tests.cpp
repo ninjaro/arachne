@@ -1,4 +1,5 @@
 #include "arachne/coordinator.hpp"
+#include "arachne/paths.hpp"
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -248,7 +249,11 @@ TEST(Coordinator, InboxBaselineDetectsChangesAndWorkflowsDoNotChangeIt) {
     write(existing, "changed");
     const auto issues = ledger.verify_inbox(legacy_inbox);
     ASSERT_EQ(issues.size(), 1U);
-    EXPECT_EQ(issues.front().path, existing);
+    // The ledger reports canonical paths; temp roots may sit behind /var.
+    EXPECT_EQ(
+        std::filesystem::weakly_canonical(issues.front().path),
+        std::filesystem::weakly_canonical(existing)
+    );
 }
 
 TEST(Coordinator, AccumulationAndLogicalDateGuardsAreDeterministic) {
@@ -752,4 +757,38 @@ TEST(Coordinator, LockRootsMayNotTraverseSymlinks) {
         std::invalid_argument
     );
     EXPECT_TRUE(std::filesystem::is_empty(real));
+}
+
+TEST(Paths, UserOwnedSymlinksStayVisible) {
+    temporary_directory temporary;
+    const auto real = temporary.path() / "real";
+    const auto link = temporary.path() / "linked";
+    std::filesystem::create_directories(real);
+    std::filesystem::create_directory_symlink(real, link);
+
+    EXPECT_FALSE(arachne::paths::is_system_symlink(link));
+    const auto resolved
+        = arachne::paths::resolve_system_symlinks(link / "missing.sqlite");
+    EXPECT_EQ(resolved.filename(), "missing.sqlite");
+    EXPECT_EQ(resolved.parent_path().filename(), "linked");
+    EXPECT_TRUE(std::filesystem::is_symlink(resolved.parent_path()));
+}
+
+TEST(Paths, RootOwnedHostAliasesAreResolved) {
+    // macOS has /var and /tmp; merged-/usr Linux has /bin and /lib.
+    for (const std::filesystem::path candidate :
+         { "/var", "/tmp", "/bin", "/lib", "/sbin" }) {
+        if (!arachne::paths::is_system_symlink(candidate)
+            || !std::filesystem::is_directory(candidate)) {
+            continue;
+        }
+        const auto canonical = std::filesystem::canonical(candidate);
+        EXPECT_EQ(arachne::paths::resolve_system_symlinks(candidate), canonical);
+        EXPECT_EQ(
+            arachne::paths::resolve_system_symlinks(candidate / "absent" / "x"),
+            canonical / "absent" / "x"
+        );
+        return;
+    }
+    GTEST_SKIP() << "no root-owned directory alias on this host";
 }
