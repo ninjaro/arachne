@@ -44,7 +44,7 @@ else()
 endif()
 
 # Actor-neutral primitives and wire contracts have no transport/database link.
-add_library(arachne_common STATIC src/common/crypto.cpp)
+add_library(arachne_common STATIC src/common/crypto.cpp src/common/paths.cpp)
 target_include_directories(arachne_common PUBLIC include)
 target_compile_features(arachne_common PUBLIC cxx_std_23)
 

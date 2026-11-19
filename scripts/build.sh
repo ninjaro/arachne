@@ -3,10 +3,12 @@ set -euo pipefail
 
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="${ARACHNE_BUILD_DIR:-${source_root}/build}"
-build_type="${ARACHNE_BUILD_TYPE:-Debug}"
 if [[ -n "${HPCWORK:-}" ]]; then
+    # Debug adds -Werror, which is brittle under icpx and slow for long jobs.
+    build_type="${ARACHNE_BUILD_TYPE:-Release}"
     build_tests="${ARACHNE_BUILD_TESTS:-OFF}"
 else
+    build_type="${ARACHNE_BUILD_TYPE:-Debug}"
     build_tests="${ARACHNE_BUILD_TESTS:-ON}"
 fi
 cmake_extra=()
@@ -14,7 +16,9 @@ cmake_extra=()
 if [[ -n "${HPCWORK:-}" ]]; then
     dep_prefix="${ARACHNE_DEP_PREFIX:-${HPCWORK}/arachne-deps}"
 
-    ARACHNE_DEP_PREFIX="${dep_prefix}"         "${source_root}/hpc/claix/bootstrap"
+    ARACHNE_DEP_PREFIX="${dep_prefix}" "${source_root}/hpc/claix/bootstrap"
+    # The bootstrap may provide a newer CMake than RHEL 9's.
+    export PATH="${dep_prefix}/bin:${PATH}"
     intel_root="/cvmfs/software.hpc.rwth.de/Linux/RH9/x86_64/intel/sapphirerapids/software/intel-compilers/2024.2.0/compiler/2024.2"
     intel_runtime="${intel_root}/lib"
     gcc_runtime="/cvmfs/software.hpc.rwth.de/Linux/RH9/x86_64/intel/sapphirerapids/software/GCCcore/13.3.0/lib64"
@@ -53,6 +57,6 @@ fi
 cmake -S "${source_root}" -B "${build_root}" \
   -DCMAKE_BUILD_TYPE="${build_type}" \
   -DBUILD_TESTS="${build_tests}" \
-  "${cmake_extra[@]}" \
+  ${cmake_extra[@]+"${cmake_extra[@]}"} \
   "$@"
 cmake --build "${build_root}" --parallel

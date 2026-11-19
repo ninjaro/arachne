@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -23,6 +24,30 @@
 #include <vector>
 
 namespace {
+
+// SOCK_CLOEXEC/accept4 are Linux-only; fall back to FD_CLOEXEC elsewhere.
+int close_on_exec(int descriptor) noexcept {
+    if (descriptor >= 0) {
+        ::fcntl(descriptor, F_SETFD, FD_CLOEXEC);
+    }
+    return descriptor;
+}
+
+int socket_cloexec() noexcept {
+#ifdef SOCK_CLOEXEC
+    return ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
+    return close_on_exec(::socket(AF_INET, SOCK_STREAM, 0));
+#endif
+}
+
+int accept_cloexec(int listener) noexcept {
+#ifdef SOCK_CLOEXEC
+    return ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+#else
+    return close_on_exec(::accept(listener, nullptr, nullptr));
+#endif
+}
 
 using arachne::crypto::sha256;
 using arachne::pheidippides::acquired_artifact_v1;
@@ -79,7 +104,7 @@ public:
         , response_delay_(response_delay)
         , reuse_connection_(reuse_connection)
         , concurrent_connections_(concurrent_connections) {
-        listener_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        listener_ = socket_cloexec();
         if (listener_ < 0) {
             throw std::runtime_error("socket failed");
         }
@@ -214,7 +239,7 @@ private:
     void serve() noexcept {
         if (reuse_connection_) {
             const int connection
-                = ::accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
+                = accept_cloexec(listener_);
             if (connection < 0) {
                 return;
             }
@@ -246,7 +271,7 @@ private:
             handlers.reserve(responses_.size());
             for (const std::string& response : responses_) {
                 const int connection
-                    = ::accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
+                    = accept_cloexec(listener_);
                 if (connection < 0) {
                     break;
                 }
@@ -284,7 +309,7 @@ private:
         }
         for (const std::string& response : responses_) {
             const int connection
-                = ::accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
+                = accept_cloexec(listener_);
             if (connection < 0) {
                 return;
             }

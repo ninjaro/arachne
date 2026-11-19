@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# Install Arachne's native build/runtime dependencies for RWTH CLAIX (RHEL 9)
+# into ARACHNE_DEP_PREFIX. scripts/build.sh calls this when HPCWORK is set;
+# hpc/wikidata/run and the Slurm script put <prefix>/bin on PATH and
+# <prefix>/lib64 on LD_LIBRARY_PATH.
+#
+# Why each piece exists:
+# - CMake >= 3.28: CMakeLists.txt requires it; RHEL 9 ships 3.26.
+# - SQLite >= 3.37 with math functions: the schemas use STRICT tables and the
+#   engine uses sqrt()/ln(). RHEL 9 ships 3.34.1, which rejects STRICT, and
+#   the system python3 links the same library. The shared library here
+#   replaces it for both the C++ binary (rpath) and Python (LD_LIBRARY_PATH).
+# - utf8proc, nlohmann_json: not part of the base system.
+# libcurl comes from the system (libcurl-devel) or a loaded module.
+#
+# Every source archive is pinned by SHA-256. Each step is skipped once its
+# stamp exists, so re-running is cheap. Delete the prefix to rebuild.
+set -euo pipefail
+# Command substitutions must stop on the first failure too (bash >= 4.4).
+shopt -s inherit_errexit
+
+prefix="${ARACHNE_DEP_PREFIX:?ARACHNE_DEP_PREFIX must name the dependency prefix}"
+jobs="${ARACHNE_BOOTSTRAP_JOBS:-4}"
+
+sqlite_version=3540100
+sqlite_url="https://www.sqlite.org/2026/sqlite-autoconf-${sqlite_version}.tar.gz"
+sqlite_sha256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
+
+utf8proc_version=2.12.0
+utf8proc_url="https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v${utf8proc_version}.tar.gz"
+utf8proc_sha256=f564011d38b2888d583d510b08e69ffa15aa117155db1b9b49ef1dfe1fa25111
+
+json_version=3.12.0
+json_url="https://github.com/nlohmann/json/archive/refs/tags/v${json_version}.tar.gz"
+json_sha256=4b92eb0c06d10683f7447ce9406cb97cd4b453be18d7279320f7b2f025c10187
+
+cmake_minimum=3.28
+
+stamps="${prefix}/.stamps"
+work="${prefix}/.build"
+mkdir -p "${prefix}/bin" "${prefix}/include" "${prefix}/lib64" "${stamps}" "${work}"
+export PATH="${prefix}/bin:${PATH}"
+
+log() {
+    printf 'bootstrap: %s\n' "$*" >&2
+}
+
+fail() {
+    printf 'bootstrap: error: %s\n' "$*" >&2
+    exit 1
+}
+
+# fetch URL SHA256 -> prints the verified archive path
+fetch() {
+    local url="$1" expected="$2"
+    local archive="${work}/${expected}.tar.gz"
+    if [[ ! -f "${archive}" ]]; then
+        log "downloading ${url}"
+        curl -fsSL --retry 3 --retry-delay 5 -o "${archive}.part" "${url}"
+        mv "${archive}.part" "${archive}"
+    fi
+    local actual
+    actual="$(sha256sum "${archive}" | cut -d' ' -f1)"
+    if [[ "${actual}" != "${expected}" ]]; then
+        rm -f "${archive}"
+        fail "checksum mismatch for ${url}: expected ${expected}, got ${actual}"
+    fi
+    printf '%s\n' "${archive}"
+}
+
+# unpack ARCHIVE NAME -> prints the fresh source directory
+unpack() {
+    local archive="$1" name="$2"
+    local directory="${work}/${name}"
+    rm -rf "${directory}"
+    mkdir -p "${directory}"
+    tar -xzf "${archive}" -C "${directory}" --strip-components=1
+    printf '%s\n' "${directory}"
+}
+
+version_at_least() {
+    [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+}
+
+require_libcurl() {
+    local probe="${work}/curl-probe.c"
+    printf '#include <curl/curl.h>\nint main(void) { return curl_global_init(CURL_GLOBAL_DEFAULT); }\n' >"${probe}"
+    if ! cc "${probe}" -o "${work}/curl-probe" -lcurl >/dev/null 2>&1; then
+        fail "libcurl headers/library not found; load a cURL module or install libcurl-devel, then re-run"
+    fi
+}
+
+install_cmake() {
+    local current=""
+    if command -v cmake >/dev/null 2>&1; then
+        current="$(cmake --version | head -n1 | awk '{print $3}')"
+    fi
+    if [[ -n "${current}" ]] && version_at_least "${current}" "${cmake_minimum}"; then
+        return
+    fi
+    log "CMake ${current:-missing} < ${cmake_minimum}; installing a CMake wheel"
+    python3 -m venv "${prefix}/tools/cmake"
+    "${prefix}/tools/cmake/bin/python" -m pip install --quiet --upgrade pip
+    "${prefix}/tools/cmake/bin/python" -m pip install --quiet "cmake>=${cmake_minimum},<5"
+    ln -sf "${prefix}/tools/cmake/bin/cmake" "${prefix}/bin/cmake"
+    ln -sf "${prefix}/tools/cmake/bin/ctest" "${prefix}/bin/ctest"
+    hash -r
+}
+
+install_sqlite() {
+    local stamp="${stamps}/sqlite-${sqlite_version}"
+    [[ -f "${stamp}" ]] && return
+    local archive source
+    archive="$(fetch "${sqlite_url}" "${sqlite_sha256}")"
+    source="$(unpack "${archive}" sqlite)"
+    log "building SQLite ${sqlite_version}"
+    # Flags follow the RHEL package plus math functions, so Python's _sqlite3
+    # finds every symbol it was linked against.
+    cc -O2 -fPIC \
+        -DSQLITE_THREADSAFE=1 \
+        -DSQLITE_ENABLE_MATH_FUNCTIONS \
+        -DSQLITE_ENABLE_COLUMN_METADATA \
+        -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS \
+        -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 \
+        -DSQLITE_ENABLE_RTREE \
+        -DSQLITE_ENABLE_DBSTAT_VTAB \
+        -DSQLITE_ENABLE_UNLOCK_NOTIFY \
+        -DSQLITE_SECURE_DELETE \
+        -DSQLITE_DISABLE_DIRSYNC \
+        -c "${source}/sqlite3.c" -o "${source}/sqlite3.o"
+    cc -shared -Wl,-soname,libsqlite3.so.0 \
+        -o "${prefix}/lib64/libsqlite3.so.0" "${source}/sqlite3.o" \
+        -lm -ldl -lpthread
+    ln -sf libsqlite3.so.0 "${prefix}/lib64/libsqlite3.so"
+    install -m 0644 "${source}/sqlite3.h" "${source}/sqlite3ext.h" "${prefix}/include/"
+    touch "${stamp}"
+}
+
+install_cmake_project() {
+    local name="$1" version="$2" url="$3" sha256="$4"
+    shift 4
+    local stamp="${stamps}/${name}-${version}"
+    [[ -f "${stamp}" ]] && return
+    local archive source
+    archive="$(fetch "${url}" "${sha256}")"
+    source="$(unpack "${archive}" "${name}")"
+    log "building ${name} ${version}"
+    cmake -S "${source}" -B "${source}/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${prefix}" \
+        -DCMAKE_INSTALL_LIBDIR=lib64 \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DBUILD_SHARED_LIBS=OFF \
+        "$@"
+    cmake --build "${source}/build" --parallel "${jobs}"
+    cmake --install "${source}/build"
+    touch "${stamp}"
+}
+
+require_libcurl
+install_cmake
+install_sqlite
+install_cmake_project utf8proc "${utf8proc_version}" "${utf8proc_url}" "${utf8proc_sha256}"
+install_cmake_project nlohmann_json "${json_version}" "${json_url}" "${json_sha256}" \
+    -DJSON_BuildTests=OFF -DJSON_Install=ON
+
+LD_LIBRARY_PATH="${prefix}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    python3 - <<'EOF' || fail "python3 still loads an SQLite without STRICT/math support"
+import sqlite3
+connection = sqlite3.connect(":memory:")
+connection.execute("CREATE TABLE probe (value REAL) STRICT")
+connection.execute("SELECT sqrt(4.0), ln(1.0)").fetchone()
+EOF
+log "dependencies ready in ${prefix}"

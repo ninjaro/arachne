@@ -2,6 +2,7 @@
 
 #include "arachne/contracts.hpp"
 #include "arachne/crypto.hpp"
+#include "arachne/paths.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -159,7 +160,10 @@ namespace {
     class database final {
     public:
         database(const fs::path& path, const int flags) {
-            const std::string native = path.string();
+            // SQLITE_OPEN_NOFOLLOW rejects every symlink component, including
+            // host aliases such as /var or /hpcwork; resolve only those.
+            const std::string native
+                = arachne::paths::resolve_system_symlinks(path).string();
             if (sqlite3_open_v2(
                     native.c_str(), &value_,
                     flags | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_URI
@@ -300,7 +304,7 @@ namespace {
 
     void attach_product_read_only(database& hints, const fs::path& path) {
         const std::string absolute
-            = fs::absolute(path).lexically_normal().string();
+            = arachne::paths::resolve_system_symlinks(path).string();
         statement attach(hints.native(), "ATTACH DATABASE ? AS product");
         attach.bind(1, "file:" + absolute + "?mode=ro");
         attach.execute();

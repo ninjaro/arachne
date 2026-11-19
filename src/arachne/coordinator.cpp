@@ -1,6 +1,7 @@
 #include "arachne/coordinator.hpp"
 
 #include "arachne/crypto.hpp"
+#include "arachne/paths.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -236,7 +237,10 @@ namespace {
             if (status.type() == std::filesystem::file_type::not_found) {
                 break;
             }
-            if (std::filesystem::is_symlink(status)) {
+            // Root-owned links are the host's layout (/var, /home, /hpcwork);
+            // only links another user could create or redirect are refused.
+            if (std::filesystem::is_symlink(status)
+                && !arachne::paths::is_system_symlink(current)) {
                 throw std::invalid_argument(
                     std::string(context) + " must not traverse a symbolic link"
                 );

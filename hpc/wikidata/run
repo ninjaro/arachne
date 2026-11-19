@@ -979,6 +979,8 @@ def command_compute(arguments: argparse.Namespace) -> int:
                     "--keep-work-db",
                 ],
                 "Wikidata extraction",
+                # The worker's STRICT schemas need the bootstrapped SQLite.
+                env=claix_runtime_environment(),
             )
             required_results = ["external_graph", "image_hints", "report"]
             if "mapping_review" in metadata:

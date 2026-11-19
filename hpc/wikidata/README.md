@@ -21,6 +21,15 @@ scripts/build.sh
 ARACHNE_STATE_REPOSITORY="$HOME/arachne-data" hpc/wikidata/run prepare
 ```
 
+On CLAIX, `scripts/build.sh` first runs `hpc/claix/bootstrap`, which installs
+pinned, checksum-verified dependencies into `$HPCWORK/arachne-deps`: CMake 3.28+
+when the system one is older, SQLite 3.54 with math functions (RHEL 9's 3.34
+rejects the schemas' `STRICT` tables), utf8proc and nlohmann_json. libcurl must
+come from the system or a loaded module. The first build therefore needs
+network access; later builds reuse the prefix. Delete the prefix to rebuild it.
+On CLAIX the build defaults to `Release` without tests; override it with
+`ARACHNE_BUILD_TYPE` or `ARACHNE_BUILD_TESTS`.
+
 `prepare` creates a run beneath `$HPCWORK/arachne/wikidata`, materializes its
 operations configuration, validates the selected canonical database, creates a
 content-addressed transient snapshot and generic export beneath that run, and
